@@ -407,7 +407,21 @@ async function procesarEvento(evento) {
         return;
     }
 
-    const threadId = evento.threadId || mensaje.threadId;
+  
+const threadId = evento.threadId || mensaje.threadId;
+
+// DIAGNÓSTICO DE IDENTIFICADORES ANARCHY
+console.log(
+    '📩 [DATOS DEL CHAT]:',
+    JSON.stringify({
+        threadId: evento.threadId ?? null,
+        messageThreadId: mensaje.threadId ?? null,
+        messageId: mensaje.id ?? null,
+        chatId: evento.chatId ?? null,
+        conversationId: evento.conversationId ?? null
+    }, null, 2)
+);
+
 
     if (
         threadId === undefined ||
