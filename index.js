@@ -1,9 +1,9 @@
-
 const express = require('express');
 const crypto = require('crypto');
 
 const app = express();
-const SECRET = process.env.WEBHOOK_SECRET;
+// Asegúrate de que esta variable coincida exactamente con la que creaste en Render (WEBHOOK_SECRET o WEB_TOKEN)
+const SECRET = process.env.WEBHOOK_SECRET || process.env.WEB_TOKEN;
 
 // Estado del bot en memoria
 let estadoBot = {
@@ -23,6 +23,9 @@ app.use(express.json({
 app.post('/', (req, res) => {
   const timestamp = req.headers['x-anarchy-bot-timestamp'];
   const signature = req.headers['x-anarchy-bot-signature'];
+
+  // Log para revisar qué datos llegan desde Anarchy
+  console.log("BODY RECIBIDO:", JSON.stringify(req.body));
 
   if (!timestamp || !signature) {
     return res.status(401).send('Faltan cabeceras de seguridad.');
@@ -51,18 +54,23 @@ app.post('/', (req, res) => {
 
   const evento = req.body;
 
+  // Extraer el texto del mensaje enviado en Anarchy
+  const contenidoTexto = evento.content || (evento.message && evento.message.content) || (evento.data && evento.data.content);
+
   // Procesar comandos de texto
-  if (evento && evento.content) {
-    const texto = evento.content.trim();
+  if (contenidoTexto) {
+    const texto = contenidoTexto.trim();
     const args = texto.split(' ');
     const comando = args[0].toLowerCase();
+    
+    console.log(`Comando detectado: ${comando}`);
 
     // 📚 -ayuda
     if (comando === '-ayuda') {
       return res.status(200).json({
         type: 4,
         data: {
-          content: "🤖 **RBSN — CENTRO DE AYUDA**\n\n📖 **COMANDOS BÁSICOS**\n🔊 `-leerchat` — Activar lectura.\n🔇 `-noleerchat` — Desactivar lectura.\n📊 `-estadochat` — Consultar estado.\n🎙️ `-entrar-sala` — Entrar a la llamada.\n🚪 `-salir` — Salir de la llamada.\n🗣️ `-voz` — Probar la voz.\n📚 `-ayuda` — Mostrar comandos.\n\n━━━━━━━━━━━━━━\n\n🎵 **COMANDOS DE MÚSICA**\n▶️ `-musica` — Activar reproductor.\n🔎 `-play <canción>` — Buscar y reproducir.\n⏸️ `-pausa` — Pausar música.\n▶️ `-reanudar` — Continuar reproducción.\n⏭️ `-siguiente` — Siguiente canción.\n⏹️ `-pararmusica` — Detener música.\n🔊 `-volumen` — Consultar volumen.\n🎚️ `-volumen <0-100>` — Ajustar volumen."
+          content: "🤖 **KATHERINE — CENTRO DE AYUDA**\n\n📖 **COMANDOS BÁSICOS**\n🔊 `-leerchat` — Activar lectura.\n🔇 `-noleerchat` — Desactivar lectura.\n📊 `-estadochat` — Consultar estado.\n🎙️ `-entrar-sala` — Entrar a la llamada.\n🚪 `-salir` — Salir de la llamada.\n🗣️ `-voz` — Probar la voz.\n📚 `-ayuda` — Mostrar comandos.\n\n━━━━━━━━━━━━━━\n\n🎵 **COMANDOS DE MÚSICA**\n▶️ `-musica` — Activar reproductor.\n🔎 `-play <canción>` — Buscar y reproducir.\n⏸️ `-pausa` — Pausar música.\n▶️ `-reanudar` — Continuar reproducción.\n⏭️ `-siguiente` — Siguiente canción.\n⏹️ `-pararmusica` — Detener música.\n🔊 `-volumen` — Consultar volumen.\n🎚️ `-volumen <0-100>` — Ajustar volumen."
         }
       });
     }
@@ -72,7 +80,7 @@ app.post('/', (req, res) => {
       estadoBot.lectura = true;
       return res.status(200).json({
         type: 4,
-        data: { content: "🔊 **RBSN:** Lectura del chat **ACTIVADA**." }
+        data: { content: "🔊 **Katherine:** Lectura del chat **ACTIVADA**." }
       });
     }
 
@@ -81,7 +89,7 @@ app.post('/', (req, res) => {
       estadoBot.lectura = false;
       return res.status(200).json({
         type: 4,
-        data: { content: "🔇 **RBSN:** Lectura del chat **DESACTIVADA**." }
+        data: { content: "🔇 **Katherine:** Lectura del chat **DESACTIVADA**." }
       });
     }
 
@@ -94,7 +102,7 @@ app.post('/', (req, res) => {
       return res.status(200).json({
         type: 4,
         data: {
-          content: `📊 **RBSN — ESTADO DEL CHAT**\n\nLectura: ${estadoLectura}\nMicrófono: ${estadoMic}\nEstado: ${estadoLlamada}`
+          content: `📊 **KATHERINE — ESTADO DEL CHAT**\n\nLectura: ${estadoLectura}\nMicrófono: ${estadoMic}\nEstado: ${estadoLlamada}`
         }
       });
     }
@@ -105,7 +113,7 @@ app.post('/', (req, res) => {
       return res.status(200).json({
         type: 4,
         data: {
-          content: "🎙️ **RBSN — CONEXIÓN**\n\n🟢 Rbsn entró a la llamada y publicó su micrófono.\n" + (estadoBot.lectura ? "🔊 Lectura: ACTIVADA." : "🔇 Lectura: DESACTIVADA.\nPara comenzar a leer, escribí \"-leerchat\".")
+          content: "🎙️ **KATHERINE — CONEXIÓN**\n\n🟢 Katherine entró a la llamada y publicó su micrófono.\n" + (estadoBot.lectura ? "🔊 Lectura: ACTIVADA." : "🔇 Lectura: DESACTIVADA.\nPara comenzar a leer, escribí \"-leerchat\".")
         }
       });
     }
@@ -116,7 +124,7 @@ app.post('/', (req, res) => {
       estadoBot.reproduciendo = false;
       return res.status(200).json({
         type: 4,
-        data: { content: "🚪 **RBSN:** Salió de la llamada y desconectó el micrófono." }
+        data: { content: "🚪 **Katherine:** Salió de la llamada y desconectó el micrófono." }
       });
     }
 
@@ -124,7 +132,7 @@ app.post('/', (req, res) => {
     if (comando === '-voz') {
       return res.status(200).json({
         type: 4,
-        data: { content: "🗣️ **RBSN:** Probando síntesis de voz... ¡Todo funciona correctamente!" }
+        data: { content: "🗣️ **Katherine:** Probando síntesis de voz... ¡Todo funciona correctamente!" }
       });
     }
 
@@ -136,7 +144,7 @@ app.post('/', (req, res) => {
           estadoBot.volumen = nuevoVol;
           return res.status(200).json({
             type: 4,
-            data: { content: `🎚️ **RBSN:** Volumen ajustado a **${estadoBot.volumen}/100**.` }
+            data: { content: `🎚️ **Katherine:** Volumen ajustado a **${estadoBot.volumen}/100**.` }
           });
         } else {
           return res.status(200).json({
@@ -147,7 +155,7 @@ app.post('/', (req, res) => {
       }
       return res.status(200).json({
         type: 4,
-        data: { content: `🔊 **RBSN:** Volumen actual de música: **${estadoBot.volumen}/100**.` }
+        data: { content: `🔊 **Katherine:** Volumen actual de música: **${estadoBot.volumen}/100**.` }
       });
     }
 
@@ -165,7 +173,7 @@ app.post('/', (req, res) => {
       return res.status(200).json({
         type: 4,
         data: {
-          content: `🎵 **RBSN MUSIC**\n\n▶️ **Reproduciendo:** ${busqueda}\n🔊 **Volumen:** ${estadoBot.volumen}/100`
+          content: `🎵 **KATHERINE MUSIC**\n\n▶️ **Reproduciendo:** ${busqueda}\n🔊 **Volumen:** ${estadoBot.volumen}/100`
         }
       });
     }
@@ -175,7 +183,7 @@ app.post('/', (req, res) => {
       estadoBot.reproduciendo = false;
       return res.status(200).json({
         type: 4,
-        data: { content: "⏸️ **RBSN:** Música pausada." }
+        data: { content: "⏸️ **Katherine:** Música pausada." }
       });
     }
 
@@ -184,7 +192,7 @@ app.post('/', (req, res) => {
       estadoBot.reproduciendo = true;
       return res.status(200).json({
         type: 4,
-        data: { content: "▶️ **RBSN:** Reproducción reanudada." }
+        data: { content: "▶️ **Katherine:** Reproducción reanudada." }
       });
     }
 
@@ -194,15 +202,16 @@ app.post('/', (req, res) => {
       estadoBot.cancionActual = null;
       return res.status(200).json({
         type: 4,
-        data: { content: "⏹️ **RBSN:** Reproducción detenida y lista de reproducción limpiada." }
+        data: { content: "⏹️ **Katherine:** Reproducción detenida y lista de reproducción limpiada." }
       });
     }
   }
 
-  res.status(200).send('OK');
+  // Respuesta por defecto si entra otra cosa
+  return res.status(200).send('OK');
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Servidor RBSN activo en el puerto ${PORT}`);
+  console.log(`Servidor de Katherine activo en el puerto ${PORT}`);
 });
