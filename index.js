@@ -26,7 +26,7 @@ process.on('unhandledRejection', (reason) => {
 });
 
 // ============================================================================
-// GESTIÓN DE ESTADOS POR HILO (THREAD)
+// GESTIÓN DE ESTADOS POR HILO (THREAD) CON REGISTRO DE EVENTOS
 // ============================================================================
 const threadStates = new Map();
 
@@ -38,8 +38,10 @@ function obtenerEstadoThread(threadId) {
             volumen: 30,
             reproduciendo: false,
             cancionActual: null,
+            mensajesRecibidos: 0,
             mensajesEnviados: 0,
-            ultimoError: 'Ninguno'
+            ultimoError: 'Ninguno',
+            ultimoComando: 'Ninguno'
         });
     }
     return threadStates.get(threadId);
@@ -58,7 +60,7 @@ app.use(express.json({
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
 // ============================================================================
-// CLIENTE HTTP CON LOGS DE COMUNICACIÓN DETALLADOS
+// CLIENTE HTTP CON LOGS Y DIAGNÓSTICO PROFUNDO DE COMUNICACIÓN
 // ============================================================================
 async function anarchyAPI(endpoint, method = 'GET', body = null) {
     const url = `https://api.anarchyapps.org/bot-api/v1${endpoint}`;
@@ -95,24 +97,24 @@ async function anarchyAPI(endpoint, method = 'GET', body = null) {
     }
 }
 
-// Verificación de credenciales al iniciar
-async function verificarTokenBot() {
+// 🩺 DIAGNÓSTICO 1: Verificación de Autenticación y Estado Global con la API
+async function ejecutarDiagnosticoGlobalAPI() {
     console.log('\n============================================================');
-    console.log('🔍 [DIAGNÓSTICO INICIAL] Verificando token con Anarchy...');
+    console.log('🩺 [DIAGNÓSTICO 1 - API GLOBAL] Consultando estado del Bot (/me)...');
     console.log('============================================================');
     
     const resultado = await anarchyAPI('/me', 'GET');
     
     if (resultado.ok) {
-        console.log('✅ [DIAGNÓSTICO EXITOSO] El bot está autenticado correctamente.');
-        console.log('📦 Datos del Bot:', JSON.stringify(resultado.data, null, 2));
+        console.log('✅ [API GLOBAL OK] Conexión y Token validados con éxito.');
+        console.log('📦 Info del Bot en Anarchy:', JSON.stringify(resultado.data, null, 2));
     } else {
-        console.error('❌ [DIAGNÓSTICO FALLIDO] El token BOT_TOKEN es inválido o la API no responde.');
+        console.error('❌ [API GLOBAL ERROR] El token BOT_TOKEN no es válido o la API rechazó la credencial.');
     }
     console.log('============================================================\n');
 }
 
-// Sistema de envío con diagnóstico de comunicación en vivo
+// Sistema de envío con diagnóstico de comunicación en vivo y múltiples fallbacks
 const enviarRespuestaChat = async (threadId, texto) => {
     const estado = obtenerEstadoThread(threadId);
     console.log(`\n📤 [INTENTO DE ENVÍO] Hacia Thread ID: ${threadId}`);
@@ -120,7 +122,7 @@ const enviarRespuestaChat = async (threadId, texto) => {
     // Intento 1: Ruta específica del thread
     let resApi = await anarchyAPI(`/threads/${encodeURIComponent(threadId)}/messages`, 'POST', { content: texto });
 
-    // Intento 2: Fallback al endpoint general si da 403 o 404
+    // Intento 2: Fallback al endpoint general si da error de ruta/permiso (403 o 404)
     if (!resApi.ok && (resApi.status === 403 || resApi.status === 404)) {
         console.warn(`⚠️ [FALLBACK ACTIVADO] Falló la ruta del thread (${resApi.status}). Probando /messages general...`);
         resApi = await anarchyAPI('/messages', 'POST', {
@@ -131,11 +133,11 @@ const enviarRespuestaChat = async (threadId, texto) => {
 
     if (resApi.ok) {
         estado.mensajesEnviados++;
-        estado.ultimoError = 'Ninguno (Último envío exitoso)';
+        estado.ultimoError = 'Ninguno';
         console.log(`🎉 [COMUNICACIÓN EXITOSA] Mensaje entregado correctamente en thread ${threadId}`);
     } else {
         estado.ultimoError = `Status ${resApi.status}: ${JSON.stringify(resApi.data)}`;
-        console.error(`🚨 [FALLO DE COMUNICACIÓN] No se pudo enviar el mensaje. Razón:`, estado.ultimoError);
+        console.error(`🚨 [FALLO DE COMUNICACIÓN]:`, estado.ultimoError);
     }
 
     return resApi;
@@ -145,28 +147,40 @@ const enviarRespuestaChat = async (threadId, texto) => {
 // ENDPOINT PRINCIPAL DEL WEBHOOK
 // ============================================================================
 app.post('/', async (req, res) => {
-    // Responder 200 OK inmediatamente a Anarchy
+    // 🛑 LOG UNIVERSAL DE ENTRADA: Registra CUALQUIER evento que llegue a Render
+    console.log("\n========================================================");
+    console.log("📥 [WEBHOOK RECIBIDO] Petición POST entrante en '/'");
+    console.log("📦 BODY RECIBIDO:", JSON.stringify(req.body, null, 2));
+    console.log("========================================================");
+
+    // Responder 200 OK inmediatamente para cumplir con la API de Anarchy
     res.status(200).send('OK');
 
     const evento = req.body || {};
     const threadId = evento.threadId || evento.message?.threadId;
     const contenidoTexto = evento.message && evento.message.content;
 
-    if (!contenidoTexto || !threadId) return;
+    if (!contenidoTexto || !threadId) {
+        console.log("⚠️ [AVISO] La petición llegó pero le falta 'threadId' o 'message.content'.");
+        return;
+    }
+
+    const estado = obtenerEstadoThread(threadId);
+    estado.mensajesRecibidos++;
 
     const texto = contenidoTexto.trim();
 
-    // 🛑 FILTRO ESTRICTO: Solo procesar comandos con "!"
+    // 🛑 FILTRO ESTRICTO: Solo procesar comandos que inicien con "!"
     if (!texto.startsWith('!')) {
         return;
     }
 
     const args = texto.split(/\s+/);
     const comando = args[0].toLowerCase();
-    const estado = obtenerEstadoThread(threadId);
+    estado.ultimoComando = comando;
     const autor = evento.message?.author?.nickname || evento.message?.author?.name || 'Desconocido';
 
-    console.log(`\n🎯 [COMANDO RECIBIDO] "${comando}" | Usuario: ${autor} | Thread: ${threadId}`);
+    console.log(`\n🎯 [COMANDO VÁLIDO DETECTADO] "${comando}" | Usuario: ${autor} | Thread: ${threadId}`);
 
     let respuesta = null;
 
@@ -176,12 +190,9 @@ app.post('/', async (req, res) => {
                         "📖 **COMANDOS DISPONIBLES**\n" +
                         "🔊 `!leerchat` — Activar lectura.\n" +
                         "🔇 `!noleerchat` — Desactivar lectura.\n" +
-                        "📊 `!estadochat` — Consultar estado.\n" +
-                        "🩺 `!diagnostico` — Ver estado de comunicación y logs.\n" +
-                        "🏓 `!ping` — Probar latencia.\n\n" +
-                        "🎵 **MÚSICA**\n" +
-                        "▶️ `!play <canción>` — Reproducir.\n" +
-                        "🔊 `!volumen <0-100>` — Ajustar volumen.";
+                        "📊 `!estadochat` — Consultar estado del hilo.\n" +
+                        "🩺 `!diagnostico` — Ejecutar ambos diagnósticos.\n" +
+                        "🏓 `!ping` — Probar latencia.";
             break;
 
         case '!ping': {
@@ -191,19 +202,28 @@ app.post('/', async (req, res) => {
         }
 
         case '!estadochat':
-            respuesta = `📊 **KATHERINE — ESTADO**\n🏠 **Thread ID:** \`${threadId}\`\n🔊 **Lectura:** ${estado.lectura ? "🟢" : "🔴"}\n📤 **Envíos exitosos:** ${estado.mensajesEnviados}`;
+            respuesta = `📊 **KATHERINE — ESTADO DEL HILO**\n🏠 **Thread ID:** \`${threadId}\`\n🔊 **Lectura:** ${estado.lectura ? "🟢 ACTIVADA" : "🔴 DESACTIVADA"}\n📥 **Recibidos:** ${estado.mensajesRecibidos}\n📤 **Envíos exitosos:** ${estado.mensajesEnviados}`;
             break;
 
+        // 🩺 DIAGNÓSTICO 2: Reporte detallado en tiempo real dentro del chat
         case '!diagnostico': {
             const uptimeSec = Math.floor((Date.now() - startTime) / 1000);
             const mem = process.memoryUsage();
-            respuesta = "🩺 **KATHERINE — REPORTE DE DIAGNÓSTICO**\n\n" +
+            
+            // Disparamos también el Diagnóstico 1 en segundo plano hacia la consola de Render
+            ejecutarDiagnosticoGlobalAPI();
+
+            respuesta = "🩺 **KATHERINE — REPORTE DE DIAGNÓSTICO INTEGRAL**\n\n" +
+                        "📊 **[DIAGNÓSTICO 2 - ESTADO LOCAL / HILO]**\n" +
                         `⏱️ **Uptime del Bot:** ${uptimeSec}s\n` +
-                        `🧠 **Memoria RAM:** ${Math.round(mem.heapUsed / 1024 / 1024)} MB\n` +
+                        `🧠 **Memoria RAM Usada:** ${Math.round(mem.heapUsed / 1024 / 1024)} MB\n` +
                         `🧵 **Hilos activos en caché:** ${threadStates.size}\n` +
-                        `📤 **Mensajes enviados con éxito:** ${estado.mensajesEnviados}\n` +
-                        `⚠️ **Último error registrado:** \`${estado.ultimoError}\`\n\n` +
-                        `💡 *Revisa los logs de Render para ver la respuesta detallada de la API de Anarchy.*`;
+                        `💬 **Mensajes capturados en este hilo:** ${estado.mensajesRecibidos}\n` +
+                        `📤 **Envíos exitosos en este hilo:** ${estado.mensajesEnviados}\n` +
+                        `🎯 **Último comando registrado:** \`${estado.ultimoComando}\`\n` +
+                        `⚠️ **Último error de red:** \`${estado.ultimoError}\`\n\n` +
+                        `🔍 **[DIAGNÓSTICO 1 - API]**\n` +
+                        `Se acaba de disparar una consulta de verificación (\`/me\`) a los servidores de Anarchy. Revisa los logs de Render para ver la respuesta completa.`;
             break;
         }
 
@@ -216,29 +236,6 @@ app.post('/', async (req, res) => {
             estado.lectura = false;
             respuesta = "🔇 **Katherine:** Lectura del chat **DESACTIVADA**.";
             break;
-
-        case '!play': {
-            const busqueda = args.slice(1).join(' ');
-            if (!busqueda) {
-                respuesta = "⚠️ Especifica la canción. Ejemplo: `!play Follow Me`";
-            } else {
-                estado.reproduciendo = true;
-                estado.cancionActual = busqueda;
-                respuesta = `🎵 **KATHERINE MUSIC**\n\n▶️ **Reproduciendo:** ${busqueda}\n🎚️ **Volumen:** ${estado.volumen}/100`;
-            }
-            break;
-        }
-
-        case '!volumen': {
-            const vol = Number(args[1]);
-            if (isNaN(vol) || vol < 0 || vol > 100) {
-                respuesta = `🎚️ Volumen actual: **${estado.volumen}/100**. Usa \`!volumen <0-100>\`.`;
-            } else {
-                estado.volumen = vol;
-                respuesta = `🎚️ Volumen ajustado a **${vol}/100**.`;
-            }
-            break;
-        }
 
         default:
             return;
@@ -260,7 +257,7 @@ app.get('/', (req, res) => {
 
 const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`[KATHERINE SERVER] Servidor activo en el puerto ${PORT}`);
-    verificarTokenBot();
+    ejecutarDiagnosticoGlobalAPI();
 });
 
 server.on('error', (err) => console.error('💥 [SERVER ERROR]:', err));
