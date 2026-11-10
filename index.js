@@ -82,7 +82,7 @@ function descargarIPv4(direccion, intento = 1) {
       autoSelectFamily: false,
       headers: {
         "User-Agent": "Rbsn-Music/1.0",
-        "Accept": "*/*"
+        "Accept": "/"
       }
     };
 
@@ -194,7 +194,7 @@ async function descargarAudioJamendo(direccion) {
   for (let intento = 1; intento <= 3; intento++) {
     try {
       console.log(
-        `Descarga Jamendo IPv4: intento ${intento}/3`
+        Descarga Jamendo IPv4: intento ${intento}/3
       );
 
       const audio = await descargarIPv4(direccion);
@@ -217,7 +217,7 @@ async function descargarAudioJamendo(direccion) {
       ultimoError = error;
 
       console.error(
-        `Error de descarga ${intento}/3:`,
+        Error de descarga ${intento}/3:,
         error.message,
         error.code || ""
       );
@@ -240,7 +240,7 @@ async function descargarAudioJamendo(direccion) {
 async function enviarMensaje(threadId, contenido) {
   colaMensajes = colaMensajes.then(async () => {
     const respuesta = await fetch(
-      `https://api.anarchyapps.org/bot-api/v1/threads/${threadId}/messages`,
+      https://api.anarchyapps.org/bot-api/v1/threads/${threadId}/messages,
       {
         method: "POST",
         headers: {
@@ -1451,7 +1451,7 @@ async function entrarSala() {
 
   try {
     const respuesta = await fetch(
-      `https://api.anarchyapps.org/bot-api/v1/live-rooms/${CHAT_ID}/join`,
+      https://api.anarchyapps.org/bot-api/v1/live-rooms/${CHAT_ID}/join,
       {
         method: "POST",
         headers: {
@@ -1570,7 +1570,7 @@ async function entrarSala() {
 
     try {
       await fetch(
-        `https://api.anarchyapps.org/bot-api/v1/live-rooms/${CHAT_ID}/leave`,
+        https://api.anarchyapps.org/bot-api/v1/live-rooms/${CHAT_ID}/leave,
         {
           method: "POST",
           headers: {
@@ -1632,7 +1632,7 @@ async function salirSala() {
   if (salaActiva) {
     try {
       await fetch(
-        `https://api.anarchyapps.org/bot-api/v1/live-rooms/${salaActiva}/leave`,
+        https://api.anarchyapps.org/bot-api/v1/live-rooms/${salaActiva}/leave,
         {
           method: "POST",
           headers: {
@@ -2097,6 +2097,6 @@ const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
   console.log(
-    `Rbsn iniciado en el puerto ${PORT}`
+    Rbsn iniciado en el puerto ${PORT}
   );
 });
