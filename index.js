@@ -229,6 +229,7 @@ app.post('/', async (req, res) => {
     }
 });
 
+// Ruta web simple para verificar que el servidor está vivo
 app.get('/', (req, res) => {
     res.status(200).json({ 
         bot: 'Katherine', 
@@ -237,7 +238,12 @@ app.get('/', (req, res) => {
     });
 });
 
+// ============================================================================
+// INICIO DEL SERVIDOR Y CONSULTA AUTOMÁTICA DE DIAGNÓSTICO
+// ============================================================================
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`[KATHERINE SERVER] Servidor activo en el puerto ${PORT}`);
-    consultarBotMe();
+    
+    // 👈 ESTO ES LO QUE HACE QUE SALGA EN LOS LOGS AUTOMÁTICAMENTE AL ARRANCAR
+    consultarBotMe(); 
 });
