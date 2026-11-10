@@ -37,7 +37,7 @@ let estadoBot = {
 };
 
 // ============================================================================
-// MIDDLEWARE EXPRESS (Captura rawBody para HMAC)
+// MIDDLEWARE EXPRESS (Captura rawBody para validación HMAC)
 // ============================================================================
 app.use(express.json({
     limit: '2mb',
@@ -79,7 +79,16 @@ async function anarchyAPI(endpoint, method = 'GET', body = null) {
     }
 }
 
-// Enviar respuesta al chat
+// 🔍 DIAGNÓSTICO AL ARRANCAR: Consulta la info oficial del bot en la API
+async function consultarBotMe() {
+    console.log("\n=======================================================");
+    console.log("🔍 [CONSULTANDO /me EN LA API DE ANARCHY]");
+    const res = await anarchyAPI('/me', 'GET');
+    console.log("📌 DATOS DE MI BOT EN LA API:", JSON.stringify(res.data, null, 2));
+    console.log("=======================================================\n");
+}
+
+// Enviar respuesta al chat público
 const enviarRespuestaChat = async (threadId, texto) => {
     const payload = { content: texto };
     console.log(`[ENVIANDO MENSAJE] Thread: ${threadId}`);
@@ -97,7 +106,7 @@ app.post('/', async (req, res) => {
     const timestamp = req.headers['x-anarchy-bot-timestamp'];
     const signature = req.headers['x-anarchy-bot-signature'];
 
-    // Validación de firma HMAC
+    // Validación de firma HMAC (Regla 4)
     if (SECRET && timestamp && signature) {
         try {
             const expected = crypto
@@ -119,7 +128,7 @@ app.post('/', async (req, res) => {
         }
     }
 
-    // Responder 200 OK inmediatamente (Regla de los 5 segundos)
+    // Responder 200 OK de inmediato (Regla de los 5 segundos)
     res.status(200).send('OK');
 
     const evento = req.body || {};
@@ -230,4 +239,5 @@ app.get('/', (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`[KATHERINE SERVER] Servidor activo en el puerto ${PORT}`);
+    consultarBotMe();
 });
