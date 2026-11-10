@@ -11,7 +11,7 @@ app.use(express.json({
   }
 }));
 
-// Función para enviar mensajes al chat con la estructura correcta y logs de depuración
+// Función para enviar mensajes al chat con la estructura correcta
 async function enviarMensajeAnarchy(ndcId, threadId, texto) {
   try {
     const url = `https://api.theanarchy.app/api/v1/x${ndcId}/chat/thread/${threadId}/message`;
@@ -23,7 +23,6 @@ async function enviarMensajeAnarchy(ndcId, threadId, texto) {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${BOT_TOKEN}`
       },
-      // Estructura envuelta en 'message' tal como maneja la plataforma
       body: JSON.stringify({
         message: {
           content: texto,
@@ -53,7 +52,6 @@ async function obtenerInfoChat(ndcId, threadId) {
     
     if (response.ok) {
       const data = await response.json();
-      // Retorna los miembros o el objeto de la sala si la API lo provee
       return data.thread || data;
     }
   } catch (error) {
@@ -93,7 +91,7 @@ app.post('/', async (req, res) => {
     return res.status(401).send('Error al validar la firma.');
   }
 
-  // Respondemos 200 OK inmediatamente a Anarchy para evitar timeouts
+  // Respondemos 200 OK inmediatamente a Anarchy
   res.status(200).send('OK');
 
   const evento = req.body;
@@ -114,7 +112,6 @@ app.post('/', async (req, res) => {
       respuestaTexto = "🤖 **KATHERINE — CENTRO DE AYUDA**\n\n📖 **COMANDOS BÁSICOS**\n🔊 `-leerchat` — Activar lectura.\n🔇 `-noleerchat` — Desactivar lectura.\n📊 `-estadochat` — Consultar estado y miembros.\n🎙️ `-entrar-sala` — Entrar a la llamada.\n🚪 `-salir` — Salir de la llamada.\n🗣️ `-voz` — Probar la voz.\n📚 `-ayuda` — Mostrar comandos.\n\n━━━━━━━━━━━━━━\n\n🎵 **COMANDOS DE MÚSICA**\n▶️ `-musica` — Activar reproductor.\n🔎 `-play <canción>` — Buscar y reproducir.\n⏸️ `-pausa` — Pausar música.\n▶️ `-reanudar` — Continuar reproducción.\n⏭️ `-siguiente` — Siguiente canción.\n⏹️ `-pararmusica` — Detener música.\n🔊 `-volumen` — Consultar volumen.\n🎚️ `-volumen <0-100>` — Ajustar volumen.";
     } 
     else if (comando === '-estadochat') {
-      // Consultamos la API para traer datos reales del chat
       const chatInfo = await obtenerInfoChat(ndcId, threadId);
       const totalMiembros = chatInfo?.membersCount || chatInfo?.participants?.length || "No disponible";
       const tituloSala = chatInfo?.title || "Taberna / Sala actual";
@@ -161,7 +158,6 @@ app.post('/', async (req, res) => {
       respuestaTexto = "⏹️ **Katherine:** Reproducción detenida.";
     }
 
-    // Si hay texto de respuesta, lo enviamos de vuelta al chat
     if (respuestaTexto) {
       await enviarMensajeAnarchy(ndcId, threadId, respuestaTexto);
     }
