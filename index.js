@@ -15,7 +15,18 @@ if (!BOT_TOKEN) {
 }
 
 // ============================================================================
-// GESTIÓN DE ESTADOS INDEPENDIENTES POR HILO (THREAD)
+// SEGURIDAD ANTI-CRASH (Evita que el servidor muera silenciosamente)
+// ============================================================================
+process.on('uncaughtException', (err) => {
+    console.error('💥 [EXCEPCIÓN NO CAPTURADA]:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('💥 [PROMESA RECHAZADA NO CAPTURADA]:', reason);
+});
+
+// ============================================================================
+// GESTIÓN DE ESTADOS POR HILO
 // ============================================================================
 const threadStates = new Map();
 
@@ -77,16 +88,19 @@ async function anarchyAPI(endpoint, method = 'GET', body = null) {
     }
 }
 
-// Sistema de envío con fallback automático
+// Envío con intento de unirse al hilo (Join) si da error 403
 const enviarRespuestaChat = async (threadId, texto) => {
     console.log(`[ENVIANDO MENSAJE] Thread: ${threadId}`);
     
-    // Intento 1: Ruta específica del thread
+    // Intento previo: Forzar registro/unión al hilo por si la API lo requiere
+    await anarchyAPI(`/threads/${encodeURIComponent(threadId)}/join`, 'POST', {}).catch(() => {});
+
+    // Intento principal de envío
     let resApi = await anarchyAPI(`/threads/${encodeURIComponent(threadId)}/messages`, 'POST', { content: texto });
 
-    // Intento 2: Ruta alternativa general si da error de ruta/permiso
+    // Si falla por permisos, intentamos la ruta general
     if (!resApi.ok && (resApi.status === 403 || resApi.status === 404)) {
-        console.warn(`⚠️ [REINTENTO] Falló el envío en thread (${resApi.status}). Probando endpoint alternativo /messages...`);
+        console.warn(`⚠️ [REINTENTO] Falló el envío en thread (${resApi.status}). Probando endpoint alternativo...`);
         resApi = await anarchyAPI('/messages', 'POST', {
             threadId: threadId,
             content: texto
@@ -102,36 +116,9 @@ const enviarRespuestaChat = async (threadId, texto) => {
 app.post('/', async (req, res) => {
     console.log("\n-------------------------------------------------------");
     console.log("⚡ [WEBHOOK] Petición recibida de Anarchy");
-
-    // Registro detallado de todo el paquete recibido para depuración
     console.log("📦 PAYLOAD RECIBIDO:", JSON.stringify(req.body, null, 2));
 
-    const timestamp = req.headers['x-anarchy-bot-timestamp'];
-    const signature = req.headers['x-anarchy-bot-signature'];
-
-    // Validación HMAC permisiva
-    if (SECRET && timestamp && signature) {
-        try {
-            const expected = crypto
-                .createHmac('sha256', SECRET)
-                .update(`${timestamp}.${req.rawBody || ''}`)
-                .digest('hex');
-
-            const sigClean = signature.startsWith('v1=') ? signature.slice(3) : signature;
-            const sigBuffer = Buffer.from(sigClean, 'hex');
-            const expBuffer = Buffer.from(expected, 'hex');
-
-            if (sigBuffer.length === expBuffer.length && crypto.timingSafeEqual(sigBuffer, expBuffer)) {
-                console.log("✅ Firma HMAC validada correctamente.");
-            } else {
-                console.warn(`⚠️ Advertencia HMAC: La firma no coincide.`);
-            }
-        } catch (err) {
-            console.error("❌ Error en bloque HMAC:", err.message);
-        }
-    }
-
-    // Responder 200 OK inmediatamente
+    // Responder 200 OK inmediatamente para evitar timeouts
     res.status(200).send('OK');
 
     const evento = req.body || {};
