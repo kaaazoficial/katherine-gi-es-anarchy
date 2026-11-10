@@ -5,37 +5,61 @@ const app = express();
 const SECRET = process.env.WEBHOOK_SECRET || process.env.WEB_TOKEN;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 
-// Estado del bot en memoria
-let estadoBot = {
-  lectura: false,
-  conectado: false,
-  volumen: 30,
-  reproduciendo: false,
-  cancionActual: null
-};
-
 app.use(express.json({
   verify: (req, res, buf) => {
     req.rawBody = buf.toString();
   }
 }));
 
-// Función para enviar mensajes al chat de Anarchy mediante su API
+// Función para enviar mensajes al chat con la estructura correcta y logs de depuración
 async function enviarMensajeAnarchy(ndcId, threadId, texto) {
   try {
-    const response = await fetch(`https://api.theanarchy.app/api/v1/x${ndcId}/chat/thread/${threadId}/message`, {
+    const url = `https://api.theanarchy.app/api/v1/x${ndcId}/chat/thread/${threadId}/message`;
+    console.log(`Enviando mensaje a URL: ${url}`);
+
+    const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${BOT_TOKEN}`
       },
-      body: JSON.stringify({ content: texto, type: 0 })
+      // Estructura envuelta en 'message' tal como maneja la plataforma
+      body: JSON.stringify({
+        message: {
+          content: texto,
+          type: 0
+        }
+      })
     });
-    const data = await response.json();
-    console.log("Respuesta de API al enviar mensaje:", data);
+
+    const responseText = await response.text();
+    console.log(`Estado HTTP de respuesta API: ${response.status}`);
+    console.log(`Cuerpo de respuesta API: ${responseText}`);
   } catch (error) {
-    console.error("Error al enviar mensaje a Anarchy:", error);
+    console.error("Error crítico al enviar mensaje a Anarchy:", error);
   }
+}
+
+// Función para obtener información real del chat (miembros, etc.)
+async function obtenerInfoChat(ndcId, threadId) {
+  try {
+    const url = `https://api.theanarchy.app/api/v1/x${ndcId}/chat/thread/${threadId}`;
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${BOT_TOKEN}`
+      }
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      // Retorna los miembros o el objeto de la sala si la API lo provee
+      return data.thread || data;
+    }
+  } catch (error) {
+    console.error("Error al obtener info del chat:", error);
+  }
+  return null;
 }
 
 app.post('/', async (req, res) => {
@@ -77,7 +101,6 @@ app.post('/', async (req, res) => {
   const threadId = evento.threadId;
   const contenidoTexto = evento.content || (evento.message && evento.message.content) || (evento.data && evento.data.content);
 
-  // Procesar comandos de texto
   if (contenidoTexto && ndcId && threadId) {
     const texto = contenidoTexto.trim();
     const args = texto.split(' ');
@@ -88,29 +111,20 @@ app.post('/', async (req, res) => {
     let respuestaTexto = null;
 
     if (comando === '-ayuda') {
-      respuestaTexto = "🤖 **KATHERINE — CENTRO DE AYUDA**\n\n📖 **COMANDOS BÁSICOS**\n🔊 `-leerchat` — Activar lectura.\n🔇 `-noleerchat` — Desactivar lectura.\n📊 `-estadochat` — Consultar estado.\n🎙️ `-entrar-sala` — Entrar a la llamada.\n🚪 `-salir` — Salir de la llamada.\n🗣️ `-voz` — Probar la voz.\n📚 `-ayuda` — Mostrar comandos.\n\n━━━━━━━━━━━━━━\n\n🎵 **COMANDOS DE MÚSICA**\n▶️ `-musica` — Activar reproductor.\n🔎 `-play <canción>` — Buscar y reproducir.\n⏸️ `-pausa` — Pausar música.\n▶️ `-reanudar` — Continuar reproducción.\n⏭️ `-siguiente` — Siguiente canción.\n⏹️ `-pararmusica` — Detener música.\n🔊 `-volumen` — Consultar volumen.\n🎚️ `-volumen <0-100>` — Ajustar volumen.";
-    } 
-    else if (comando === '-leerchat') {
-      estadoBot.lectura = true;
-      respuestaTexto = "🔊 **Katherine:** Lectura del chat **ACTIVADA**.";
-    } 
-    else if (comando === '-noleerchat') {
-      estadoBot.lectura = false;
-      respuestaTexto = "🔇 **Katherine:** Lectura del chat **DESACTIVADA**.";
+      respuestaTexto = "🤖 **KATHERINE — CENTRO DE AYUDA**\n\n📖 **COMANDOS BÁSICOS**\n🔊 `-leerchat` — Activar lectura.\n🔇 `-noleerchat` — Desactivar lectura.\n📊 `-estadochat` — Consultar estado y miembros.\n🎙️ `-entrar-sala` — Entrar a la llamada.\n🚪 `-salir` — Salir de la llamada.\n🗣️ `-voz` — Probar la voz.\n📚 `-ayuda` — Mostrar comandos.\n\n━━━━━━━━━━━━━━\n\n🎵 **COMANDOS DE MÚSICA**\n▶️ `-musica` — Activar reproductor.\n🔎 `-play <canción>` — Buscar y reproducir.\n⏸️ `-pausa` — Pausar música.\n▶️ `-reanudar` — Continuar reproducción.\n⏭️ `-siguiente` — Siguiente canción.\n⏹️ `-pararmusica` — Detener música.\n🔊 `-volumen` — Consultar volumen.\n🎚️ `-volumen <0-100>` — Ajustar volumen.";
     } 
     else if (comando === '-estadochat') {
-      const estadoLectura = estadoBot.lectura ? "🟢 ACTIVADA" : "🔇 DESACTIVADA";
-      const estadoMic = estadoBot.conectado ? "🟢 CONECTADO" : "🔇 DESCONECTADO";
-      const estadoLlamada = estadoBot.conectado ? "🟢 EN UNA LLAMADA" : "⚪ NO CONECTADO A UNA LLAMADA";
-      respuestaTexto = `📊 **KATHERINE — ESTADO DEL CHAT**\n\nLectura: ${estadoLectura}\nMicrófono: ${estadoMic}\nEstado: ${estadoLlamada}`;
+      // Consultamos la API para traer datos reales del chat
+      const chatInfo = await obtenerInfoChat(ndcId, threadId);
+      const totalMiembros = chatInfo?.membersCount || chatInfo?.participants?.length || "No disponible";
+      const tituloSala = chatInfo?.title || "Taberna / Sala actual";
+
+      respuestaTexto = `📊 **KATHERINE — ESTADO DEL CHAT**\n\n🏠 **Sala:** ${tituloSala}\n👥 **Miembros en el chat:** ${totalMiembros}\n🟢 **Estado del bot:** Conectado y escuchando webhooks.`;
     } 
     else if (comando === '-entrar-sala') {
-      estadoBot.conectado = true;
-      respuestaTexto = "🎙️ **KATHERINE — CONEXIÓN**\n\n🟢 Katherine entró a la llamada y publicó su micrófono.\n" + (estadoBot.lectura ? "🔊 Lectura: ACTIVADA." : "🔇 Lectura: DESACTIVADA.\nPara comenzar a leer, escribí \"-leerchat\".");
+      respuestaTexto = "🎙️ **KATHERINE — CONEXIÓN**\n\n🟢 Katherine entró a la llamada y publicó su micrófono.";
     } 
     else if (comando === '-salir') {
-      estadoBot.conectado = false;
-      estadoBot.reproduciendo = false;
       respuestaTexto = "🚪 **Katherine:** Salió de la llamada y desconectó el micrófono.";
     } 
     else if (comando === '-voz') {
@@ -121,15 +135,9 @@ app.post('/', async (req, res) => {
     }
     else if (comando === '-volumen') {
       if (args[1]) {
-        const nuevoVol = parseInt(args[1]);
-        if (!isNaN(nuevoVol) && nuevoVol >= 0 && nuevoVol <= 100) {
-          estadoBot.volumen = nuevoVol;
-          respuestaTexto = `🎚️ **Katherine:** Volumen ajustado a **${estadoBot.volumen}/100**.`;
-        } else {
-          respuestaTexto = "⚠️ Por favor ingresa un número de volumen válido entre 0 y 100. Ejemplo: `-volumen 50`";
-        }
+        respuestaTexto = `🎚️ **Katherine:** Volumen ajustado a **${args[1]}/100**.`;
       } else {
-        respuestaTexto = `🔊 **Katherine:** Volumen actual de música: **${estadoBot.volumen}/100**.`;
+        respuestaTexto = `🔊 **Katherine:** Volumen actual de música: **30/100**.`;
       }
     } 
     else if (comando === '-play') {
@@ -137,29 +145,23 @@ app.post('/', async (req, res) => {
       if (!busqueda) {
         respuestaTexto = "⚠️ Escribe la canción que quieres buscar. Ejemplo: `-play Follow Me`";
       } else {
-        estadoBot.reproduciendo = true;
-        estadoBot.cancionActual = busqueda;
-        respuestaTexto = `🎵 **KATHERINE MUSIC**\n\n▶️ **Reproduciendo:** ${busqueda}\n🔊 **Volumen:** ${estadoBot.volumen}/100`;
+        respuestaTexto = `🎵 **KATHERINE MUSIC**\n\n▶️ **Reproduciendo:** ${busqueda}`;
       }
     } 
     else if (comando === '-pausa') {
-      estadoBot.reproduciendo = false;
       respuestaTexto = "⏸️ **Katherine:** Música pausada.";
     } 
     else if (comando === '-reanudar') {
-      estadoBot.reproduciendo = true;
       respuestaTexto = "▶️ **Katherine:** Reproducción reanudada.";
     } 
     else if (comando === '-siguiente') {
       respuestaTexto = "⏭️ **Katherine:** Saltando a la siguiente canción...";
     }
     else if (comando === '-pararmusica') {
-      estadoBot.reproduciendo = false;
-      estadoBot.cancionActual = null;
-      respuestaTexto = "⏹️ **Katherine:** Reproducción detenida y lista de reproducción limpiada.";
+      respuestaTexto = "⏹️ **Katherine:** Reproducción detenida.";
     }
 
-    // Si hay una respuesta generada, la mandamos de vuelta a Anarchy por la API
+    // Si hay texto de respuesta, lo enviamos de vuelta al chat
     if (respuestaTexto) {
       await enviarMensajeAnarchy(ndcId, threadId, respuestaTexto);
     }
