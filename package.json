@@ -1,15 +1,13 @@
 {
-  "name": "katherine-anarchy-bot",
-  "version": "1.0.0",
-  "description": "Bot de voz y música para Anarchy",
+  "name": "katherine-gi-es-anarchy",
+  "version": "2.4.0",
+  "description": "Bot Katherine para la plataforma Anarchy",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "@livekit/rtc-node": "latest",
-    "express": "^4.21.2",
-    "ffmpeg-static": "^5.2.0"
+    "express": "^4.19.2"
   },
   "engines": {
     "node": ">=18.0.0"
