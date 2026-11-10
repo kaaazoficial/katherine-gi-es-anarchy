@@ -7,16 +7,11 @@ const {
 } = require('@livekit/rtc-node');
 
 // ───────────── Configuración ─────────────
-const BOT_TOKEN = process.env.BOT_TOKEN;            // token del Bot de la comunidad (ACM)
-const SECRET = process.env.WEBHOOK_SECRET;          // secreto del webhook
+const BOT_TOKEN = (process.env.BOT_TOKEN || '').trim();        // token del Bot de la comunidad (ACM)
+const SECRET = (process.env.WEBHOOK_SECRET || '').trim();      // secreto del webhook
 const PORT = process.env.PORT || 3000;
 const PREFIX = process.env.PREFIX || '!';           // 1 a 3 signos de: ! $ % & * + - = ~ > ;
-const API = 'https://api.anarchyapps.org/bot-api/v1';
-const MAX_SALAS = 3;
-const SAMPLE_RATE = 48000;
-const FRAME_SAMPLES = 480;                          // 10 ms a 48 kHz mono
-const FRAME_BYTES = FRAME_SAMPLES * 2;
-const startTime = Date.now();
+
 
 if (!BOT_TOKEN) console.warn('[AVISO] Falta BOT_TOKEN.');
 if (!SECRET) console.warn('[AVISO] Falta WEBHOOK_SECRET: se rechazarán todos los eventos.');
@@ -410,9 +405,9 @@ app.use((err, req, res, next) => {
 
 app.listen(PORT, async () => {
   log(`[SERVER] Puerto ${PORT}`);
-  const me = await api('/me');
+   const me = await api('/me');
   if (me.ok) log('[BOT]', JSON.stringify(me.data));
-  else log('[BOT] No pude leer /me: revisa BOT_TOKEN.');
+  else log(`[BOT] /me falló: HTTP ${me.status} | ${JSON.stringify(me.data)} | token cargado: ${BOT_TOKEN ? BOT_TOKEN.length + ' caracteres' : 'NO'}`);
   if (/^[!$%&*+\-=~>;]{1,3}$/.test(PREFIX)) api('/me', 'PATCH', { commandPrefix: PREFIX });
 });
 
