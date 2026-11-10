@@ -6,9 +6,9 @@ const crypto = require('crypto');
 
 const app = express();
 
-// ===============================
+// =====================================
 // CONFIGURACIÓN
-// ===============================
+// =====================================
 
 const SECRET = process.env.WEBHOOK_SECRET || process.env.WEB_TOKEN;
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -16,9 +16,8 @@ const PORT = Number(process.env.PORT) || 3000;
 
 const API_URL = 'https://api.anarchyapps.org/bot-api/v1';
 const startTime = Date.now();
-const MAX_TIMESTAMP_AGE = 5 * 60; // 5 minutos
+const MAX_TIMESTAMP_AGE = 300;
 
-// Verificación de configuración
 if (!SECRET) {
     throw new Error('Falta WEBHOOK_SECRET o WEB_TOKEN.');
 }
@@ -27,7 +26,10 @@ if (!BOT_TOKEN) {
     throw new Error('Falta BOT_TOKEN.');
 }
 
-// Estados independientes por conversación
+// =====================================
+// ESTADOS INDEPENDIENTES
+// =====================================
+
 const estados = new Map();
 
 function obtenerEstado(threadId) {
@@ -44,9 +46,9 @@ function obtenerEstado(threadId) {
     return estados.get(threadId);
 }
 
-// ===============================
+// =====================================
 // MIDDLEWARE
-// ===============================
+// =====================================
 
 app.use(express.json({
     limit: '1mb',
@@ -60,57 +62,71 @@ app.use(express.urlencoded({
     limit: '1mb'
 }));
 
-// ===============================
-// SEGURIDAD HMAC
-// ===============================
+// =====================================
+// VALIDACIÓN HMAC CON DIAGNÓSTICO
+// =====================================
 
 function verificarFirma(req) {
     const timestamp = req.headers['x-anarchy-bot-timestamp'];
     const signature = req.headers['x-anarchy-bot-signature'];
 
-    if (!timestamp || !signature || !req.rawBody) {
+    console.log('\n[DIAGNÓSTICO WEBHOOK]');
+    console.log('Timestamp recibido:', timestamp ? 'SÍ' : 'NO');
+    console.log('Firma recibida:', signature ? 'SÍ' : 'NO');
+    console.log('RawBody disponible:', req.rawBody !== undefined);
+    console.log('Longitud del cuerpo:', req.rawBody?.length ?? 0);
+    console.log('Formato de firma:', signature?.split('=')[0] || 'NINGUNO');
+
+    if (!timestamp || !signature || req.rawBody === undefined) {
+        console.log('[MOTIVO] Faltan encabezados o cuerpo original.');
         return false;
     }
 
-    const timestampNumber = Number(timestamp);
+    const time = Number(timestamp);
 
-    if (!Number.isFinite(timestampNumber)) {
+    if (!Number.isFinite(time)) {
+        console.log('[MOTIVO] Timestamp inválido.');
         return false;
     }
 
-    // Aceptar timestamps Unix en segundos o milisegundos.
-    const timestampSeconds = timestampNumber > 1e12
-        ? timestampNumber / 1000
-        : timestampNumber;
+    const seconds = time > 1e12 ? time / 1000 : time;
 
-    const ahora = Math.floor(Date.now() / 1000);
-
-    if (Math.abs(ahora - timestampSeconds) > MAX_TIMESTAMP_AGE) {
-        console.warn('[SEGURIDAD] Timestamp expirado.');
-        return false;
-    }
-
-    const signatureClean = signature.startsWith('v1=')
-        ? signature.slice(3)
-        : signature;
-
-    if (!/^[a-fA-F0-9]{64}$/.test(signatureClean)) {
+    if (Math.abs(Date.now() / 1000 - seconds) > MAX_TIMESTAMP_AGE) {
+        console.log('[MOTIVO] Timestamp fuera del margen de 5 minutos.');
         return false;
     }
 
     const expected = crypto
         .createHmac('sha256', SECRET)
         .update(`${timestamp}.${req.rawBody}`)
-        .digest();
+        .digest('hex');
 
-    const received = Buffer.from(signatureClean, 'hex');
+    const received = signature.replace(/^v1=/, '');
 
-    return crypto.timingSafeEqual(expected, received);
+    if (!/^[a-fA-F0-9]{64}$/.test(received)) {
+        console.log('[MOTIVO] Formato de firma desconocido.');
+        return false;
+    }
+
+    const expectedBuffer = Buffer.from(expected, 'hex');
+    const receivedBuffer = Buffer.from(received, 'hex');
+
+    const valid = crypto.timingSafeEqual(
+        expectedBuffer,
+        receivedBuffer
+    );
+
+    console.log(
+        '[RESULTADO]',
+        valid ? 'FIRMA VÁLIDA' : 'FIRMA INCORRECTA'
+    );
+
+    return valid;
 }
 
-// ===============================
+// =====================================
 // CLIENTE API ANARCHY
-// ===============================
+// =====================================
 
 async function anarchyAPI(endpoint, method = 'GET', body = null) {
     try {
@@ -129,7 +145,7 @@ async function anarchyAPI(endpoint, method = 'GET', body = null) {
             options.body = JSON.stringify(body);
         }
 
-        console.log(`[API] ${method} ${endpoint}`);
+        console.log(`[API REQUEST] ${method} ${endpoint}`);
 
         const response = await fetch(url, options);
         const responseText = await response.text();
@@ -142,9 +158,10 @@ async function anarchyAPI(endpoint, method = 'GET', body = null) {
             data = { raw: responseText };
         }
 
-        if (!response.ok) {
-            console.error('[API ERROR]', response.status, data);
-        }
+        console.log(
+            `[API RESPONSE] ${response.status}`,
+            JSON.stringify(data)
+        );
 
         return {
             ok: response.ok,
@@ -163,9 +180,9 @@ async function anarchyAPI(endpoint, method = 'GET', body = null) {
     }
 }
 
-// ===============================
-// VERIFICAR TOKEN DEL BOT
-// ===============================
+// =====================================
+// VERIFICACIÓN DEL BOT
+// =====================================
 
 async function verificarTokenBot() {
     console.log('[KATHERINE] Verificando credenciales...');
@@ -181,33 +198,36 @@ async function verificarTokenBot() {
         );
     } else {
         console.error(
-            'No se pudo verificar el token:',
-            resultado.status
+            '[TOKEN ERROR]',
+            resultado.status,
+            resultado.data
         );
     }
 }
 
-// ===============================
+// =====================================
 // ENVIAR MENSAJES
-// ===============================
+// =====================================
 
 async function enviarRespuestaChat(threadId, texto) {
-    const endpoint = `/threads/${encodeURIComponent(threadId)}/messages`;
+    const endpoint =
+        `/threads/${encodeURIComponent(threadId)}/messages`;
 
     return await anarchyAPI(endpoint, 'POST', {
         content: texto
     });
 }
 
-// ===============================
-// COMANDOS
-// ===============================
+// =====================================
+// PROCESADOR DE COMANDOS
+// =====================================
 
 async function procesarComando(evento) {
     const threadId = evento.threadId;
     const mensaje = evento.message;
 
     if (!threadId || typeof mensaje?.content !== 'string') {
+        console.log('[EVENTO] Mensaje sin threadId o contenido.');
         return;
     }
 
@@ -231,9 +251,7 @@ async function procesarComando(evento) {
 
     switch (comando) {
 
-        // -----------------------
         // AYUDA
-        // -----------------------
 
         case '-ayuda':
         case '!ayuda':
@@ -246,13 +264,13 @@ async function procesarComando(evento) {
                 '📊 `-estadochat` — Consultar estado.\n' +
                 '🏓 `-ping` — Comprobar servidor.\n\n' +
                 '🎵 **MÚSICA**\n' +
-                'La integración de reproducción musical todavía no está configurada.';
+                '▶️ `-play <canción>` — Pendiente de integración.\n' +
+                '⏸️ `-pausa` — Pendiente de integración.\n' +
+                '🎚️ `-volumen <0-100>` — Ajustar volumen.';
 
             break;
 
-        // -----------------------
         // PING
-        // -----------------------
 
         case '-ping':
         case '!ping': {
@@ -270,9 +288,7 @@ async function procesarComando(evento) {
             break;
         }
 
-        // -----------------------
         // ESTADO
-        // -----------------------
 
         case '-estadochat':
         case '!estadochat':
@@ -287,9 +303,7 @@ async function procesarComando(evento) {
 
             break;
 
-        // -----------------------
         // ACTIVAR LECTURA
-        // -----------------------
 
         case '-leerchat':
         case '!leerchat':
@@ -303,9 +317,7 @@ async function procesarComando(evento) {
 
             break;
 
-        // -----------------------
         // DESACTIVAR LECTURA
-        // -----------------------
 
         case '-noleerchat':
         case '!noleerchat':
@@ -319,15 +331,14 @@ async function procesarComando(evento) {
 
             break;
 
-        // -----------------------
         // VOLUMEN
-        // -----------------------
 
         case '-volumen':
         case '!volumen': {
 
             if (!args[1]) {
-                respuesta = `🎚️ Volumen actual: ${estado.volumen}/100`;
+                respuesta =
+                    `🎚️ Volumen actual: ${estado.volumen}/100`;
                 break;
             }
 
@@ -338,7 +349,8 @@ async function procesarComando(evento) {
                 volumen < 0 ||
                 volumen > 100
             ) {
-                respuesta = '⚠️ Introduce un número entre 0 y 100.';
+                respuesta =
+                    '⚠️ Introduce un número entre 0 y 100.';
                 break;
             }
 
@@ -350,30 +362,40 @@ async function procesarComando(evento) {
             break;
         }
 
-        // -----------------------
-        // MÚSICA NO CONFIGURADA
-        // -----------------------
+        // REPRODUCCIÓN PENDIENTE
 
         case '-play':
-        case '!play':
+        case '!play': {
+
+            const cancion = args.slice(1).join(' ');
+
+            if (!cancion) {
+                respuesta =
+                    '⚠️ Especifica una canción. Ejemplo: `-play Follow Me`';
+            } else {
+                respuesta =
+                    '⚠️ El sistema de reproducción musical todavía no está integrado.';
+            }
+
+            break;
+        }
+
         case '-pausa':
         case '!pausa':
 
             respuesta =
-                '⚠️ **KATHERINE MUSIC**\n\n' +
-                'El sistema de reproducción musical todavía no está integrado.\n' +
-                'Se necesita configurar un servicio de audio para utilizar estos comandos.';
+                '⚠️ El sistema de audio todavía no está integrado.';
 
             break;
 
-        // -----------------------
         // COMANDO DESCONOCIDO
-        // -----------------------
 
         default:
 
             if (comando.startsWith('-') || comando.startsWith('!')) {
-                respuesta = `❓ Comando desconocido: \`${comando}\`\nUtiliza \`-ayuda\` para consultar los comandos.`;
+                respuesta =
+                    `❓ Comando desconocido: \`${comando}\`\n` +
+                    'Utiliza `-ayuda` para consultar los comandos.';
             }
 
             break;
@@ -395,15 +417,14 @@ async function procesarComando(evento) {
     }
 }
 
-// ===============================
+// =====================================
 // WEBHOOK PRINCIPAL
-// ===============================
+// =====================================
 
 app.post('/', (req, res) => {
 
     console.log('\n========== WEBHOOK KATHERINE ==========');
 
-    // Validar autenticidad antes de procesar.
     if (!verificarFirma(req)) {
         console.warn('[SEGURIDAD] Solicitud rechazada.');
 
@@ -412,10 +433,10 @@ app.post('/', (req, res) => {
 
     console.log('[WEBHOOK] Firma validada correctamente.');
 
-    // Responder inmediatamente a Anarchy.
+    // Respuesta inmediata
     res.status(200).send('OK');
 
-    // Procesar el evento después de responder.
+    // Procesamiento asíncrono
     setImmediate(async () => {
         try {
             await procesarComando(req.body || {});
@@ -428,9 +449,9 @@ app.post('/', (req, res) => {
     });
 });
 
-// ===============================
+// =====================================
 // RUTA DE ESTADO
-// ===============================
+// =====================================
 
 app.get('/', (req, res) => {
     res.status(200).json({
@@ -442,14 +463,14 @@ app.get('/', (req, res) => {
     });
 });
 
-// ===============================
-// INICIAR SERVIDOR
-// ===============================
+// =====================================
+// INICIO DEL SERVIDOR
+// =====================================
 
 const server = app.listen(PORT, '0.0.0.0', () => {
 
     console.log('================================');
-    console.log('   KATHERINE BOT SERVER');
+    console.log('     KATHERINE BOT SERVER');
     console.log('================================');
     console.log(`Puerto: ${PORT}`);
     console.log('Estado: ONLINE');
@@ -459,7 +480,6 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     verificarTokenBot();
 });
 
-// Manejo de errores del servidor
 server.on('error', (error) => {
     console.error('[SERVER ERROR]', error);
 });
