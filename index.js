@@ -15,14 +15,14 @@ if (!BOT_TOKEN) {
 }
 
 // ============================================================================
-// SEGURIDAD ANTI-CRASH (Evita que el servidor muera silenciosamente)
+// SEGURIDAD ANTI-CRASH
 // ============================================================================
 process.on('uncaughtException', (err) => {
     console.error('💥 [EXCEPCIÓN NO CAPTURADA]:', err);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('💥 [PROMESA RECHAZADA NO CAPTURADA]:', reason);
+process.on('unhandledRejection', (reason) => {
+    console.error('💥 [PROMESA RECHAZADA]:', reason);
 });
 
 // ============================================================================
@@ -61,8 +61,6 @@ app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 async function anarchyAPI(endpoint, method = 'GET', body = null) {
     try {
         const url = `https://api.anarchyapps.org/bot-api/v1${endpoint}`;
-        console.log(`[API REQUEST] ${method} -> ${url}`);
-
         const options = {
             method,
             headers: {
@@ -80,7 +78,6 @@ async function anarchyAPI(endpoint, method = 'GET', body = null) {
         let data;
         try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
 
-        console.log(`[API RESPONSE] Status: ${response.status} | Body:`, JSON.stringify(data));
         return { ok: response.ok, status: response.status, data };
     } catch (err) {
         console.error(`❌ [ERROR CRÍTICO FETCH]:`, err.message);
@@ -88,19 +85,11 @@ async function anarchyAPI(endpoint, method = 'GET', body = null) {
     }
 }
 
-// Envío con intento de unirse al hilo (Join) si da error 403
+// Envío con manejo de permisos
 const enviarRespuestaChat = async (threadId, texto) => {
-    console.log(`[ENVIANDO MENSAJE] Thread: ${threadId}`);
-    
-    // Intento previo: Forzar registro/unión al hilo por si la API lo requiere
-    await anarchyAPI(`/threads/${encodeURIComponent(threadId)}/join`, 'POST', {}).catch(() => {});
-
-    // Intento principal de envío
     let resApi = await anarchyAPI(`/threads/${encodeURIComponent(threadId)}/messages`, 'POST', { content: texto });
 
-    // Si falla por permisos, intentamos la ruta general
     if (!resApi.ok && (resApi.status === 403 || resApi.status === 404)) {
-        console.warn(`⚠️ [REINTENTO] Falló el envío en thread (${resApi.status}). Probando endpoint alternativo...`);
         resApi = await anarchyAPI('/messages', 'POST', {
             threadId: threadId,
             content: texto
@@ -114,11 +103,7 @@ const enviarRespuestaChat = async (threadId, texto) => {
 // ENDPOINT PRINCIPAL DEL WEBHOOK
 // ============================================================================
 app.post('/', async (req, res) => {
-    console.log("\n-------------------------------------------------------");
-    console.log("⚡ [WEBHOOK] Petición recibida de Anarchy");
-    console.log("📦 PAYLOAD RECIBIDO:", JSON.stringify(req.body, null, 2));
-
-    // Responder 200 OK inmediatamente para evitar timeouts
+    // Responder 200 OK inmediatamente para cumplir con la API de Anarchy
     res.status(200).send('OK');
 
     const evento = req.body || {};
@@ -128,60 +113,56 @@ app.post('/', async (req, res) => {
     if (!contenidoTexto || !threadId) return;
 
     const texto = contenidoTexto.trim();
+
+    // 🛑 FILTRO ABSOLUTO: Si el mensaje NO empieza con "!", se ignora al 100% (rol, texto libre, etc.)
+    if (!texto.startsWith('!')) {
+        return;
+    }
+
     const args = texto.split(/\s+/);
     const comando = args[0].toLowerCase();
     const estado = obtenerEstadoThread(threadId);
 
-    console.log(`🎯 [COMANDO DETECTADO]: "${comando}" | Usuario: ${evento.message?.author?.nickname || 'Anónimo'} | Thread: ${threadId}`);
-
     let respuesta = null;
 
     switch (comando) {
-        case '-ayuda':
         case '!ayuda':
             respuesta = "🤖 **KATHERINE — CENTRO DE CONTROL**\n\n" +
-                        "📖 **COMANDOS BÁSICOS**\n" +
-                        "🔊 `-leerchat` / `!leerchat` — Activar lectura.\n" +
-                        "🔇 `-noleerchat` / `!noleerchat` — Desactivar lectura.\n" +
-                        "📊 `-estadochat` / `!estadochat` — Consultar estado.\n" +
-                        "🏓 `-ping` / `!ping` — Probar estado y tiempo en vivo.\n" +
-                        "🎙️ `-entrar-sala` — Entrar a la llamada.\n" +
-                        "🚪 `-salir` — Desconectar de la llamada.\n\n" +
+                        "📖 **COMANDOS DISPONIBLES**\n" +
+                        "🔊 `!leerchat` — Activar lectura.\n" +
+                        "🔇 `!noleerchat` — Desactivar lectura.\n" +
+                        "📊 `!estadochat` — Consultar estado.\n" +
+                        "🏓 `!ping` — Probar estado y tiempo en vivo.\n\n" +
                         "🎵 **MÚSICA**\n" +
-                        "▶️ `-play <canción>` — Reproducir.\n" +
-                        "⏸️ `-pausa` — Pausar.\n" +
-                        "🔊 `-volumen <0-100>` — Ajustar volumen.";
+                        "▶️ `!play <canción>` — Reproducir.\n" +
+                        "🔊 `!volumen <0-100>` — Ajustar volumen.";
             break;
 
-        case '-ping':
         case '!ping': {
             const uptimeSec = Math.floor((Date.now() - startTime) / 1000);
             respuesta = `🏓 **PONG!** Servidor en línea.\n⏱️ **Uptime:** ${uptimeSec}s\n⚡ Webhook conectado correctamente a Anarchy.`;
             break;
         }
 
-        case '-estadochat':
+        case !estadochat && '!estadochat': // Evaluado explícitamente abajo
         case '!estadochat':
-            respuesta = `📊 **KATHERINE — ESTADO**\n🏠 **Thread ID:** ${threadId}\n🔊 **Lectura:** ${estado.lectura ? "🟢 ACTIVADA" : "🔴 DESACTIVADA"}\n🎙️ **Llamada:** ${estado.conectado ? "🟢 CONECTADO" : "⚪ DESCONECTADO"}`;
+            respuesta = `📊 **KATHERINE — ESTADO**\n🏠 **Thread ID:** ${threadId}\n🔊 **Lectura:** ${estado.lectura ? "🟢 ACTIVADA" : "🔴 DESACTIVADA"}`;
             break;
 
-        case '-leerchat':
         case '!leerchat':
             estado.lectura = true;
             respuesta = "🔊 **Katherine:** Lectura del chat **ACTIVADA**.";
             break;
 
-        case '-noleerchat':
         case '!noleerchat':
             estado.lectura = false;
             respuesta = "🔇 **Katherine:** Lectura del chat **DESACTIVADA**.";
             break;
 
-        case '-play':
         case '!play': {
             const busqueda = args.slice(1).join(' ');
             if (!busqueda) {
-                respuesta = "⚠️ Especifica la canción. Ejemplo: `-play Follow Me`";
+                respuesta = "⚠️ Especifica la canción. Ejemplo: `!play Follow Me`";
             } else {
                 estado.reproduciendo = true;
                 estado.cancionActual = busqueda;
@@ -189,9 +170,14 @@ app.post('/', async (req, res) => {
             }
             break;
         }
+
+        default:
+            // Si empieza con '!' pero no está en la lista anterior, NO hace nada (ignorado por completo)
+            return;
     }
 
     if (respuesta) {
+        console.log(`🎯 [COMANDO VÁLIDO EJECUTADO]: "${comando}" | Thread: ${threadId}`);
         await enviarRespuestaChat(threadId, respuesta);
     }
 });
@@ -200,9 +186,6 @@ app.get('/', (req, res) => {
     res.status(200).json({ bot: 'Katherine', status: 'online' });
 });
 
-// ============================================================================
-// INICIO DEL SERVIDOR
-// ============================================================================
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`[KATHERINE SERVER] Servidor activo en el puerto ${PORT}`);
 });
