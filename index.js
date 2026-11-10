@@ -1,310 +1,424 @@
 const express = require('express');
 const crypto = require('crypto');
+const { spawn } = require('child_process');
+const {
+  Room, RoomEvent, AudioSource, AudioFrame,
+  LocalAudioTrack, TrackPublishOptions, TrackSource
+} = require('@livekit/rtc-node');
 
-const app = express();
-
-const SECRET = process.env.WEBHOOK_SECRET || process.env.WEB_TOKEN;
-const BOT_TOKEN = process.env.BOT_TOKEN;
+// ───────────── Configuración ─────────────
+const BOT_TOKEN = process.env.BOT_TOKEN;            // token del Bot de la comunidad (ACM)
+const SECRET = process.env.WEBHOOK_SECRET;          // secreto del webhook
 const PORT = process.env.PORT || 3000;
-const API_BASE = 'https://api.theanarchy.app/api/v1';
+const PREFIX = process.env.PREFIX || '!';           // 1 a 3 signos de: ! $ % & * + - = ~ > ;
+const API = 'https://api.anarchyapps.org/bot-api/v1';
+const MAX_SALAS = 3;
+const SAMPLE_RATE = 48000;
+const FRAME_SAMPLES = 480;                          // 10 ms a 48 kHz mono
+const FRAME_BYTES = FRAME_SAMPLES * 2;
 const startTime = Date.now();
 
-if (!BOT_TOKEN) console.warn('[AVISO] Falta BOT_TOKEN: no se podrán enviar mensajes.');
-if (!SECRET) console.warn('[AVISO] Falta WEBHOOK_SECRET/WEB_TOKEN: se rechazarán todas las peticiones.');
+if (!BOT_TOKEN) console.warn('[AVISO] Falta BOT_TOKEN.');
+if (!SECRET) console.warn('[AVISO] Falta WEBHOOK_SECRET: se rechazarán todos los eventos.');
 
-// Estado POR SALA (antes era global y se mezclaba entre salas)
-const estados = new Map();
-function getEstado(ndcId, threadId) {
-  const key = `${ndcId}:${threadId}`;
-  if (!estados.has(key)) {
-    estados.set(key, {
-      lectura: false,
-      conectado: false,
-      volumen: 30,
-      reproduciendo: false,
-      cancionActual: null,
-      cola: []
-    });
-  }
-  return estados.get(key);
-}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const log = (...a) => console.log(new Date().toISOString(), ...a);
 
-// Guardamos el body crudo para validar la firma HMAC
-app.use(express.json({
-  verify: (req, res, buf) => { req.rawBody = buf.toString('utf8'); }
-}));
-
-// Cliente de la API con timeout
-async function anarchyAPI(endpoint, method = 'GET', body = null) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10000);
+// ───────────── Cliente de la API ─────────────
+async function api(path, method = 'GET', body = null, reintento = true) {
   try {
-    const options = {
+    const res = await fetch(`${API}${path}`, {
       method,
       headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${BOT_TOKEN}`
+        Authorization: `Bot ${BOT_TOKEN}`,
+        ...(body ? { 'Content-Type': 'application/json' } : {})
       },
-      signal: controller.signal
-    };
-    if (body) options.body = JSON.stringify(body);
-
-    const response = await fetch(`${API_BASE}${endpoint}`, options);
-    const text = await response.text();
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(10000)
+    });
+    if (res.status === 429 && reintento) {
+      const espera = Math.min(parseInt(res.headers.get('retry-after') || '2', 10), 30);
+      await sleep(espera * 1000);
+      return api(path, method, body, false);
+    }
+    const text = await res.text();
     let data;
     try { data = JSON.parse(text); } catch { data = { raw: text }; }
-    return { ok: response.ok, status: response.status, data };
+    return { ok: res.ok, status: res.status, data };
   } catch (err) {
-    console.error(`[API ERROR] ${method} ${endpoint}:`, err.message);
-    return { ok: false, status: 500, data: null };
-  } finally {
-    clearTimeout(timer);
+    log(`[API ERROR] ${method} ${path}:`, err.message);
+    return { ok: false, status: 0, data: null };
   }
 }
 
-async function enviarRespuestaChat(ndcId, threadId, texto) {
-  const payload = { message: { content: texto, type: 0 } };
-  console.log(`[ENVIANDO A CHAT] NDC: ${ndcId} | Thread: ${threadId}`);
-  const resApi = await anarchyAPI(`/x${ndcId}/chat/thread/${threadId}/message`, 'POST', payload);
-  console.log(`[RESPUESTA CHAT] HTTP: ${resApi.status} | Datos: ${JSON.stringify(resApi.data)}`);
-  return resApi;
+// Mensajes: cola por chat (límite: 1 cada 2 s por chat, máx. 2000 caracteres)
+const cadenas = new Map();
+function say(threadId, content, buttons = null, replyMessageId = null) {
+  const previa = cadenas.get(threadId) || Promise.resolve();
+  const siguiente = previa.then(async () => {
+    const body = { content: String(content).slice(0, 2000) };
+    if (buttons) body.buttons = buttons;
+    if (replyMessageId) body.replyMessageId = String(replyMessageId);
+    const r = await api(`/threads/${threadId}/messages`, 'POST', body);
+    if (!r.ok) log(`[MSG ERROR] ${r.status}`, JSON.stringify(r.data));
+    await sleep(2100);
+  }).catch(() => {});
+  cadenas.set(threadId, siguiente);
+  return siguiente;
 }
 
-// Validación de firma HMAC
-function firmaValida(req) {
-  const timestamp = req.headers['x-anarchy-bot-timestamp'];
-  const signature = req.headers['x-anarchy-bot-signature'];
-  if (!timestamp || !signature) return { ok: false, msg: 'Faltan cabeceras de seguridad.' };
-  if (!SECRET) return { ok: false, msg: 'Servidor sin secreto configurado.' };
-
-  let ts = parseInt(timestamp, 10);
-  if (isNaN(ts)) return { ok: false, msg: 'Timestamp inválido.' };
-  if (ts > 1e12) ts = Math.floor(ts / 1000); // por si viene en milisegundos
-
-  const now = Math.floor(Date.now() / 1000);
-  if (Math.abs(now - ts) > 300) return { ok: false, msg: 'Timestamp expirado.' };
-
-  const expected = 'v1=' + crypto
-    .createHmac('sha256', SECRET)
-    .update(`${timestamp}.${req.rawBody || ''}`)
-    .digest('hex');
-
-  const sigBuffer = Buffer.from(String(signature));
-  const expBuffer = Buffer.from(expected);
-  if (sigBuffer.length !== expBuffer.length || !crypto.timingSafeEqual(sigBuffer, expBuffer)) {
-    return { ok: false, msg: 'Firma inválida.' };
-  }
-  return { ok: true };
+function setStatus(texto) {
+  api('/me', 'PATCH', { status: texto ? String(texto).slice(0, 40) : null });
 }
 
-const AYUDA =
-  "🤖 **KATHERINE — CENTRO DE CONTROL AVANZADO**\n\n" +
-  "📖 **COMANDOS BÁSICOS & ESTADO**\n" +
-  "🔊 `-leerchat` — Activar lectura automática.\n" +
-  "🔇 `-noleerchat` — Desactivar lectura.\n" +
-  "📊 `-estadochat` — Consultar sala, miembros y estado.\n" +
-  "🏓 `-ping` — Ver latencia y tiempo activo.\n" +
-  "ℹ️ `-info` — Datos del sistema de Katherine.\n\n" +
-  "🎙️ **VOZ & LLAMADA**\n" +
-  "🎙️ `-entrar-sala` — Unirse a la llamada y abrir mic.\n" +
-  "🚪 `-salir` — Desconectar de la llamada.\n" +
-  "🗣️ `-voz` — Diagnóstico de síntesis vocal.\n\n" +
-  "🎵 **REPRODUCTOR DE MÚSICA**\n" +
-  "▶️ `-musica` — Activar consola de audio.\n" +
-  "🔎 `-play <canción>` — Reproducir o añadir a la cola.\n" +
-  "⏸️ `-pausa` — Pausar la música.\n" +
-  "▶️ `-reanudar` — Continuar reproducción.\n" +
-  "⏭️ `-siguiente` — Siguiente canción de la cola.\n" +
-  "⏹️ `-pararmusica` — Detener y limpiar reproductor.\n" +
-  "🔊 `-volumen` / `-volumen <0-100>` — Control de audio.";
+// ───────────── Búsqueda de pistas (yt-dlp) ─────────────
+function resolverPista(consulta) {
+  return new Promise((resolve, reject) => {
+    const objetivo = /^https?:\/\//i.test(consulta) ? consulta : `ytsearch1:${consulta}`;
+    const p = spawn('yt-dlp', [
+      '--no-playlist', '--playlist-items', '1', '-q', '--no-warnings',
+      '--print', '%(title)s', '--print', '%(webpage_url)s', '--print', '%(duration_string)s',
+      objetivo
+    ], { stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    const timer = setTimeout(() => { p.kill('SIGKILL'); reject(new Error('Tiempo agotado buscando la canción.')); }, 25000);
+    p.stdout.on('data', (d) => (out += d));
+    p.on('error', () => { clearTimeout(timer); reject(new Error('yt-dlp no está instalado.')); });
+    p.on('close', () => {
+      clearTimeout(timer);
+      const [titulo, url, duracion] = out.split('\n').map((l) => l.trim());
+      if (!titulo || !url) return reject(new Error('No encontré esa canción.'));
+      resolve({ titulo, url, duracion: duracion && duracion !== 'NA' ? duracion : '?' });
+    });
+  });
+}
 
-async function procesarComando(evento, ndcId, threadId) {
-  const contenidoTexto =
-    evento.content ||
-    (evento.message && evento.message.content) ||
-    (evento.data && evento.data.content);
+// ───────────── Sesiones de voz ─────────────
+const sesiones = new Map(); // threadId -> sesión
 
-  if (typeof contenidoTexto !== 'string' || !ndcId || !threadId) return;
+async function entrarSala(threadId) {
+  if (sesiones.has(threadId)) return sesiones.get(threadId);
+  if (sesiones.size >= MAX_SALAS) throw new Error(`Ya estoy en ${MAX_SALAS} salas (máximo).`);
 
-  const texto = contenidoTexto.trim();
-  if (!texto.startsWith('-')) return;
-
-  const args = texto.split(/\s+/);
-  const comando = args[0].toLowerCase();
-  const estado = getEstado(ndcId, threadId);
-  const autor = evento.message?.author?.nickname || 'Anónimo';
-  console.log(`[COMANDO]: ${comando} | Usuario: ${autor}`);
-
-  let respuesta = null;
-
-  switch (comando) {
-    case '-ayuda':
-      respuesta = AYUDA;
-      break;
-
-    case '-ping': {
-      const uptimeSec = Math.floor((Date.now() - startTime) / 1000);
-      respuesta = `🏓 **PONG!** Servidor en línea.\n⏱️ **Uptime:** ${uptimeSec} segundos\n⚡ **Estado:** Conectado con la API de Anarchy.`;
-      break;
-    }
-
-    case '-info':
-      respuesta = `🤖 **KATHERINE BOT v3.1**\n🧠 **Motor:** Node.js (Express Webhook Engine)\n🛡️ **Seguridad:** HMAC-SHA256 Activo\n🌐 **Host:** Render Cloud Services`;
-      break;
-
-    case '-estadochat': {
-      const chatRes = await anarchyAPI(`/x${ndcId}/chat/thread/${threadId}`);
-      const chatInfo = chatRes.data?.thread || chatRes.data || {};
-      const miembros = chatInfo.membersCount ?? chatInfo.participants?.length ?? 'Datos no disponibles';
-      const tituloSala = chatInfo.title || 'Sala actual';
-      respuesta =
-        `📊 **KATHERINE — ESTADO EN TIEMPO REAL**\n\n` +
-        `🏠 **Sala:** ${tituloSala}\n` +
-        `👥 **Miembros en el chat:** ${miembros}\n` +
-        `🔊 **Lectura de chat:** ${estado.lectura ? '🟢 ACTIVADA' : '🔴 DESACTIVADA'}\n` +
-        `🎙️ **Estado de llamada:** ${estado.conectado ? '🟢 CONECTADO' : '⚪ DESCONECTADO'}\n` +
-        `🎵 **Reproductor:** ${estado.reproduciendo ? `▶️ (${estado.cancionActual})` : '⏸️ Inactivo'}\n` +
-        `📜 **En cola:** ${estado.cola.length}\n` +
-        `🎚️ **Volumen actual:** ${estado.volumen}/100`;
-      break;
-    }
-
-    case '-leerchat':
-      estado.lectura = true;
-      respuesta = '🔊 **Katherine:** Lectura del chat **ACTIVADA**.';
-      break;
-
-    case '-noleerchat':
-      estado.lectura = false;
-      respuesta = '🔇 **Katherine:** Lectura del chat **DESACTIVADA**.';
-      break;
-
-    case '-entrar-sala':
-      estado.conectado = true;
-      respuesta =
-        '🎙️ **KATHERINE — CONEXIÓN DE VOZ**\n\n🟢 Katherine entró a la llamada y su micrófono está activo.\n' +
-        (estado.lectura
-          ? '🔊 Lectura del chat: **ACTIVADA**.'
-          : '🔇 Lectura del chat: **DESACTIVADA** (usa `-leerchat` para activar).');
-      break;
-
-    case '-salir':
-      estado.conectado = false;
-      estado.reproduciendo = false;
-      estado.cancionActual = null;
-      estado.cola = [];
-      respuesta = '🚪 **Katherine:** Salió de la llamada de voz y cerró el micrófono.';
-      break;
-
-    case '-voz':
-      respuesta = '🗣️ **Katherine:** Comprobando módulos de voz... ¡Canales de audio operando correctamente!';
-      break;
-
-    case '-musica':
-      respuesta = '🎵 **KATHERINE MUSIC SYSTEM**\n\nConsola de audio activada. Usa `-play <nombre>` para reproducir música.';
-      break;
-
-    case '-play': {
-      const busqueda = args.slice(1).join(' ');
-      if (!busqueda) {
-        respuesta = '⚠️ **Error:** Ingresa el nombre de la canción. Ejemplo: `-play Follow Me`';
-      } else if (estado.reproduciendo && estado.cancionActual) {
-        estado.cola.push(busqueda);
-        respuesta = `📜 **Katherine:** **${busqueda}** añadida a la cola (posición ${estado.cola.length}).`;
-      } else {
-        estado.reproduciendo = true;
-        estado.cancionActual = busqueda;
-        respuesta = `🎵 **KATHERINE MUSIC**\n\n▶️ **Reproduciendo:** ${busqueda}\n🎚️ **Volumen:** ${estado.volumen}/100`;
-      }
-      break;
-    }
-
-    case '-pausa':
-      if (estado.reproduciendo) {
-        estado.reproduciendo = false;
-        respuesta = '⏸️ **Katherine:** Reproducción de música pausada.';
-      } else {
-        respuesta = '⚠️ No hay nada reproduciéndose en este momento.';
-      }
-      break;
-
-    case '-reanudar':
-      if (estado.cancionActual) {
-        estado.reproduciendo = true;
-        respuesta = `▶️ **Katherine:** Reanudando reproducción de **${estado.cancionActual}**.`;
-      } else {
-        respuesta = '⚠️ No hay ninguna pista pausada en este momento.';
-      }
-      break;
-
-    case '-siguiente':
-      if (estado.cola.length > 0) {
-        estado.cancionActual = estado.cola.shift();
-        estado.reproduciendo = true;
-        respuesta = `⏭️ **Katherine:** Reproduciendo ahora **${estado.cancionActual}**.`;
-      } else {
-        estado.reproduciendo = false;
-        estado.cancionActual = null;
-        respuesta = '⏭️ **Katherine:** La cola está vacía, reproductor detenido.';
-      }
-      break;
-
-    case '-pararmusica':
-      estado.reproduciendo = false;
-      estado.cancionActual = null;
-      estado.cola = [];
-      respuesta = '⏹️ **Katherine:** Reproductor detenido y lista de reproducción borrada.';
-      break;
-
-    case '-volumen': {
-      if (args[1] !== undefined) {
-        const nuevoVol = Number(args[1]);
-        if (Number.isInteger(nuevoVol) && nuevoVol >= 0 && nuevoVol <= 100) {
-          estado.volumen = nuevoVol;
-          respuesta = `🎚️ **Katherine:** Volumen fijado en **${estado.volumen}/100**.`;
-        } else {
-          respuesta = '⚠️ **Error:** Ingresa un número entero entre 0 y 100. Ejemplo: `-volumen 50`';
-        }
-      } else {
-        respuesta = `🔊 **Katherine:** Volumen actual de música: **${estado.volumen}/100**.`;
-      }
-      break;
-    }
-
-    default:
-      return; // comando desconocido: se ignora
+  const r = await api(`/live-rooms/${threadId}/join`, 'POST');
+  if (!r.ok || !r.data?.url || !r.data?.token) {
+    const motivo = r.status === 404 || r.status === 403
+      ? 'esta sala no está en vivo o no pertenece a mi comunidad'
+      : `error ${r.status}`;
+    throw new Error(`No pude entrar: ${motivo}.`);
   }
 
-  if (respuesta) await enviarRespuestaChat(ndcId, threadId, respuesta);
+  const room = new Room();
+  await room.connect(r.data.url, r.data.token, { autoSubscribe: false, dynacast: false });
+
+  const source = new AudioSource(SAMPLE_RATE, 1);
+  const track = LocalAudioTrack.createAudioTrack('musica', source);
+  const opts = new TrackPublishOptions();
+  opts.source = TrackSource.SOURCE_MICROPHONE;
+
+  // Anarchy habilita el micrófono unos segundos después de entrar: reintentar
+  let publicado = false;
+  for (let i = 0; i < 20 && !publicado; i++) {
+    try {
+      await room.localParticipant.publishTrack(track, opts);
+      publicado = true;
+    } catch {
+      await sleep(1500);
+    }
+  }
+  if (!publicado) {
+    try { await room.disconnect(); } catch {}
+    await api(`/live-rooms/${threadId}/leave`, 'POST');
+    throw new Error('Entré, pero no me dieron permiso para hablar en la sala.');
+  }
+
+  const s = {
+    threadId, room, source, track,
+    cola: [], actual: null, pausado: false, abortar: false,
+    volumen: 80, reproduciendo: false, procs: []
+  };
+  room.on(RoomEvent.Disconnected, () => limpiar(threadId));
+  sesiones.set(threadId, s);
+  setStatus('En pausa');
+  log(`[VOZ] Entré a la sala ${threadId}`);
+  return s;
 }
 
-// Health check (útil para Render / UptimeRobot)
-app.get('/', (req, res) => res.status(200).send('Katherine online'));
+function matarProcesos(s) {
+  for (const p of s.procs) { try { p.kill('SIGKILL'); } catch {} }
+  s.procs = [];
+}
 
-// Webhook principal
-app.post('/', async (req, res) => {
-  const check = firmaValida(req);
-  if (!check.ok) return res.status(401).send(check.msg);
+function limpiar(threadId) {
+  const s = sesiones.get(threadId);
+  if (!s) return;
+  s.cola = [];
+  s.abortar = true;
+  s.cerrada = true;
+  matarProcesos(s);
+  sesiones.delete(threadId);
+  if (sesiones.size === 0) setStatus(null);
+}
 
-  // Responder rápido para evitar timeouts
-  res.status(200).send('OK');
+async function salirSala(threadId) {
+  const s = sesiones.get(threadId);
+  if (!s) return false;
+  limpiar(threadId);
+  try { await s.room.disconnect(); } catch {}
+  await api(`/live-rooms/${threadId}/leave`, 'POST');
+  log(`[VOZ] Salí de la sala ${threadId}`);
+  return true;
+}
 
+// Decodifica con yt-dlp + ffmpeg y envía el PCM a LiveKit
+async function transmitir(s, pista) {
+  const yt = spawn('yt-dlp', ['-f', 'bestaudio/best', '--no-playlist', '-q', '-o', '-', pista.url],
+    { stdio: ['ignore', 'pipe', 'ignore'] });
+  const ff = spawn('ffmpeg', ['-loglevel', 'quiet', '-i', 'pipe:0', '-f', 's16le', '-ar', String(SAMPLE_RATE), '-ac', '1', 'pipe:1'],
+    { stdio: ['pipe', 'pipe', 'ignore'] });
+  s.procs = [yt, ff];
+  yt.on('error', (e) => log('[yt-dlp]', e.message));
+  ff.on('error', (e) => log('[ffmpeg]', e.message));
+  yt.stdout.on('error', () => {});
+  ff.stdin.on('error', () => {});
+  yt.stdout.pipe(ff.stdin);
+
+  let buf = Buffer.alloc(0);
+  let t0 = Date.now();
+  let n = 0;
   try {
-    const evento = req.body || {};
-    const ndcId = evento.ndcId ?? evento.message?.ndcId;
-    const threadId = evento.threadId ?? evento.message?.threadId;
-    await procesarComando(evento, ndcId, threadId);
-  } catch (err) {
-    console.error('[ERROR PROCESANDO EVENTO]:', err);
+    for await (const chunk of ff.stdout) {
+      if (s.abortar) break;
+      buf = Buffer.concat([buf, chunk]);
+      while (buf.length >= FRAME_BYTES && !s.abortar) {
+        while (s.pausado && !s.abortar) { await sleep(100); t0 = Date.now(); n = 0; }
+        if (s.abortar) break;
+
+        const samples = new Int16Array(FRAME_SAMPLES);
+        const ganancia = s.volumen / 100;
+        for (let i = 0; i < FRAME_SAMPLES; i++) {
+          const v = Math.round(buf.readInt16LE(i * 2) * ganancia);
+          samples[i] = v > 32767 ? 32767 : v < -32768 ? -32768 : v;
+        }
+        buf = buf.subarray(FRAME_BYTES);
+        await s.source.captureFrame(new AudioFrame(samples, SAMPLE_RATE, 1, FRAME_SAMPLES));
+
+        // No adelantarse más de ~400 ms al tiempo real
+        n++;
+        const adelanto = n * 10 - (Date.now() - t0);
+        if (adelanto > 400) await sleep(adelanto - 300);
+      }
+    }
+    if (!s.abortar) { try { await s.source.waitForPlayout(); } catch {} }
+  } finally {
+    matarProcesos(s);
   }
+}
+
+async function bucleReproduccion(s) {
+  if (s.reproduciendo) return;
+  s.reproduciendo = true;
+  try {
+    while (s.cola.length && !s.cerrada) {
+      s.actual = s.cola.shift();
+      s.abortar = false;
+      s.pausado = false;
+      setStatus(`Sonando: ${s.actual.titulo}`);
+      say(s.threadId, `🎵 **Reproduciendo:** ${s.actual.titulo} (${s.actual.duracion})`, [
+        { id: 'pause', label: '⏸ Pausa' },
+        { id: 'resume', label: '▶ Reanudar' },
+        { id: 'next', label: '⏭ Siguiente' },
+        { id: 'stop', label: '⏹ Parar' }
+      ]);
+      try {
+        await transmitir(s, s.actual);
+      } catch (err) {
+        log('[REPRODUCCIÓN ERROR]', err.message);
+        say(s.threadId, `⚠️ Error reproduciendo **${s.actual.titulo}**.`);
+      }
+    }
+  } finally {
+    s.reproduciendo = false;
+    s.actual = null;
+    if (!s.cerrada) setStatus('En pausa');
+  }
+}
+
+// ───────────── Comandos ─────────────
+function ayuda() {
+  const p = PREFIX;
+  return '🤖 **COMANDOS**\n' +
+    `\`${p}entrar\` — Entrar a la sala de este chat\n` +
+    `\`${p}salir\` — Salir de la sala\n` +
+    `\`${p}play <canción o link>\` — Reproducir / añadir a la cola\n` +
+    `\`${p}pausa\` · \`${p}reanudar\` · \`${p}siguiente\` · \`${p}parar\`\n` +
+    `\`${p}cola\` — Ver la cola\n` +
+    `\`${p}ahora\` — Canción actual\n` +
+    `\`${p}volumen <0-100>\` — Ajustar volumen\n` +
+    `\`${p}ping\` · \`${p}info\``;
+}
+
+function accion(threadId, nombre) {
+  const s = sesiones.get(threadId);
+  if (!s) return '⚠️ No estoy en la sala. Usa `' + PREFIX + 'entrar`.';
+  switch (nombre) {
+    case 'pausa':
+      if (!s.actual) return '⚠️ No hay nada reproduciéndose.';
+      s.pausado = true; setStatus('En pausa');
+      return '⏸️ Música pausada.';
+    case 'reanudar':
+      if (!s.actual) return '⚠️ No hay ninguna pista para reanudar.';
+      s.pausado = false; setStatus(`Sonando: ${s.actual.titulo}`);
+      return `▶️ Reanudando **${s.actual.titulo}**.`;
+    case 'siguiente':
+      if (!s.actual) return '⚠️ No hay nada reproduciéndose.';
+      s.abortar = true; matarProcesos(s);
+      return '⏭️ Saltando a la siguiente...';
+    case 'parar':
+      s.cola = []; s.abortar = true; matarProcesos(s);
+      return '⏹️ Reproductor detenido y cola borrada.';
+  }
+  return null;
+}
+
+async function manejarComando(evento) {
+  const { threadId } = evento;
+  const msg = evento.message || {};
+  const contenido = (msg.content || '').trim();
+  if (!threadId || !contenido.startsWith(PREFIX)) return;
+  const resto = contenido.slice(PREFIX.length);
+  if (!/^[a-zA-ZáéíóúñÁÉÍÓÚÑ]/.test(resto)) return;
+
+  const args = resto.split(/\s+/);
+  const cmd = args[0].toLowerCase();
+  const rid = msg.messageId;
+  const responder = (t, b) => say(threadId, t, b, rid);
+  log(`[CMD] ${cmd} | ${msg.author?.nickname || '?'} | ${threadId}`);
+
+  switch (cmd) {
+    case 'ayuda': case 'help':
+      return responder(ayuda());
+
+    case 'ping': {
+      const seg = Math.floor((Date.now() - startTime) / 1000);
+      return responder(`🏓 **Pong!** Activo hace ${seg} s. Salas: ${sesiones.size}/${MAX_SALAS}.`);
+    }
+
+    case 'info':
+      return responder('🤖 **Bot de música** · Node.js + LiveKit · Webhook con HMAC-SHA256.');
+
+    case 'entrar': case 'join':
+      try {
+        await entrarSala(threadId);
+        return responder('🎙️ Estoy en la sala. Usa `' + PREFIX + 'play <canción>`.');
+      } catch (e) { return responder(`⚠️ ${e.message}`); }
+
+    case 'salir': case 'leave':
+      return responder((await salirSala(threadId)) ? '🚪 Salí de la sala.' : '⚠️ No estoy en ninguna sala de este chat.');
+
+    case 'play': case 'p': {
+      const consulta = args.slice(1).join(' ');
+      if (!consulta) return responder(`⚠️ Ejemplo: \`${PREFIX}play Follow Me\``);
+      try {
+        const s = await entrarSala(threadId);
+        const pista = await resolverPista(consulta);
+        s.cola.push(pista);
+        if (s.reproduciendo) responder(`📜 Añadida a la cola (#${s.cola.length}): **${pista.titulo}**`);
+        bucleReproduccion(s);
+      } catch (e) { responder(`⚠️ ${e.message}`); }
+      return;
+    }
+
+    case 'pausa': case 'reanudar': case 'siguiente': case 'skip': case 'parar': case 'stop': {
+      const mapa = { skip: 'siguiente', stop: 'parar' };
+      return responder(accion(threadId, mapa[cmd] || cmd));
+    }
+
+    case 'cola': {
+      const s = sesiones.get(threadId);
+      if (!s || (!s.actual && !s.cola.length)) return responder('📜 La cola está vacía.');
+      const lineas = s.cola.slice(0, 10).map((x, i) => `${i + 1}. ${x.titulo}`);
+      return responder(`📜 **Cola**\n${s.actual ? `▶️ ${s.actual.titulo}\n` : ''}${lineas.join('\n')}`);
+    }
+
+    case 'ahora': {
+      const s = sesiones.get(threadId);
+      return responder(s?.actual ? `🎵 **${s.actual.titulo}** (${s.actual.duracion})` : '⏸️ No suena nada.');
+    }
+
+    case 'volumen': case 'vol': {
+      const s = sesiones.get(threadId);
+      if (!s) return responder('⚠️ No estoy en la sala.');
+      if (args[1] === undefined) return responder(`🔊 Volumen: **${s.volumen}/100**`);
+      const v = Number(args[1]);
+      if (!Number.isInteger(v) || v < 0 || v > 100) return responder('⚠️ Usa un número entero entre 0 y 100.');
+      s.volumen = v;
+      return responder(`🎚️ Volumen fijado en **${v}/100**.`);
+    }
+  }
+}
+
+function manejarInteraccion(evento) {
+  const mapa = { pause: 'pausa', resume: 'reanudar', next: 'siguiente', stop: 'parar' };
+  const nombre = mapa[evento.buttonId];
+  if (!nombre || !evento.threadId) return;
+  const texto = accion(evento.threadId, nombre);
+  if (texto) say(evento.threadId, texto);
+}
+
+// ───────────── Webhook ─────────────
+const app = express();
+app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf.toString('utf8'); } }));
+
+function firmaValida(req) {
+  const ts = req.headers['x-anarchy-bot-timestamp'];
+  const firma = req.headers['x-anarchy-bot-signature'];
+  if (!SECRET || !ts || !firma || !String(firma).startsWith('v1=')) return false;
+  const tsNum = parseInt(ts, 10);
+  if (isNaN(tsNum) || Math.abs(Math.floor(Date.now() / 1000) - tsNum) > 300) return false;
+  const esperado = crypto.createHmac('sha256', SECRET).update(`${ts}.${req.rawBody || ''}`).digest('hex');
+  const recibido = String(firma).slice(3);
+  const a = Buffer.from(esperado);
+  const b = Buffer.from(recibido);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+app.get('/', (req, res) => res.status(200).send('Bot online'));
+
+app.post('/', (req, res) => {
+  if (!firmaValida(req)) return res.status(401).send('Firma inválida.');
+  res.status(200).send('OK'); // responder en < 5 s
+
+  const ev = req.body || {};
+  (async () => {
+    try {
+      switch (ev.type) {
+        case 'message': return await manejarComando(ev);
+        case 'interaction': return manejarInteraccion(ev);
+        case 'room.end': return limpiar(ev.threadId);
+        default: return;
+      }
+    } catch (err) {
+      log('[ERROR EVENTO]', err);
+    }
+  })();
 });
 
-// Manejo de JSON inválido y errores generales
 app.use((err, req, res, next) => {
-  console.error('[ERROR EXPRESS]:', err.message);
   if (!res.headersSent) res.status(400).send('Petición inválida.');
 });
 
-app.listen(PORT, () => {
-  console.log(`[KATHERINE SERVER] Activo en el puerto ${PORT}`);
+app.listen(PORT, async () => {
+  log(`[SERVER] Puerto ${PORT}`);
+  const me = await api('/me');
+  if (me.ok) log('[BOT]', JSON.stringify(me.data));
+  else log('[BOT] No pude leer /me: revisa BOT_TOKEN.');
+  if (/^[!$%&*+\-=~>;]{1,3}$/.test(PREFIX)) api('/me', 'PATCH', { commandPrefix: PREFIX });
 });
+
+async function apagar() {
+  await Promise.all([...sesiones.keys()].map(salirSala));
+  process.exit(0);
+}
+process.on('SIGTERM', apagar);
+process.on('SIGINT', apagar);
