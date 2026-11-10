@@ -15,7 +15,7 @@ if (!BOT_TOKEN) {
 }
 
 // ============================================================================
-// GESTIÓN DE ESTADOS INDEPENDIENTES POR CHAT (THREAD)
+// GESTIÓN DE ESTADOS INDEPENDIENTES POR HILO (THREAD)
 // ============================================================================
 const threadStates = new Map();
 
@@ -77,14 +77,14 @@ async function anarchyAPI(endpoint, method = 'GET', body = null) {
     }
 }
 
-// Sistema de envío con fallback automático ante errores 403 / 404
+// Sistema de envío con fallback automático
 const enviarRespuestaChat = async (threadId, texto) => {
     console.log(`[ENVIANDO MENSAJE] Thread: ${threadId}`);
     
     // Intento 1: Ruta específica del thread
     let resApi = await anarchyAPI(`/threads/${encodeURIComponent(threadId)}/messages`, 'POST', { content: texto });
 
-    // Intento 2: Si el bot da error 403/404, prueba enviar por la ruta alternativa /messages
+    // Intento 2: Ruta alternativa general si da error de ruta/permiso
     if (!resApi.ok && (resApi.status === 403 || resApi.status === 404)) {
         console.warn(`⚠️ [REINTENTO] Falló el envío en thread (${resApi.status}). Probando endpoint alternativo /messages...`);
         resApi = await anarchyAPI('/messages', 'POST', {
@@ -103,10 +103,13 @@ app.post('/', async (req, res) => {
     console.log("\n-------------------------------------------------------");
     console.log("⚡ [WEBHOOK] Petición recibida de Anarchy");
 
+    // Registro detallado de todo el paquete recibido para depuración
+    console.log("📦 PAYLOAD RECIBIDO:", JSON.stringify(req.body, null, 2));
+
     const timestamp = req.headers['x-anarchy-bot-timestamp'];
     const signature = req.headers['x-anarchy-bot-signature'];
 
-    // Validación HMAC permisiva (evita bloqueos si la firma falla en pruebas)
+    // Validación HMAC permisiva
     if (SECRET && timestamp && signature) {
         try {
             const expected = crypto
@@ -128,7 +131,7 @@ app.post('/', async (req, res) => {
         }
     }
 
-    // Responder 200 OK de inmediato para cumplir con los 5s de Anarchy
+    // Responder 200 OK inmediatamente
     res.status(200).send('OK');
 
     const evento = req.body || {};
