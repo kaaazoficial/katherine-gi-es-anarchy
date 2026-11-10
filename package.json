@@ -1,17 +1,15 @@
-
 {
   "name": "katherine-anarchy-bot",
   "version": "1.0.0",
-  "private": true,
-  "description": "Bot de comunidad Katherine para Anarchy",
+  "description": "Bot para la comunidad Anarchy",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
-  "engines": {
-    "node": ">=18"
-  },
   "dependencies": {
     "express": "^4.21.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
