@@ -1,7 +1,7 @@
 {
-  "name": "katherine-gi-es-anarchy",
-  "version": "2.5.0",
-  "description": "Bot Katherine con herramientas de diagnóstico para Anarchy",
+  "name": "katherine-bot-anarchy",
+  "version": "1.0.0",
+  "description": "Bot Katherine para la plataforma Anarchy",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
