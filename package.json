@@ -1,11 +1,11 @@
 {
-  "name": "bot-genshin",
-  "version": "1.0.0",
+  "name": "bot-KATHERINE",
+  "version": "4.0.0",
   "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
+  "scripts": { "start": "node index.js" },
+  "engines": { "node": ">=20" },
   "dependencies": {
+    "@livekit/rtc-node": "latest",
     "express": "^4.19.2"
   }
 }
