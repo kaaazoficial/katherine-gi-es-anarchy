@@ -1,620 +1,486 @@
-
 'use strict';
 
 const express = require('express');
 const crypto = require('crypto');
 
-// ============================================================================
-// CONFIGURACIÓN GENERAL
-// ============================================================================
-
 const app = express();
-
-const BOT_TOKEN = process.env.BOT_TOKEN?.trim();
-const SECRET = process.env.WEBHOOK_SECRET || process.env.WEB_TOKEN;
-const PORT = Number(process.env.PORT) || 3000;
-
-const API_BASE = 'https://api.anarchyapps.org/bot-api/v1';
-const BOT_NAME = 'Katherine';
-
-const REQUEST_TIMEOUT = 12000;
-const MAX_BODY_SIZE = '2mb';
-const MAX_THREAD_STATES = 5000;
-
-const VERIFY_WEBHOOK_SIGNATURE =
-    process.env.VERIFY_WEBHOOK_SIGNATURE === 'true';
-
-const SIGNATURE_HEADER =
-    (process.env.WEBHOOK_SIGNATURE_HEADER || 'x-webhook-signature')
-        .toLowerCase();
-
-const startTime = Date.now();
-
-// ============================================================================
-// VALIDACIÓN DE CONFIGURACIÓN
-// ============================================================================
-
-if (!BOT_TOKEN) {
-    throw new Error(
-        '[FATAL] Falta la variable de entorno obligatoria: BOT_TOKEN.'
-    );
-}
-
-if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
-    throw new Error('[FATAL] El puerto configurado no es válido.');
-}
-
-if (VERIFY_WEBHOOK_SIGNATURE && !SECRET) {
-    throw new Error(
-        '[FATAL] La verificación de firma está activada, pero falta WEBHOOK_SECRET.'
-    );
-}
-
-// ============================================================================
-// MANEJO DE ERRORES CRÍTICOS
-// ============================================================================
-
-process.on('uncaughtExceptionMonitor', (err) => {
-    console.error('💥 [UNCAUGHT EXCEPTION]:', err);
-});
-
-process.on('unhandledRejection', (reason) => {
-    console.error('💥 [UNHANDLED REJECTION]:', reason);
-    process.exit(1);
-});
-
-// ============================================================================
-// ESTADOS INDEPENDIENTES POR THREAD
-// ============================================================================
-
-const threadStates = new Map();
-
-function obtenerEstadoThread(threadId) {
-    const id = String(threadId);
-
-    if (!threadStates.has(id)) {
-
-        // Evitar crecimiento ilimitado de memoria.
-        if (threadStates.size >= MAX_THREAD_STATES) {
-            let oldestId = null;
-            let oldestTime = Infinity;
-
-            for (const [key, value] of threadStates) {
-                if (value.lastActivity < oldestTime) {
-                    oldestTime = value.lastActivity;
-                    oldestId = key;
-                }
-            }
-
-            if (oldestId !== null) {
-                threadStates.delete(oldestId);
-            }
-        }
-
-        threadStates.set(id, {
-            lectura: false,
-            conectado: false,
-            volumen: 30,
-            reproduciendo: false,
-            cancionActual: null,
-            lastActivity: Date.now()
-        });
-    }
-
-    const estado = threadStates.get(id);
-    estado.lastActivity = Date.now();
-
-    return estado;
-}
-
-// ============================================================================
-// MIDDLEWARE EXPRESS
-// ============================================================================
-
 app.disable('x-powered-by');
 
-app.use(express.json({
-    limit: MAX_BODY_SIZE,
+// -----------------------------------------------------------------------------
+// CONFIGURACIÓN
+// En Render configura BOT_TOKEN y WEBHOOK_SECRET.
+// WEB_TOKEN y SECRET se aceptan como nombres alternativos por compatibilidad.
+// -----------------------------------------------------------------------------
+const PORT = Number(process.env.PORT || 3000);
+const API_BASE = 'https://api.anarchyapps.org/bot-api/v1';
+const BOT_TOKEN = (process.env.BOT_TOKEN || '').trim();
+const WEBHOOK_SECRET = (
+  process.env.WEBHOOK_SECRET || process.env.WEB_TOKEN || process.env.SECRET || ''
+).trim();
+const PREFIX = (process.env.COMMAND_PREFIX || '!').trim();
 
-    verify: (req, res, buffer) => {
-        req.rawBody = buffer;
-    }
-}));
+const PREFIX_PATTERN = /^[!$%&*+\-=~>;]{1,3}$/;
+if (!PREFIX_PATTERN.test(PREFIX)) {
+  console.warn(`⚠️ COMMAND_PREFIX "${PREFIX}" no es válido. Se usará "!".`);
+}
+const COMMAND_PREFIX = PREFIX_PATTERN.test(PREFIX) ? PREFIX : '!';
 
-app.use(express.urlencoded({
-    extended: false,
-    limit: MAX_BODY_SIZE
-}));
+if (!BOT_TOKEN) {
+  console.error('❌ Falta BOT_TOKEN en las variables de entorno de Render.');
+}
+if (!WEBHOOK_SECRET) {
+  console.error('❌ Falta WEBHOOK_SECRET (o WEB_TOKEN/SECRET). El webhook rechazará eventos hasta configurarlo.');
+}
 
-// ============================================================================
-// SEGURIDAD: VERIFICACIÓN HMAC OPCIONAL
-// ============================================================================
+// Estado local por chat. No sustituye los permisos que configura el Agente en ACM.
+const threadStates = new Map();
 
-function verificarFirmaWebhook(req) {
+// Evita procesar dos veces el mismo evento si Anarchy lo entrega duplicado.
+const seenEvents = new Set();
+const seenEventOrder = [];
+const MAX_SEEN_EVENTS = 2000;
 
-    if (!VERIFY_WEBHOOK_SIGNATURE) {
-        return true;
-    }
+// Limitadores locales: 1 mensaje/segundo por bot y 1 mensaje/2 segundos por chat,
+// además de los límites por hora indicados por Anarchy.
+let lastBotSendAt = 0;
+const lastThreadSendAt = new Map();
+const botSendHistory = [];
+const threadSendHistory = new Map();
+let sendQueue = Promise.resolve();
 
-    if (!req.rawBody || !SECRET) {
-        return false;
-    }
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
-    const firmaRecibida = req.headers[SIGNATURE_HEADER];
+function getThreadState(threadId) {
+  if (!threadStates.has(String(threadId))) {
+    threadStates.set(String(threadId), {
+      createdAt: new Date().toISOString(),
+      commandCount: 0
+    });
+  }
+  return threadStates.get(String(threadId));
+}
 
-    if (typeof firmaRecibida !== 'string') {
-        return false;
-    }
+function rememberEvent(key) {
+  if (!key) return true;
+  if (seenEvents.has(key)) return false;
+  seenEvents.add(key);
+  seenEventOrder.push(key);
+  if (seenEventOrder.length > MAX_SEEN_EVENTS) {
+    const oldest = seenEventOrder.shift();
+    seenEvents.delete(oldest);
+  }
+  return true;
+}
 
-    const firmaLimpia = firmaRecibida
-        .replace(/^sha256=/i, '')
-        .trim();
+function parseResponseBody(text) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
 
-    // Se espera una firma hexadecimal SHA-256 de 64 caracteres.
-    if (!/^[a-f0-9]{64}$/i.test(firmaLimpia)) {
-        return false;
-    }
+class AnarchyApiError extends Error {
+  constructor(status, data, retryAfter) {
+    super(`Anarchy API respondió HTTP ${status}`);
+    this.name = 'AnarchyApiError';
+    this.status = status;
+    this.data = data;
+    this.retryAfter = retryAfter;
+  }
+}
 
-    const firmaEsperada = crypto
-        .createHmac('sha256', SECRET)
-        .update(req.rawBody)
-        .digest();
+async function anarchyAPI(method, path, body) {
+  if (!BOT_TOKEN) throw new Error('BOT_TOKEN no está configurado.');
 
-    const firmaBuffer = Buffer.from(firmaLimpia, 'hex');
+  const headers = {
+    Authorization: `Bot ${BOT_TOKEN}`,
+    Accept: 'application/json'
+  };
 
-    if (firmaEsperada.length !== firmaBuffer.length) {
-        return false;
-    }
+  const options = { method, headers };
+  if (body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+    options.body = JSON.stringify(body);
+  }
 
-    return crypto.timingSafeEqual(
-        firmaEsperada,
-        firmaBuffer
+  const response = await fetch(`${API_BASE}${path}`, options);
+  const responseText = await response.text();
+  const data = parseResponseBody(responseText);
+
+  if (!response.ok) {
+    throw new AnarchyApiError(
+      response.status,
+      data,
+      response.headers.get('retry-after')
     );
+  }
+
+  return data;
 }
 
-// ============================================================================
-// CLIENTE HTTP ANARCHY API
-// ============================================================================
-
-async function anarchyAPI(endpoint, method = 'GET', body = null) {
-
-    const url = `${API_BASE}${endpoint}`;
-
-    const options = {
-        method,
-
-        headers: {
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-            'Authorization': `Bot ${BOT_TOKEN}`
-        },
-
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT)
-    };
-
-    if (body !== null) {
-        options.body = JSON.stringify(body);
-    }
-
-    try {
-
-        const response = await fetch(url, options);
-        const responseText = await response.text();
-
-        let data = {};
-
-        if (responseText) {
-            try {
-                data = JSON.parse(responseText);
-            } catch {
-                data = {
-                    raw: responseText.slice(0, 2000)
-                };
-            }
-        }
-
-        if (!response.ok) {
-            console.error(
-                `❌ [ANARCHY API] HTTP ${response.status}:`,
-                data
-            );
-        }
-
-        return {
-            ok: response.ok,
-            status: response.status,
-            data
-        };
-
-    } catch (err) {
-
-        const timeout = err.name === 'TimeoutError' ||
-                        err.name === 'AbortError';
-
-        console.error(
-            timeout
-                ? '⏱️ [ANARCHY API] Tiempo de espera agotado.'
-                : '❌ [ANARCHY API] Error de conexión:',
-            err.message
-        );
-
-        return {
-            ok: false,
-            status: 0,
-            data: {
-                error: err.message
-            }
-        };
-    }
+function pruneHistory(history, windowMs, now) {
+  while (history.length && now - history[0] >= windowMs) {
+    history.shift();
+  }
 }
 
-// ============================================================================
-// SISTEMA DE ENVÍO DE MENSAJES
-// ============================================================================
+async function enviarMensajeInterno(threadId, content, options = {}) {
+  const id = String(threadId);
+  const text = String(content || '').trim();
+  if (!id) throw new Error('No se recibió threadId.');
+  if (!text) throw new Error('No se puede enviar un mensaje vacío.');
+  if (text.length > 2000) throw new Error('El mensaje supera los 2000 caracteres permitidos.');
 
-async function enviarRespuestaChat(threadId, texto) {
+  // Espera a que se cumplan los intervalos mínimos documentados.
+  const now = Date.now();
+  const botWait = Math.max(0, 1000 - (now - lastBotSendAt));
+  const lastForThread = lastThreadSendAt.get(id) || 0;
+  const threadWait = Math.max(0, 2000 - (now - lastForThread));
+  await delay(Math.max(botWait, threadWait));
 
-    const id = String(threadId);
+  const sendNow = Date.now();
+  pruneHistory(botSendHistory, 60 * 60 * 1000, sendNow);
+  const perThreadHistory = threadSendHistory.get(id) || [];
+  pruneHistory(perThreadHistory, 10 * 60 * 1000, sendNow);
 
-    // Primer método: endpoint específico del hilo.
-    let resultado = await anarchyAPI(
-        `/threads/${encodeURIComponent(id)}/messages`,
-        'POST',
-        {
-            content: texto
-        }
-    );
+  if (botSendHistory.length >= 300) {
+    throw new Error('Límite local: Katherine ya alcanzó 300 mensajes en la última hora.');
+  }
+  if (perThreadHistory.length >= 60) {
+    throw new Error(`Límite local: este chat ya alcanzó 60 mensajes en los últimos 10 minutos.`);
+  }
 
-    // Método alternativo para casos de permisos o endpoint.
-    if (
-        !resultado.ok &&
-        (resultado.status === 403 || resultado.status === 404)
-    ) {
+  const payload = { content: text };
+  if (Array.isArray(options.buttons) && options.buttons.length) {
+    payload.buttons = options.buttons.slice(0, 5);
+  }
+  if (options.replyMessageId) {
+    payload.replyMessageId = String(options.replyMessageId);
+  }
 
-        resultado = await anarchyAPI(
-            '/messages',
-            'POST',
-            {
-                threadId: id,
-                content: texto
-            }
-        );
-    }
+  // Esta es la única ruta de envío: la documentada por Anarchy.
+  const result = await anarchyAPI(
+    'POST',
+    `/threads/${encodeURIComponent(id)}/messages`,
+    payload
+  );
 
-    return resultado;
+  const sentAt = Date.now();
+  lastBotSendAt = sentAt;
+  lastThreadSendAt.set(id, sentAt);
+  botSendHistory.push(sentAt);
+  perThreadHistory.push(sentAt);
+  threadSendHistory.set(id, perThreadHistory);
+
+  console.log(`✅ [MENSAJE ENVIADO] Thread: ${id}`);
+  return result;
 }
 
-// ============================================================================
-// SISTEMA DE COMANDOS
-// ============================================================================
+// Cola global para que dos respuestas simultáneas no infrinjan el intervalo del bot.
+function enviarMensaje(threadId, content, options = {}) {
+  const task = sendQueue.then(() => enviarMensajeInterno(threadId, content, options));
+  sendQueue = task.catch(() => {});
+  return task;
+}
 
-const COMANDOS = {
+async function obtenerMiPerfil() {
+  return anarchyAPI('GET', '/me');
+}
 
-    '!ayuda': () => {
+function obtenerThreadIds(perfil) {
+  const ids = perfil?.threadIds ?? perfil?.bot?.threadIds ?? [];
+  return Array.isArray(ids) ? ids.map(String) : [];
+}
 
-        return (
-            '🤖 **KATHERINE — CENTRO DE CONTROL**\n\n' +
+async function textoDiagnostico(threadId) {
+  const perfil = await obtenerMiPerfil();
+  const threadIds = obtenerThreadIds(perfil);
+  const pertenece = threadIds.includes(String(threadId));
+  const bot = perfil?.bot ?? perfil;
+  const nombre = bot?.name || bot?.nickname || 'Katherine';
+  const botId = bot?.botId || bot?.id || 'no informado por la API';
 
-            '📖 **COMANDOS GENERALES**\n' +
-            '🔊 `!leerchat` — Activar lectura.\n' +
-            '🔇 `!noleerchat` — Desactivar lectura.\n' +
-            '📊 `!estadochat` — Consultar estado.\n' +
-            '🏓 `!ping` — Comprobar conexión.\n' +
-            '❔ `!ayuda` — Mostrar comandos.\n\n' +
+  console.log('🔎 [DIAGNÓSTICO /me]:', JSON.stringify({
+    botName: nombre,
+    botId,
+    requestedThreadId: String(threadId),
+    threadIds,
+    botIsInThread: pertenece
+  }, null, 2));
 
-            '🎵 **KATHERINE MUSIC**\n' +
-            '▶️ `!play <canción>` — Seleccionar canción.\n' +
-            '🔊 `!volumen <0-100>` — Ajustar volumen.'
-        );
-    },
+  if (pertenece) {
+    return `✅ Diagnóstico de ${nombre}: token reconocido y el chat ${threadId} aparece en threadIds. Si el envío sigue dando 403, revisaremos la respuesta de la API y la pertenencia efectiva del bot.`;
+  }
 
-    '!ping': () => {
+  return `⚠️ El token fue consultado, pero el chat ${threadId} NO aparece en threadIds. Revisa que hayas agregado a este mismo bot (botId: ${botId}) al chat público y que Render use su token actual.`;
+}
 
-        const uptimeSec = Math.floor(
-            (Date.now() - startTime) / 1000
-        );
+function escaparRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
-        return (
-            '🏓 **PONG!**\n\n' +
-            '🟢 **Servidor:** En línea.\n' +
-            `⏱️ **Uptime:** ${uptimeSec}s\n` +
-            '⚡ **Webhook:** Recibido correctamente.'
-        );
-    },
+async function procesarComando(evento) {
+  const mensaje = evento.message || {};
+  const threadId = evento.threadId;
+  const content = typeof mensaje.content === 'string' ? mensaje.content.trim() : '';
+  const messageId = mensaje.messageId || null;
 
-    '!estadochat': (estado, threadId) => {
+  if (!threadId || !content) return;
 
-        return (
-            '📊 **KATHERINE — ESTADO**\n\n' +
-            `🏠 **Thread ID:** ${threadId}\n` +
-            `🔊 **Lectura:** ${estado.lectura ? '🟢 ACTIVADA' : '🔴 DESACTIVADA'}\n` +
-            `🎵 **Música:** ${estado.reproduciendo ? '🟢 ACTIVA' : '🔴 INACTIVA'}\n` +
-            `🎚️ **Volumen:** ${estado.volumen}/100\n` +
-            `🎼 **Canción:** ${estado.cancionActual || 'Ninguna'}`
-        );
-    },
+  // Anarchy documenta que un comando es el prefijo seguido inmediatamente de una letra.
+  const commandRegex = new RegExp(`^${escaparRegex(COMMAND_PREFIX)}[a-z]`, 'i');
+  if (!commandRegex.test(content)) return;
 
-    '!leerchat': (estado) => {
+  const sinPrefijo = content.slice(COMMAND_PREFIX.length).trim();
+  const partes = sinPrefijo.split(/\s+/);
+  const comando = (partes.shift() || '').toLowerCase();
+  const args = partes;
+  const state = getThreadState(threadId);
+  state.commandCount += 1;
 
-        estado.lectura = true;
+  console.log(`🎯 [COMANDO] ${COMMAND_PREFIX}${comando} | Thread: ${threadId} | Usuario: ${mensaje.author?.nickname || 'desconocido'}`);
 
-        return '🔊 **Katherine:** Lectura del chat **ACTIVADA**.';
-    },
+  let respuesta;
 
-    '!noleerchat': (estado) => {
+  switch (comando) {
+    case 'ayuda':
+    case 'help':
+      respuesta = [
+        '✦ **Katherine — Comandos**',
+        `${COMMAND_PREFIX}ping — Comprueba si estoy activa.`,
+        `${COMMAND_PREFIX}diagnostico — Comprueba el token y la presencia en este chat.`,
+        `${COMMAND_PREFIX}estadochat — Muestra mi estado en este chat.`,
+        `${COMMAND_PREFIX}leerchat — Explica el permiso de lectura completa.`,
+        `${COMMAND_PREFIX}noleerchat — Explica dónde administrar ese permiso.`,
+        `${COMMAND_PREFIX}play — Estado de la integración musical.`,
+        `${COMMAND_PREFIX}volumen — Estado del control de volumen.`
+      ].join('\n');
+      break;
 
-        estado.lectura = false;
+    case 'ping':
+      respuesta = 'Pong! ✦ Katherine está activa y el webhook está funcionando.';
+      break;
 
-        return '🔇 **Katherine:** Lectura del chat **DESACTIVADA**.';
-    },
+    case 'diagnostico':
+      try {
+        respuesta = await textoDiagnostico(threadId);
+      } catch (error) {
+        console.error('❌ [DIAGNÓSTICO /me]:', error.message, error.data || '');
+        respuesta = `❌ No pude consultar GET /me: ${error.message}. Revisa el BOT_TOKEN y los logs de Render.`;
+      }
+      break;
 
-    '!play': (estado, threadId, args) => {
+    case 'estadochat':
+      respuesta = `✦ Katherine está activa en este chat. Comandos procesados desde que inició el proceso: ${state.commandCount}.`;
+      break;
 
-        const busqueda = args.slice(1).join(' ').trim();
+    case 'leerchat':
+      respuesta = 'Para que pueda recibir todos los mensajes del chat, el Agente debe activar el permiso de lectura completa en ACM. No puedo concederme ese permiso mediante un comando.';
+      break;
 
-        if (!busqueda) {
-            return '⚠️ Especifica una canción. Ejemplo: `!play Follow Me`';
-        }
+    case 'noleerchat':
+      respuesta = 'El permiso de lectura completa se administra desde ACM por el Agente de la comunidad. Este comando no modifica permisos.';
+      break;
 
-        estado.reproduciendo = true;
-        estado.cancionActual = busqueda;
+    case 'play':
+      respuesta = 'La reproducción de música todavía no está conectada. Requiere la integración de Bot de comunidad y LiveKit, que utiliza una configuración distinta.';
+      break;
 
-        return (
-            '🎵 **KATHERINE MUSIC**\n\n' +
-            `▶️ **Seleccionada:** ${busqueda}\n` +
-            `🎚️ **Volumen:** ${estado.volumen}/100`
-        );
-    },
+    case 'volumen':
+      respuesta = 'El control de volumen estará disponible cuando se integre el reproductor de audio.';
+      break;
 
-    '!volumen': (estado, threadId, args) => {
+    default:
+      return;
+  }
 
-        const valor = args[1];
+  await enviarMensaje(threadId, respuesta, { replyMessageId: messageId });
+}
 
-        if (
-            valor === undefined ||
-            !/^\d{1,3}$/.test(valor)
-        ) {
-            return (
-                '⚠️ Introduce un volumen válido entre 0 y 100.\n' +
-                'Ejemplo: `!volumen 50`'
-            );
-        }
+async function procesarInteraccion(evento) {
+  const threadId = evento.threadId;
+  if (!threadId || !evento.buttonId) return;
 
-        const volumen = Number(valor);
+  const userName = evento.user?.nickname || 'alguien';
+  console.log(`🖱️ [INTERACTION] Botón: ${evento.buttonId} | Thread: ${threadId} | Usuario: ${userName}`);
 
-        if (volumen < 0 || volumen > 100) {
-            return '⚠️ El volumen debe estar entre 0 y 100.';
-        }
-
-        estado.volumen = volumen;
-
-        return (
-            '🎚️ **KATHERINE MUSIC**\n\n' +
-            `🔊 **Volumen establecido:** ${volumen}/100`
-        );
-    }
-};
-
-// ============================================================================
-// PROCESAMIENTO DE EVENTOS
-// ============================================================================
+  const respuesta = `Recibí tu selección: ${evento.buttonId}`;
+  await enviarMensaje(threadId, respuesta, {
+    replyMessageId: evento.messageId || undefined
+  });
+}
 
 async function procesarEvento(evento) {
+  if (!evento || typeof evento !== 'object') return;
 
-    const mensaje = evento.message;
+  console.log('📩 [EVENTO ANARCHY]:', JSON.stringify({
+    type: evento.type || null,
+    botId: evento.botId || null,
+    threadId: evento.threadId || null,
+    ndcId: evento.ndcId ?? null,
+    messageId: evento.message?.messageId || evento.messageId || null,
+    author: evento.message?.author?.nickname || evento.user?.nickname || null
+  }, null, 2));
 
-    if (!mensaje || typeof mensaje.content !== 'string') {
-        return;
-    }
+  switch (evento.type) {
+    case 'message':
+      await procesarComando(evento);
+      break;
 
-  
-const threadId = evento.threadId || mensaje.threadId;
+    case 'interaction':
+      await procesarInteraccion(evento);
+      break;
 
-// DIAGNÓSTICO DE IDENTIFICADORES ANARCHY
-console.log(
-    '📩 [DATOS DEL CHAT]:',
-    JSON.stringify({
-        threadId: evento.threadId ?? null,
-        messageThreadId: mensaje.threadId ?? null,
-        messageId: mensaje.id ?? null,
-        chatId: evento.chatId ?? null,
-        conversationId: evento.conversationId ?? null
-    }, null, 2)
-);
+    case 'room.join':
+    case 'room.speaker':
+    case 'room.leave':
+    case 'room.end':
+      console.log(`🎙️ [EVENTO DE SALA] ${evento.type} | Thread: ${evento.threadId || 'sin threadId'}`);
+      break;
 
-
-    if (
-        threadId === undefined ||
-        threadId === null ||
-        String(threadId).trim() === ''
-    ) {
-        return;
-    }
-
-    const texto = mensaje.content.trim();
-
-    // Ignorar mensajes vacíos y mensajes que no sean comandos.
-    if (!texto || !texto.startsWith('!')) {
-        return;
-    }
-
-    const args = texto.split(/\s+/);
-    const comando = args[0].toLowerCase();
-
-    const ejecutar = COMANDOS[comando];
-
-    // Ignorar comandos desconocidos.
-    if (!ejecutar) {
-        return;
-    }
-
-    const id = String(threadId);
-    const estado = obtenerEstadoThread(id);
-
-    try {
-
-        const respuesta = ejecutar(
-            estado,
-            id,
-            args
-        );
-
-        if (!respuesta) {
-            return;
-        }
-
-        console.log(
-            `🎯 [COMANDO] ${comando} | Thread: ${id}`
-        );
-
-        const resultado = await enviarRespuestaChat(
-            id,
-            respuesta
-        );
-
-        if (!resultado.ok) {
-            console.error(
-                `❌ [ENVÍO FALLIDO] ${comando} | Thread: ${id} | HTTP: ${resultado.status}`
-            );
-        }
-
-    } catch (err) {
-
-        console.error(
-            `💥 [ERROR COMANDO ${comando}]:`,
-            err
-        );
-    }
+    default:
+      console.log(`ℹ️ [EVENTO IGNORADO] Tipo no manejado: ${evento.type || 'sin tipo'}`);
+  }
 }
 
-// ============================================================================
-// ENDPOINT PRINCIPAL DEL WEBHOOK
-// ============================================================================
+function verificarFirma(req) {
+  if (!WEBHOOK_SECRET) {
+    return { ok: false, status: 503, reason: 'Webhook secret no configurado.' };
+  }
 
-app.post('/', (req, res) => {
+  const timestamp = req.get('X-Anarchy-Bot-Timestamp');
+  const signature = req.get('X-Anarchy-Bot-Signature');
+  const rawBody = req.body;
 
-    // Verificar firma antes de aceptar el evento,
-    // únicamente cuando la protección esté configurada.
-    if (!verificarFirmaWebhook(req)) {
+  if (!timestamp || !signature || !Buffer.isBuffer(rawBody)) {
+    return { ok: false, status: 401, reason: 'Faltan headers de firma o cuerpo original.' };
+  }
 
-        console.warn(
-            '🛡️ [SEGURIDAD] Webhook rechazado: firma inválida.'
-        );
+  const timestampNumber = Number(timestamp);
+  if (!Number.isFinite(timestampNumber) || Math.abs(Date.now() / 1000 - timestampNumber) > 300) {
+    return { ok: false, status: 401, reason: 'Timestamp inválido o vencido (máximo 5 minutos).' };
+  }
 
-        return res.status(401).send('Unauthorized');
-    }
+  const match = /^v1=([a-f0-9]{64})$/i.exec(signature.trim());
+  if (!match) {
+    return { ok: false, status: 401, reason: 'Formato de firma inválido.' };
+  }
 
-    // Confirmar recepción inmediatamente a Anarchy.
-    res.status(200).send('OK');
+  const expected = crypto
+    .createHmac('sha256', WEBHOOK_SECRET)
+    .update(`${timestamp}.`, 'utf8')
+    .update(rawBody)
+    .digest();
 
-    const evento = req.body || {};
+  const received = Buffer.from(match[1], 'hex');
+  if (received.length !== expected.length || !crypto.timingSafeEqual(expected, received)) {
+    return { ok: false, status: 401, reason: 'La firma HMAC no coincide.' };
+  }
 
-    // Procesamiento independiente de la respuesta HTTP.
-    void procesarEvento(evento).catch((err) => {
+  return { ok: true };
+}
 
-        console.error(
-            '💥 [ERROR PROCESANDO WEBHOOK]:',
-            err
-        );
+function webhookHandler(req, res) {
+  const firma = verificarFirma(req);
+  if (!firma.ok) {
+    console.warn(`⛔ [WEBHOOK RECHAZADO] ${firma.reason}`);
+    return res.status(firma.status).json({ ok: false, error: firma.reason });
+  }
+
+  let evento;
+  try {
+    evento = JSON.parse(req.body.toString('utf8'));
+  } catch {
+    return res.status(400).json({ ok: false, error: 'JSON inválido.' });
+  }
+
+  const eventKey = evento.type === 'message'
+    ? `message:${evento.threadId}:${evento.message?.messageId}`
+    : evento.type === 'interaction'
+      ? `interaction:${evento.threadId}:${evento.messageId}:${evento.buttonId}:${evento.user?.uid}`
+      : `${evento.type}:${evento.threadId}:${evento.user?.uid || ''}`;
+
+  if (!rememberEvent(eventKey)) {
+    return res.status(200).json({ ok: true, duplicate: true });
+  }
+
+  // Confirmamos la recepción inmediatamente. El procesamiento continúa en segundo plano
+  // dentro del mismo proceso, sin bloquear la respuesta HTTP del webhook.
+  res.status(200).json({ ok: true });
+
+  setImmediate(() => {
+    procesarEvento(evento).catch(error => {
+      console.error('❌ [ERROR PROCESANDO EVENTO]:', error.message);
+      if (error instanceof AnarchyApiError) {
+        console.error('❌ [ANARCHY API]:', JSON.stringify({
+          status: error.status,
+          data: error.data,
+          retryAfter: error.retryAfter
+        }, null, 2));
+      }
+    });
+  });
+}
+
+// El cuerpo se lee como Buffer para calcular HMAC sobre los bytes originales.
+const rawJsonBody = express.raw({ type: 'application/json', limit: '1mb' });
+app.post('/', rawJsonBody, webhookHandler);
+app.post('/webhook', rawJsonBody, webhookHandler);
+
+// Endpoint de salud para Render.
+app.get('/', (_req, res) => {
+  res.json({
+    bot: 'Katherine',
+    status: 'online',
+    uptime: Math.floor(process.uptime())
+  });
+});
+
+app.get('/health', (_req, res) => {
+  res.status(200).json({ ok: true, bot: 'Katherine' });
+});
+
+app.use((error, _req, res, _next) => {
+  console.error('❌ [ERROR EXPRESS]:', error.message);
+  res.status(400).json({ ok: false, error: 'No se pudo procesar la solicitud.' });
+});
+
+const server = app.listen(PORT, () => {
+  console.log(`✅ Katherine está escuchando en el puerto ${PORT}`);
+  console.log(`🔗 Webhook: POST / o POST /webhook`);
+  console.log(`🔐 Firma HMAC: ${WEBHOOK_SECRET ? 'configurada' : 'NO configurada'}`);
+
+  // Comprueba qué bot reconoce el token y qué chats aparecen en threadIds.
+  obtenerMiPerfil()
+    .then(perfil => {
+      const bot = perfil?.bot ?? perfil;
+      console.log('🔎 [ANARCHY /me]:', JSON.stringify({
+        botName: bot?.name || bot?.nickname || 'no informado',
+        botId: bot?.botId || bot?.id || 'no informado',
+        threadIds: obtenerThreadIds(perfil)
+      }, null, 2));
+    })
+    .catch(error => {
+      console.error('❌ [ANARCHY /me] No se pudo verificar el token:', error.message);
+      if (error.data) console.error(JSON.stringify(error.data, null, 2));
     });
 });
-
-// ============================================================================
-// ENDPOINT DE ESTADO DEL SERVIDOR
-// ============================================================================
-
-app.get('/', (req, res) => {
-
-    const uptimeSec = Math.floor(
-        (Date.now() - startTime) / 1000
-    );
-
-    res.status(200).json({
-
-        bot: BOT_NAME,
-        status: 'online',
-        uptime: uptimeSec,
-        activeThreads: threadStates.size
-
-    });
-});
-
-// ============================================================================
-// MANEJO DE RUTAS INEXISTENTES
-// ============================================================================
-
-app.use((req, res) => {
-
-    res.status(404).json({
-        error: 'Endpoint no encontrado.',
-        bot: BOT_NAME
-    });
-});
-
-// ============================================================================
-// MANEJO DE ERRORES EXPRESS
-// ============================================================================
-
-app.use((err, req, res, next) => {
-
-    console.error(
-        '❌ [EXPRESS ERROR]:',
-        err.message
-    );
-
-    if (res.headersSent) {
-        return next(err);
-    }
-
-    res.status(err.status || 500).json({
-        error: 'Error interno del servidor.'
-    });
-});
-
-// ============================================================================
-// INICIO DEL SERVIDOR
-// ============================================================================
-
-const server = app.listen(PORT, '0.0.0.0', () => {
-
-    console.log('');
-    console.log('========================================');
-    console.log('       KATHERINE BOT — ONLINE');
-    console.log('========================================');
-    console.log(`🤖 Bot: ${BOT_NAME}`);
-    console.log(`🌐 Puerto: ${PORT}`);
-    console.log('🟢 Estado: OPERATIVO');
-    console.log(`🛡️ Firma HMAC: ${VERIFY_WEBHOOK_SIGNATURE ? 'ACTIVADA' : 'DESACTIVADA'}`);
-    console.log('⚡ API: ANARCHY');
-    console.log('========================================');
-    console.log('');
-});
-
-// ============================================================================
-// CIERRE CONTROLADO
-// ============================================================================
 
 function cerrarServidor(signal) {
-
-    console.log(`\n⚠️ [SHUTDOWN] Señal recibida: ${signal}`);
-
-    server.close(() => {
-
-        console.log('🛑 [SHUTDOWN] Servidor cerrado correctamente.');
-
-        process.exit(0);
-    });
-
-    setTimeout(() => {
-
-        console.error(
-            '⚠️ [SHUTDOWN] Tiempo agotado. Cerrando proceso.'
-        );
-
-        process.exit(1);
-
-    }, 10000).unref();
+  console.log(`🛑 Recibida señal ${signal}. Cerrando Katherine...`);
+  server.close(() => {
+    console.log('✅ Servidor cerrado.');
+    process.exit(0);
+  });
+  setTimeout(() => process.exit(1), 10000).unref();
 }
 
 process.on('SIGTERM', () => cerrarServidor('SIGTERM'));
 process.on('SIGINT', () => cerrarServidor('SIGINT'));
+process.on('unhandledRejection', error => {
+  console.error('❌ [UNHANDLED REJECTION]:', error);
+});
