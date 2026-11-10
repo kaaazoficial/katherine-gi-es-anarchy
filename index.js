@@ -2,112 +2,204 @@ const express = require('express');
 const crypto = require('crypto');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const SECRET = process.env.WEBHOOK_SECRET || process.env.WEB_TOKEN;
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
+const PORT = process.env.PORT || 3000;
+const startTime = Date.now();
 
-// Middleware para capturar el body en texto plano y poder verificar la firma HMAC
+let estadoBot = {
+  lectura: false,
+  conectado: false,
+  volumen: 30,
+  reproduciendo: false,
+  cancionActual: null
+};
+
 app.use(express.json({
-    verify: (req, res, buf) => {
-        req.rawBody = buf;
-    }
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString();
+  }
 }));
 
-// 1. Verificación automática del token al arrancar el servidor
+app.use(express.urlencoded({ extended: true }));
+
+// 1. Verificación automática del token al arrancar el servidor usando /me
 async function verificarTokenBot() {
-    if (!BOT_TOKEN) {
-        console.log("⚠️ Advertencia: La variable de entorno BOT_TOKEN no está configurada.");
-        return;
+  if (!BOT_TOKEN) {
+    console.log("⚠️ Advertencia: La variable de entorno BOT_TOKEN no está configurada.");
+    return;
+  }
+  try {
+    console.log("🔍 Verificando token de Katherine con la API de Anarchy...");
+    const url = 'https://api.anarchyapps.org/bot-api/v1/me';
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bot ${BOT_TOKEN}`
+      }
+    });
+    const data = await response.json();
+    if (response.ok) {
+      console.log("✅ ¡Token válido! Conectado como:", data.name || data.botId || "Bot de Katherine");
+    } else {
+      console.error("❌ Error de autenticación en la API (/me):", data);
     }
-    try {
-        console.log("🔍 Verificando token de Katherine con la API de Anarchy...");
-        const response = await fetch('https://api.anarchyapps.org/bot-api/v1/me', {
-            method: 'GET',
-            headers: {
-                'Authorization': `Bot ${BOT_TOKEN}`
-            }
-        });
-        const data = await response.json();
-        if (response.ok) {
-            console.log("✅ ¡Token válido! Conectado como:", data.name || data.botId || "Bot de Katherine");
-        } else {
-            console.error("❌ Error de autenticación en la API:", data);
-        }
-    } catch (error) {
-        console.error("❌ Error de red al contactar a Anarchy:", error);
-    }
+  } catch (err) {
+    console.error("❌ Error de red al contactar a Anarchy en el arranque:", err);
+  }
 }
 
-// 2. Ruta para recibir y verificar los webhooks de Anarchy
-app.post('/webhook', async (req, res) => {
+// Cliente HTTP oficial para la API de Anarchy (Basado en la documentación)
+async function anarchyAPI(endpoint, method = 'GET', body = null) {
+  try {
+    const url = `https://api.anarchyapps.org/bot-api/v1${endpoint}`;
+    console.log(`[API REQUEST] ${method} -> ${url}`);
+    
+    const options = {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bot ${BOT_TOKEN}`
+      }
+    };
+    if (body) options.body = JSON.stringify(body);
+
+    const response = await fetch(url, options);
+    const text = await response.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+
+    console.log(`[API RESPONSE] Status: ${response.status} | Body:`, JSON.stringify(data));
+    return { ok: response.ok, status: response.status, data };
+  } catch (err) {
+    console.error(`❌ [ERROR CRÍTICO FETCH]:`, err);
+    return { ok: false, status: 500, data: { error: err.message } };
+  }
+}
+
+// Enviar respuesta al chat (Estructura oficial de Anarchy Bot API)
+const enviarRespuestaChat = async (threadId, texto) => {
+  const payload = {
+    content: texto
+  };
+  console.log(`[ENVIANDO MENSAJE] Thread: ${threadId}`);
+  const resApi = await anarchyAPI(`/threads/${threadId}/messages`, 'POST', payload);
+  return resApi;
+};
+
+// Endpoint principal del Webhook
+app.post('/', async (req, res) => {
+  console.log("\n-------------------------------------------------------");
+  console.log("⚡ [WEBHOOK] Petición recibida de Anarchy");
+
+  const timestamp = req.headers['x-anarchy-bot-timestamp'];
+  const signature = req.headers['x-anarchy-bot-signature'];
+
+  // Validación de firma HMAC (Sección 4 de la documentación)
+  if (SECRET && timestamp && signature) {
     try {
-        // Validación opcional de seguridad HMAC si usas WEBHOOK_SECRET
-        if (WEBHOOK_SECRET && req.headers['x-signature']) {
-            const signature = req.headers['x-signature'];
-            const hmac = crypto.createHmac('sha256', WEBHOOK_SECRET);
-            const digest = hmac.update(req.rawBody).digest('hex');
+      const expected = crypto
+        .createHmac('sha256', SECRET)
+        .update(`${timestamp}.${req.rawBody || ''}`)
+        .digest('hex');
 
-            if (signature !== digest) {
-                console.warn("⚠️ Advertencia: Firma HMAC inválida en el webhook.");
-                return res.status(401).send('Invalid signature');
-            }
-        }
+      const sigClean = signature.startsWith('v1=') ? signature.slice(3) : signature;
+      const sigBuffer = Buffer.from(sigClean);
+      const expBuffer = Buffer.from(expected);
 
-        const payload = req.body;
-        console.log("📥 Webhook recibido:", JSON.stringify(payload, null, 2));
-
-        // Responder inmediatamente a Anarchy con 200 OK para evitar timeouts
-        res.status(200).send('OK');
-
-        // Procesar si es un evento de mensaje
-        if (payload && payload.type === 'message') {
-            const messageText = payload.content || payload.text || '';
-            const threadId = payload.threadId;
-
-            // Ejemplo de comando: -ping
-            if (messageText.trim() === '-ping') {
-                await enviarMensaje(threadId, '¡Pong! 🏓 Hola desde el servidor de Katherine en Render.');
-            }
-        }
-    } catch (error) {
-        console.error("❌ Error procesando el webhook:", error);
+      if (sigBuffer.length !== expBuffer.length || !crypto.timingSafeEqual(sigBuffer, expBuffer)) {
+        console.warn(`⚠️ Advertencia HMAC: La firma no coincide.`);
+      } else {
+        console.log("✅ Firma HMAC validada correctamente.");
+      }
+    } catch (err) {
+      console.error("❌ Error en bloque HMAC:", err.message);
     }
+  }
+
+  // Responder 200 OK inmediatamente para cumplir con la regla de los 5 segundos
+  res.status(200).send('OK');
+
+  const evento = req.body || {};
+  const threadId = evento.threadId;
+  const contenidoTexto = evento.message && evento.message.content;
+
+  if (!contenidoTexto || !threadId) return;
+
+  const texto = contenidoTexto.trim();
+  const args = texto.split(/\s+/);
+  const comando = args[0].toLowerCase();
+
+  console.log(`🎯 [COMANDO DETECTADO]: "${comando}" | Usuario: ${evento.message?.author?.nickname || 'Anónimo'}`);
+
+  let respuesta = null;
+
+  switch (comando) {
+    case '-ayuda':
+    case '!ayuda':
+      respuesta = "🤖 **KATHERINE — CENTRO DE CONTROL**\n\n" +
+                  "📖 **COMANDOS BÁSICOS**\n" +
+                  "🔊 `-leerchat` — Activar lectura.\n" +
+                  "🔇 `-noleerchat` — Desactivar lectura.\n" +
+                  "📊 `-estadochat` — Consultar estado.\n" +
+                  "🏓 `-ping` — Probar estado y tiempo en vivo.\n" +
+                  "🎙️ `-entrar-sala` — Entrar a la llamada.\n" +
+                  "🚪 `-salir` — Desconectar de la llamada.\n\n" +
+                  "🎵 **MÚSICA**\n" +
+                  "▶️ `-play <canción>` — Reproducir.\n" +
+                  "⏸️ `-pausa` — Pausar.\n" +
+                  "🔊 `-volumen <0-100>` — Ajustar volumen.";
+      break;
+
+    case '-ping':
+    case '!ping': {
+      const uptimeSec = Math.floor((Date.now() - startTime) / 1000);
+      respuesta = `🏓 **PONG!** Servidor en línea.\n⏱️ **Uptime:** ${uptimeSec}s\n⚡ Webhook conectado correctamente a Anarchy.`;
+      break;
+    }
+
+    case '-estadochat':
+    case '!estadochat':
+      respuesta = `📊 **KATHERINE — ESTADO**\n🏠 **Thread ID:** ${threadId}\n🔊 **Lectura:** ${estadoBot.lectura ? "🟢 ACTIVADA" : "🔴 DESACTIVADA"}\n🎙️ **Llamada:** ${estadoBot.conectado ? "🟢 CONECTADO" : "⚪ DESCONECTADO"}`;
+      break;
+
+    case '-leerchat':
+    case '!leerchat':
+      estadoBot.lectura = true;
+      respuesta = "🔊 **Katherine:** Lectura del chat **ACTIVADA**.";
+      break;
+
+    case '-noleerchat':
+    case '!noleerchat':
+      estadoBot.lectura = false;
+      respuesta = "🔇 **Katherine:** Lectura del chat **DESACTIVADA**.";
+      break;
+
+    case '-play':
+    case '!play': {
+      const busqueda = args.slice(1).join(' ');
+      if (!busqueda) {
+        respuesta = "⚠️ Especifica la canción. Ejemplo: `-play Follow Me`";
+      } else {
+        estadoBot.reproduciendo = true;
+        estadoBot.cancionActual = busqueda;
+        respuesta = `🎵 **KATHERINE MUSIC**\n\n▶️ **Reproduciendo:** ${busqueda}\n🎚️ **Volumen:** ${estadoBot.volumen}/100`;
+      }
+      break;
+    }
+  }
+
+  if (respuesta) {
+    await enviarRespuestaChat(threadId, respuesta);
+  }
 });
-
-// 3. Función para enviar respuestas de vuelta al chat
-async function enviarMensaje(threadId, texto) {
-    if (!threadId) return;
-    try {
-        const url = `https://api.anarchyapps.org/bot-api/v1/threads/${threadId}/messages`;
-        console.log(`📤 Enviando respuesta al thread: ${threadId}`);
-
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bot ${BOT_TOKEN}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ content: texto })
-        });
-
-        const data = await response.json();
-        if (response.ok) {
-            console.log("✅ Mensaje enviado con éxito al chat.");
-        } else {
-            console.error("❌ Error al enviar mensaje (Si sale 403, revisa que Katherine esté agregada a este chat):", data);
-        }
-    } catch (error) {
-        console.error("❌ Error de red al intentar responder:", error);
-    }
-}
 
 // Ruta base para comprobar que el servicio está online
 app.get('/', (req, res) => {
-    res.send('🚀 Servidor webhook de Katherine activo y operando.');
+  res.send('🚀 Servidor webhook de Katherine activo y operando.');
 });
 
-// Iniciar servidor
 app.listen(PORT, () => {
-    console.log(`🚀 Servidor corriendo en el puerto ${PORT}`);
-    verificarTokenBot();
+  console.log(`[KATHERINE SERVER] Servidor activo en el puerto ${PORT}`);
+  verificarTokenBot();
 });
