@@ -1,8 +1,8 @@
 
 {
   "name": "katherine-anarchy-bot",
-  "version": "2.0.0",
-  "description": "Katherine - Anarchy Community Bot",
+  "version": "4.0.0",
+  "description": "Katherine - Genshin Impact Community Bot",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@livekit/rtc-node": "^1.2.2",
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "genshin-db": "^5.2.15"
   }
 }
