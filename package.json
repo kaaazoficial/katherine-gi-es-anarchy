@@ -1,15 +1,18 @@
+
 {
-  "name": "katherine-bot-anarchy",
-  "version": "1.0.0",
-  "description": "Bot Katherine para la plataforma Anarchy",
+  "name": "katherine-anarchy-bot",
+  "version": "2.0.0",
+  "description": "Katherine - Anarchy Community Bot",
   "main": "index.js",
+  "type": "commonjs",
   "scripts": {
     "start": "node index.js"
   },
-  "dependencies": {
-    "express": "^4.19.2"
-  },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@livekit/rtc-node": "^1.2.2",
+    "express": "^4.21.2"
   }
 }
