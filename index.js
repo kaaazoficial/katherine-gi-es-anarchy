@@ -3,8 +3,7 @@
 
 const express = require('express');
 const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
+const GDB = require('genshin-db');
 
 // ============================================================================
 // KATHERINE — CONFIGURACIÓN
@@ -12,15 +11,12 @@ const path = require('path');
 
 const app = express();
 
-const API_BASE = 'https://api.anarchyapps.org/bot-api/v1';
-
+const API = 'https://api.anarchyapps.org/bot-api/v1';
 const GAME_API = 'https://genshin-db-api.vercel.app/api/v5';
 
-const GITHUB_TREE =
-    'https://api.github.com/repos/Genshin-Impact-Helper-Team/genshin-builds/git/trees/main?recursive=1';
+const TREE_URL = 'https://api.github.com/repos/Genshin-Impact-Helper-Team/genshin-builds/git/trees/main?recursive=1';
 
-const GITHUB_RAW =
-    'https://raw.githubusercontent.com/Genshin-Impact-Helper-Team/genshin-builds/main/';
+const RAW_URL = 'https://raw.githubusercontent.com/Genshin-Impact-Helper-Team/genshin-builds/main/';
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const COMMUNITY_BOT_TOKEN = process.env.COMMUNITY_BOT_TOKEN;
@@ -29,175 +25,168 @@ const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 const COMMUNITY_WEBHOOK_SECRET = process.env.COMMUNITY_WEBHOOK_SECRET;
 
 const PORT = Number(process.env.PORT) || 3000;
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
-const startTime = Date.now();
+const START_TIME = Date.now();
 
-if (!BOT_TOKEN) {
-    throw new Error('Falta BOT_TOKEN.');
-}
+if (!BOT_TOKEN) throw new Error('Falta BOT_TOKEN.');
+if (!WEBHOOK_SECRET) throw new Error('Falta WEBHOOK_SECRET.');
 
 if (!COMMUNITY_BOT_TOKEN) {
-    console.warn('ACM no configurado. Las llamadas estarán desactivadas.');
-}
-
-if (!WEBHOOK_SECRET) {
-    throw new Error('Falta WEBHOOK_SECRET.');
+    console.warn('COMMUNITY_BOT_TOKEN ausente: llamadas desactivadas.');
 }
 
 if (!COMMUNITY_WEBHOOK_SECRET) {
-    console.warn('Falta COMMUNITY_WEBHOOK_SECRET. No se recibirán eventos firmados de ACM.');
+    console.warn('COMMUNITY_WEBHOOK_SECRET ausente: eventos ACM desactivados.');
 }
+
+app.use(express.json({
+    limit: '2mb',
+    verify: (req, res, buf) => {
+        req.rawBody = buf.toString('utf8');
+    }
+}));
+
+app.use(express.urlencoded({
+    extended: true,
+    limit: '2mb'
+}));
 
 // ============================================================================
 // ESTADO GLOBAL
 // ============================================================================
 
-const estado = {
-    developerBotUid: null,
-    communityBotUid: null,
+const state = {
+    developerUid: null,
+    communityUid: null,
 
-    conectado: false,
-
-    lectura: false,
-
-    salas: new Map(),
-
-    zonas: new Map(),
-
-    usuarios: new Map(),
-
-    encuestas: new Map(),
-
+    calls: new Map(),
+    zones: new Map(),
+    points: new Map(),
+    polls: new Map(),
     trivia: new Map(),
-
-    juegos: new Map(),
-
-    deseos: new Map(),
-
-    puntos: new Map()
+    numberGames: new Map(),
+    wishes: new Map()
 };
 
-let eventQueue = Promise.resolve();
-let messageQueue = Promise.resolve();
-
 const processedMessages = new Set();
+const cache = new Map();
 
-const lastGlobalMessage = new Map();
-const lastChatMessage = new Map();
+let eventQueue = Promise.resolve();
+let sendQueue = Promise.resolve();
 
-const apiCache = new Map();
+const lastSent = new Map();
 
-let liveRoomsCache = null;
-let liveRoomsCacheUntil = 0;
-let liveRoomsLastRequest = 0;
-let liveRoomsRequests = [];
-let liveRoomsRequest = null;
+let treeCache = null;
+let treeExpires = 0;
+let treePromise = null;
 
-let buildTreeCache = null;
-let buildTreeCacheUntil = 0;
-let buildTreeRequest = null;
+let roomCache = null;
+let roomCacheExpires = 0;
+let roomPromise = null;
+let lastRoomRequest = 0;
 
-const characterCache = new Map();
-
-// ============================================================================
-// MIDDLEWARE
-// ============================================================================
-
-app.use(express.json({
-    limit: '2mb',
-
-    verify: (req, res, buffer) => {
-        req.rawBody = buffer.toString('utf8');
-    }
-}));
+const roomRequests = [];
 
 // ============================================================================
 // UTILIDADES
 // ============================================================================
 
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-function cleanText(text) {
-    return String(text ?? '')
-        .replace(/[＊*`]/g, '')
-        .replace(/\r/g, '')
-        .trim()
-        .slice(0, 2000);
-}
-
-function normalize(text) {
-    return String(text ?? '')
+const normalize = value =>
+    String(value ?? '')
         .normalize('NFD')
         .replace(/[\u0300-\u036f]/g, '')
         .toLowerCase()
         .trim();
-}
 
-function slugify(text) {
-    return normalize(text)
+const slugify = value =>
+    normalize(value)
         .replace(/[^a-z0-9]+/g, '-')
         .replace(/^-|-$/g, '');
-}
 
-function randomItem(array) {
-    return array[Math.floor(Math.random() * array.length)];
-}
+const random = list =>
+    list[Math.floor(Math.random() * list.length)];
 
-function shuffle(array) {
-    const result = [...array];
+const shuffle = list => {
+    const copy = [...list];
 
-    for (let i = result.length - 1; i > 0; i--) {
+    for (let i = copy.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
 
-        [result[i], result[j]] = [result[j], result[i]];
+        [copy[i], copy[j]] = [copy[j], copy[i]];
     }
 
-    return result;
-}
+    return copy;
+};
 
-function getUserId(author) {
-    return String(author?.uid || author?.nickname || 'anonymous');
-}
+const uidOf = author =>
+    String(author?.uid || author?.nickname || 'unknown');
 
-function getUptime() {
-    let seconds = Math.floor((Date.now() - startTime) / 1000);
+const clean = text =>
+    String(text ?? '')
+        .replace(/[＊*`]/g, '')
+        .replace(/\r/g, '')
+        .trim();
 
-    const days = Math.floor(seconds / 86400);
-    seconds %= 86400;
+const localize = value => {
+    if (typeof value === 'string') return value;
 
-    const hours = Math.floor(seconds / 3600);
-    seconds %= 3600;
+    if (value && typeof value === 'object') {
+        return value.es ||
+            value.ES ||
+            value.en ||
+            value.EN ||
+            Object.values(value).find(x => typeof x === 'string') ||
+            '';
+    }
 
-    const minutes = Math.floor(seconds / 60);
-    seconds %= 60;
+    return '';
+};
 
-    const parts = [];
+const splitText = (text, max = 1750) => {
+    const lines = String(text).split('\n');
 
-    if (days) parts.push(`${days} días`);
-    if (hours) parts.push(`${hours} horas`);
-    if (minutes) parts.push(`${minutes} minutos`);
+    const chunks = [];
+    let current = '';
 
-    parts.push(`${seconds} segundos`);
+    for (const line of lines) {
+        const next = current
+            ? `${current}\n${line}`
+            : line;
 
-    return parts.join(', ');
-}
+        if (next.length > max && current) {
+            chunks.push(current);
+            current = line;
+        } else {
+            current = next;
+        }
 
-function localDate(timezone) {
-    return new Intl.DateTimeFormat('es', {
-        timeZone: timezone,
+        while (current.length > max) {
+            chunks.push(current.slice(0, max));
+            current = current.slice(max);
+        }
+    }
+
+    if (current) chunks.push(current);
+
+    return chunks;
+};
+
+const dateForZone = zone =>
+    new Intl.DateTimeFormat('es', {
+        timeZone: zone,
         weekday: 'long',
         year: 'numeric',
         month: 'long',
         day: 'numeric'
     }).format(new Date());
-}
 
-function validTimezone(timezone) {
+function validZone(zone) {
     try {
         new Intl.DateTimeFormat('es', {
-            timeZone: timezone
+            timeZone: zone
         }).format(new Date());
 
         return true;
@@ -206,1726 +195,117 @@ function validTimezone(timezone) {
     }
 }
 
-function splitMessage(text, limit = 1800) {
-    const lines = String(text).split('\n');
+function uptime() {
+    let s = Math.floor((Date.now() - START_TIME) / 1000);
 
-    const chunks = [];
+    const d = Math.floor(s / 86400);
+    s %= 86400;
 
-    let current = '';
+    const h = Math.floor(s / 3600);
+    s %= 3600;
 
-    for (const line of lines) {
+    const m = Math.floor(s / 60);
+    s %= 60;
 
-        if (line.length > limit) {
-
-            if (current) {
-                chunks.push(current);
-                current = '';
-            }
-
-            for (let i = 0; i < line.length; i += limit) {
-                chunks.push(line.slice(i, i + limit));
-            }
-
-            continue;
-        }
-
-        const candidate = current
-            ? `${current}\n${line}`
-            : line;
-
-        if (candidate.length > limit) {
-            chunks.push(current);
-            current = line;
-        } else {
-            current = candidate;
-        }
-    }
-
-    if (current) {
-        chunks.push(current);
-    }
-
-    return chunks;
+    return [
+        d && `${d} día(s)`,
+        h && `${h} hora(s)`,
+        m && `${m} minuto(s)`,
+        `${s} segundo(s)`
+    ].filter(Boolean).join(', ');
 }
-
-// ============================================================================
-// CURIOSIDADES — SISTEMA SIN REPETICIONES
-// ============================================================================
-
-const curiosities = [
-
-    'Los Tesoros del Abismo y las fuerzas de la Orden del Abismo tienen objetivos distintos a los de los Fatui.',
-
-    'Cyno es el General Mahamatra y tiene autoridad para perseguir infracciones dentro de la Akademiya.',
-
-    'Nahida es conocida como la Pequeña Señorita Kusanali y su nombre de Arconte es Buer.',
-
-    'Dehya recibe el título de Melena Llameante y pertenece a los Eremitas.',
-
-    'Alhaitham ocupa el cargo de escriba de la Akademiya de Sumeru.',
-
-    'Tighnari trabaja como guardabosques y conoce profundamente la flora de la selva de Sumeru.',
-
-    'Nilou es una bailarina del Teatro Zubayr.',
-
-    'Kaeya tiene una relación familiar con el linaje Alberich de Khaenri’ah.',
-
-    'Dainsleif es conocido como el Guardarramas.',
-
-    'La catástrofe de Khaenri’ah ocurrió aproximadamente quinientos años antes del comienzo de la aventura.',
-
-    'Los Once Heraldos Fatui ocupan una posición de gran autoridad en Snezhnaya.',
-
-    'La Espiral del Abismo es un desafío de combate separado de la exploración habitual.',
-
-    'El Viajero puede resonar con diferentes elementos mediante las Estatuas de los Siete.',
-
-    'La Invocación de los Siete es el juego de cartas coleccionables de Teyvat.',
-
-    'Los Adeptus están profundamente vinculados a la historia y protección de Liyue.',
-
-    'Dvalin es conocido como Stormterror y forma parte de los Cuatro Vientos de Mondstadt.',
-
-    'Andrius es conocido como Lupus Boreas y está relacionado con los Cuatro Vientos.',
-
-    'Los melusinos son una especie característica de Fontaine.',
-
-    'Los Arcontes y los Dragones Soberanos tienen orígenes y funciones diferentes.',
-
-    'La Akademiya ha sido durante generaciones uno de los centros de conocimiento más importantes de Teyvat.',
-
-    'La Casa de la Hoguera está vinculada a los asuntos de los Fatui y al Heraldo conocido como la Sota.',
-
-    'Arlecchino tiene el título de Padre dentro de la Casa de la Hoguera.',
-
-    'La Funeraria Wangsheng es una institución histórica de Liyue dirigida por Hu Tao.',
-
-    'El Abismo tiene una profunda conexión con los acontecimientos de Khaenri’ah.',
-
-    'Enkanomiya es una región subterránea situada bajo la isla Watatsumi.',
-
-    'Dragonspine es una zona montañosa de Mondstadt con una historia antigua y una mecánica de frío extremo.',
-
-    'El Abismo y las Profundidades de Teyvat aparecen frecuentemente relacionados con secretos de la historia antigua.',
-
-    'El Dendro representa uno de los elementos fundamentales del sistema de reacciones de Genshin Impact.',
-
-    'El elemento Geo puede generar Cristalización al interactuar con Pyro, Hydro, Electro o Cryo.',
-
-    'La reacción de Electrocargado puede mantener daño Electro en objetivos afectados por Hydro y Electro.',
-
-    'El Reino de los Aranara está relacionado con los sueños y las leyendas de Sumeru.',
-
-    'La Península de Galesong y el Valle Estelar forman parte de la geografía conocida de Mondstadt.',
-
-    'Los Fatui mantienen una red de diplomáticos, soldados y agentes en distintas naciones.',
-
-    'La Orden del Abismo posee miembros que pueden manipular energías y criaturas del Abismo.',
-
-    'Fischl utiliza el nombre de Princesa de la Condenación y viaja acompañada de Oz.',
-
-    'La historia de Inazuma incluye la separación entre Ei y la identidad pública de la Shogun Raiden.',
-
-    'Furina desempeñó durante mucho tiempo un papel público central en Fontaine.',
-
-    'Neuvillette es el Juez Supremo de Fontaine y está vinculado a la historia de los Dragones Soberanos.',
-
-    'La historia de Natlan está estrechamente relacionada con sus seis tribus y sus tradiciones.',
-
-    'El Gremio de Aventureros funciona como una organización presente en varias regiones de Teyvat.',
-
-    'La reputación regional permite obtener recompensas y cosméticos mediante actividades de exploración y encargos.'
-];
-
-let curiosityBag = [];
-
-let lastCuriosity = null;
-
-function nextCuriosity() {
-
-    if (!curiosityBag.length) {
-
-        curiosityBag = shuffle(
-            curiosities.map((_, index) => index)
-        );
-
-        if (
-            curiosityBag.length > 1 &&
-            curiosityBag[0] === lastCuriosity
-        ) {
-            [curiosityBag[0], curiosityBag[1]] =
-                [curiosityBag[1], curiosityBag[0]];
-        }
-    }
-
-    const index = curiosityBag.pop();
-
-    lastCuriosity = index;
-
-    return curiosities[index];
-}
-
-// ============================================================================
-// GENSHIN IMPACT — EQUIPOS RECOMENDADOS
-// ============================================================================
-
-const TEAM_GUIDES = {
-
-    'cyno': [
-        'Cyno / Nahida / Furina / Baizhu — Quickbloom.',
-        'Cyno / Nahida / Xingqiu / Baizhu — Hyperbloom.',
-        'Cyno / Nahida / Yelan / Baizhu — Quickbloom.'
-    ],
-
-    'nahida': [
-        'Nahida / Alhaitham / Yae Miko / Kuki Shinobu — Doble Dendro Aggravate.',
-        'Nahida / Nilou / Kokomi / Collei — Florecimiento.',
-        'Nahida / Cyno / Furina / Baizhu — Quickbloom.'
-    ],
-
-    'dehya': [
-        'Dehya / Bennett / Xiangling / Kazuha — Pyro.',
-        'Dehya / Furina / Bennett / Jean — Vaporizado y soporte.'
-    ],
-
-    'alhaitham': [
-        'Alhaitham / Nahida / Yae Miko / Kuki Shinobu — Spread.',
-        'Alhaitham / Nahida / Xingqiu / Kuki Shinobu — Hyperbloom.',
-        'Alhaitham / Furina / Nahida / Baizhu — Quickbloom.'
-    ],
-
-    'tighnari': [
-        'Tighnari / Nahida / Yae Miko / Zhongli — Spread.',
-        'Tighnari / Fischl / Nahida / Baizhu — Aggravate.'
-    ],
-
-    'nilou': [
-        'Nilou / Nahida / Kokomi / Collei — Florecimiento.',
-        'Nilou / Nahida / Barbara / Yaoyao — Florecimiento.'
-    ],
-
-    'fischl': [
-        'Fischl / Clorinde / Nahida / Kazuha — Aggravate.',
-        'Fischl / Neuvillette / Kazuha / Baizhu — Electro y Hydro.'
-    ],
-
-    'kaeya': [
-        'Kaeya / Shenhe / Kazuha / Kokomi — Congelamiento.',
-        'Kaeya / Xiangling / Bennett / Chongyun — Derretido.'
-    ],
-
-    'hu tao': [
-        'Hu Tao / Xingqiu / Yelan / Zhongli — Vaporizado.',
-        'Hu Tao / Furina / Yelan / Xianyun — Vaporizado.'
-    ],
-
-    'xiao': [
-        'Xiao / Faruzan / Furina / Xianyun — Anemo.',
-        'Xiao / Faruzan / Bennett / Zhongli — DPS Anemo.'
-    ],
-
-    'ganyu': [
-        'Ganyu / Mona / Diona / Venti — Congelamiento.',
-        'Ganyu / Xiangling / Bennett / Zhongli — Derretido.'
-    ],
-
-    'raiden shogun': [
-        'Raiden / Xiangling / Bennett / Xingqiu — Nacional.',
-        'Raiden / Nahida / Yelan / Baizhu — Hyperbloom.'
-    ],
-
-    'kazuha': [
-        'Kazuha / Bennett / Xiangling / Xingqiu — Vaporizado.',
-        'Kazuha / Neuvillette / Furina / Charlotte — Hydro.'
-    ],
-
-    'kamisato ayaka': [
-        'Ayaka / Shenhe / Kokomi / Kazuha — Congelamiento.',
-        'Ayaka / Furina / Charlotte / Kazuha — Congelamiento.'
-    ],
-
-    'furina': [
-        'Furina / Neuvillette / Kazuha / Xilonen — Hydro.',
-        'Furina / Hu Tao / Yelan / Xianyun — Vaporizado.',
-        'Furina / Xiao / Faruzan / Xianyun — Anemo.'
-    ],
-
-    'neuvillette': [
-        'Neuvillette / Furina / Kazuha / Xilonen — Hydro.',
-        'Neuvillette / Furina / Fischl / Baizhu — Electro-Hydro.'
-    ],
-
-    'navia': [
-        'Navia / Furina / Bennett / Xianyun — Geo.',
-        'Navia / Xiangling / Bennett / Zhongli — Cristalización.'
-    ],
-
-    'arlecchino': [
-        'Arlecchino / Yelan / Bennett / Kazuha — Vaporizado.',
-        'Arlecchino / Xingqiu / Bennett / Zhongli — Vaporizado.'
-    ],
-
-    'mavuika': [
-        'Mavuika / Citlali / Xilonen / Bennett — DPS Pyro.',
-        'Mavuika / Furina / Xilonen / Bennett — Vaporizado.'
-    ],
-
-    'kinich': [
-        'Kinich / Emilie / Bennett / Xiangling — Quemadura.',
-        'Kinich / Emilie / Furina / Bennett — Quemadura y Vaporizado.'
-    ],
-
-    'xianyun': [
-        'Xianyun / Xiao / Faruzan / Furina — DPS en caída.',
-        'Xianyun / Gaming / Furina / Bennett — Ataques en caída.'
-    ],
-
-    'yelan': [
-        'Yelan / Hu Tao / Xingqiu / Zhongli — Vaporizado.',
-        'Yelan / Arlecchino / Bennett / Kazuha — Vaporizado.',
-        'Yelan / Nahida / Kuki Shinobu / Alhaitham — Hyperbloom.'
-    ],
-
-    'xingqiu': [
-        'Xingqiu / Hu Tao / Yelan / Zhongli — Vaporizado.',
-        'Xingqiu / Nahida / Kuki Shinobu / Alhaitham — Hyperbloom.'
-    ],
-
-    'xiangling': [
-        'Xiangling / Bennett / Xingqiu / Kazuha — Nacional.',
-        'Xiangling / Childe / Bennett / Kazuha — Internacional.'
-    ],
-
-    'bennett': [
-        'Bennett / Xiangling / Xingqiu / Kazuha — Nacional.',
-        'Bennett / Arlecchino / Yelan / Kazuha — Vaporizado.'
-    ],
-
-    'baizhu': [
-        'Baizhu / Cyno / Nahida / Furina — Quickbloom.',
-        'Baizhu / Neuvillette / Furina / Kazuha — Hydro.'
-    ],
-
-    'zhongli': [
-        'Zhongli / Hu Tao / Xingqiu / Yelan — Vaporizado.',
-        'Zhongli / Navia / Bennett / Xiangling — Cristalización.'
-    ],
-
-    'diluc': [
-        'Diluc / Furina / Bennett / Xianyun — Vaporizado.',
-        'Diluc / Xingqiu / Bennett / Kazuha — Vaporizado.'
-    ],
-
-    'venti': [
-        'Venti / Ganyu / Mona / Diona — Congelamiento.',
-        'Venti / Fischl / Xingqiu / Bennett — Reacciones.'
-    ],
-
-    'raiden': [
-        'Raiden / Xiangling / Bennett / Xingqiu — Nacional.',
-        'Raiden / Nahida / Yelan / Baizhu — Hyperbloom.'
-    ],
-
-    'kuki shinobu': [
-        'Kuki / Nahida / Xingqiu / Alhaitham — Hyperbloom.',
-        'Kuki / Nahida / Yelan / Dendro Traveler — Hyperbloom.'
-    ]
-};
-
-// ============================================================================
-// GENSHIN DB API — CACHÉ
-// ============================================================================
-
-async function fetchJson(url, cacheKey = null, ttl = 0, headers = {}) {
-
-    if (cacheKey && apiCache.has(cacheKey)) {
-
-        const item = apiCache.get(cacheKey);
-
-        if (Date.now() < item.until) {
-            return item.data;
-        }
-    }
-
-    const response = await fetch(url, {
-        method: 'GET',
-
-        headers: {
-            'Accept': 'application/json',
-            'User-Agent': 'Katherine-Genshin-Bot/3.0',
-            ...headers
-        },
-
-        signal: AbortSignal.timeout(15000)
-    });
-
-    if (!response.ok) {
-        throw new Error(`HTTP ${response.status} consultando ${url}`);
-    }
-
-    const data = await response.json();
-
-    if (cacheKey && ttl > 0) {
-
-        apiCache.set(cacheKey, {
-            data,
-            until: Date.now() + ttl
-        });
-    }
-
-    return data;
-}
-
-// ============================================================================
-// CONSULTAR GENSHIN DB
-// ============================================================================
-
-async function gameSearch(folder, query) {
-
-    const params = new URLSearchParams({
-
-        query,
-
-        dumpResult: 'true',
-
-        matchNames: 'true',
-
-        matchAltNames: 'true',
-
-        matchAliases: 'true',
-
-        queryLanguages: 'english,spanish',
-
-        resultLanguage: 'english'
-    });
-
-    const cacheKey = `game:${folder}:${normalizar(query)}`;
-
-    const data = await fetchJson(
-        `${GAME_API}/${folder}?${params}`,
-        cacheKey,
-        6 * 60 * 60 * 1000
-    );
-
-    let result = data?.result ?? data?.data ?? data;
-
-    if (
-        result &&
-        typeof result === 'object' &&
-        result.result &&
-        !result.name
-    ) {
-        result = result.result;
-    }
-
-    if (Array.isArray(result)) {
-        result = result[0];
-    }
-
-    if (!result || typeof result !== 'object') {
-        return {
-            payload: data,
-            result: null
-        };
-    }
-
-    return {
-        payload: data,
-        result
-    };
-}
-
-// ============================================================================
-// GENSHIN BUILDS — CONSULTAR ÁRBOL DE GITHUB
-// ============================================================================
-
-async function getBuildTree() {
-
-    if (
-        buildTreeCache &&
-        Date.now() < buildTreeCacheUntil
-    ) {
-        return buildTreeCache;
-    }
-
-    if (buildTreeRequest) {
-        return buildTreeRequest;
-    }
-
-    buildTreeRequest = (async () => {
-
-        const headers = {
-            'Accept': 'application/vnd.github+json',
-            'X-GitHub-Api-Version': '2022-11-28',
-            'User-Agent': 'Katherine-Genshin-Bot'
-        };
-
-        if (process.env.GITHUB_TOKEN) {
-            headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
-        }
-
-        const response = await fetch(
-            GITHUB_TREE,
-            {
-                headers,
-                signal: AbortSignal.timeout(25000)
-            }
-        );
-
-        if (!response.ok) {
-            throw new Error(
-                `GitHub respondió HTTP ${response.status}.`
-            );
-        }
-
-        const data = await response.json();
-
-        if (!Array.isArray(data.tree)) {
-            throw new Error('GitHub no devolvió el índice de builds.');
-        }
-
-        if (data.truncated) {
-            throw new Error('El índice de builds fue truncado por GitHub.');
-        }
-
-        buildTreeCache = data.tree
-            .filter(item => item.type === 'blob')
-            .map(item => item.path);
-
-        buildTreeCacheUntil =
-            Date.now() + 6 * 60 * 60 * 1000;
-
-        console.log(
-            `[GENSHIN BUILDS] Índice cargado: ${buildTreeCache.length} archivos.`
-        );
-
-        return buildTreeCache;
-    })();
-
-    try {
-        return await buildTreeRequest;
-    } finally {
-        buildTreeRequest = null;
-    }
-}
-
-// ============================================================================
-// ALIASES DE PERSONAJES
-// ============================================================================
-
-const CHARACTER_ALIASES = {
-
-    'kamisato ayaka': ['ayaka'],
-
-    'kaedehara kazuha': ['kazuha'],
-
-    'raiden shogun': ['raiden'],
-
-    'sangonomiya kokomi': ['kokomi'],
-
-    'arataki itto': ['itto'],
-
-    'yae miko': ['yae'],
-
-    'shikanoin heizou': ['heizou'],
-
-    'kuki shinobu': ['kuki-shinobu'],
-
-    'tartaglia': ['childe', 'tartaglia'],
-
-    'wanderer': ['wanderer', 'scaramouche'],
-
-    'faruzan': ['faruzan'],
-
-    'traveler anemo': ['anemo-traveler', 'traveler-anemo'],
-
-    'traveler geo': ['geo-traveler', 'traveler-geo'],
-
-    'traveler electro': ['electro-traveler', 'traveler-electro'],
-
-    'traveler dendro': ['dendro-traveler', 'traveler-dendro'],
-
-    'traveler hydro': ['hydro-traveler', 'traveler-hydro'],
-
-    'traveler pyro': ['pyro-traveler', 'traveler-pyro']
-};
-
-// ============================================================================
-// BUSCAR BUILD DE UN PERSONAJE
-// ============================================================================
-
-function characterSlugCandidates(query, record, payload) {
-
-    const candidates = new Set();
-
-    const values = [
-        payload?.filename,
-        record?.filename,
-        query,
-        record?.name
-    ];
-
-    for (const value of values) {
-
-        if (!value) continue;
-
-        candidates.add(slugify(value));
-    }
-
-    const aliasKey = normalizar(query);
-
-    for (const alias of CHARACTER_ALIASES[aliasKey] || []) {
-        candidates.add(slugify(alias));
-    }
-
-    return [...candidates];
-}
-
-async function fetchRawJson(filePath) {
-
-    const url = GITHUB_RAW +
-        filePath.split('/').map(encodeURIComponent).join('/');
-
-    try {
-
-        return await fetchJson(
-            url,
-            `raw:${filePath}`,
-            6 * 60 * 60 * 1000
-        );
-
-    } catch (err) {
-
-        console.log(
-            `[GENSHIN BUILDS] Archivo opcional no disponible: ${filePath}`
-        );
-
-        return null;
-    }
-}
-
-function getBuildFolders(tree, root) {
-
-    const prefix = `${root}/`;
-
-    const folders = new Set();
-
-    const supportedFiles = [
-        'weapons.json',
-        'artifacts-sets.json',
-        'build-notes.json',
-        'talents.json'
-    ];
-
-    for (const file of tree) {
-
-        if (!file.startsWith(prefix)) continue;
-
-        const remaining = file.slice(prefix.length);
-
-        const parts = remaining.split('/');
-
-        if (parts.length < 2) continue;
-
-        if (!supportedFiles.includes(parts[parts.length - 1])) {
-            continue;
-        }
-
-        folders.add(parts[0]);
-    }
-
-    return [...folders];
-}
-
-// ============================================================================
-// FORMATEAR CONTENIDO DE BUILDS
-// ============================================================================
-
-const TRANSLATIONS = {
-
-    'gilded-dreams': 'Sueños Áureos',
-    'deepwood-memories': 'Recuerdos del Bosque',
-    'emblem-of-severed-fate': 'Emblema del Destino',
-    'thundering-fury': 'Furia del Trueno',
-    'viridescent-venerer': 'Sombra Verde Esmeralda',
-    'crimson-witch-of-flames': 'Bruja Carmesí en Llamas',
-    'noblesse-oblige': 'Ritual Antiguo de la Nobleza',
-    'gladiators-finale': 'Final del Gladiador',
-    'wanderers-troupe': 'Orquesta del Errante',
-    'blizzard-strayer': 'Nómada del Invierno',
-    'tenacity-of-the-millelith': 'Tenacidad de la Geoarmada',
-    'marechaussee-hunter': 'Cazador Fantasmal',
-    'golden-troupe': 'Compañía Dorada',
-    'nighttime-whispers-in-the-echoing-woods': 'Susurros Nocturnos',
-    'flower-of-paradise-lost': 'Flor Olvidada del Paraíso',
-    'desert-pavilion-chronicle': 'Crónica del Pabellón del Desierto',
-    'ocean-hued-clam': 'Perla Oceánica',
-    'husk-of-opulent-dreams': 'Cáscara de Sueños Opulentos',
-
-    'staff-of-the-scarlet-sands': 'Báculo de las Arenas Escarlatas',
-    'primordial-jade-winged-spear': 'Lanza Primordial de Jade',
-    'staff-of-homa': 'Báculo de Homa',
-    'deathmatch': 'Duelo a Muerte',
-    'the-catch': 'La Captura',
-    'engulfing-lightning': 'Luz del Segador',
-    'wolf-fang': 'Colmillo de Lobo',
-    'aqua-simulacra': 'Simulacro Acuático',
-    'favonius-sword': 'Espada de Favonius',
-    'freedom-sworn': 'Juramento por la Libertad',
-
-    'atk%': 'ATQ%',
-    'hp%': 'Vida%',
-    'def%': 'DEF%',
-    'em': 'Maestría Elemental',
-    'er': 'Recarga de Energía',
-    'cr': 'Probabilidad CRIT',
-    'cd': 'Daño CRIT',
-    'cr/cd': 'Probabilidad CRIT / Daño CRIT',
-    'atk': 'ATQ',
-    'hp': 'Vida'
-};
 
 function displayId(value) {
-
-    if (value === null || value === undefined) {
-        return 'No especificado';
-    }
+    if (value == null) return 'No especificado';
 
     if (typeof value === 'object') {
-
-        if (value.name) {
-            return displayId(value.name);
-        }
-
-        return JSON.stringify(value);
+        return displayId(value.name || value.id || '');
     }
 
-    const original = String(value).trim();
+    const id = String(value)
+        .replace(/\[\[(?:[^:\]]+:)?([^\]]+)\]\]/g, '$1');
 
-    const key = original.toLowerCase();
+    const names = {
+        'atk%': 'ATQ%',
+        'hp%': 'Vida%',
+        'def%': 'DEF%',
+        em: 'Maestría elemental',
+        er: 'Recarga de energía',
+        cr: 'Probabilidad CRIT',
+        cd: 'Daño CRIT',
+        na: 'Ataque normal',
+        ca: 'Ataque cargado',
+        skill: 'Habilidad elemental',
+        burst: 'Habilidad definitiva',
+        'pyro-dmg': 'Daño Pyro',
+        'hydro-dmg': 'Daño Hydro',
+        'electro-dmg': 'Daño Electro',
+        'cryo-dmg': 'Daño Cryo',
+        'dendro-dmg': 'Daño Dendro',
+        'anemo-dmg': 'Daño Anemo',
+        'geo-dmg': 'Daño Geo',
+        'physical-dmg': 'Daño físico'
+    };
 
-    if (TRANSLATIONS[key]) {
-        return TRANSLATIONS[key];
-    }
-
-    return original
-        .replace(/\[\[(?:[^:\]]+:)?([^\]]+)\]\]/g, '$1')
-        .replace(/-/g, ' ')
-        .replace(/\b\w/g, letter => letter.toUpperCase());
+    return names[id.toLowerCase()] ||
+        id.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
-function localized(value) {
-
-    if (typeof value === 'string') {
-        return value;
-    }
-
-    if (value && typeof value === 'object') {
-        return value.es || value.en || value.fr ||
-            Object.values(value).find(v => typeof v === 'string') ||
-            '';
-    }
-
-    return '';
-}
-
-function cleanGuideNote(value) {
-
-    return localized(value)
+function guideText(value) {
+    return localize(value)
         .replace(/\[\[(?:[^:\]]+:)?([^\]]+)\]\]/g, (_, id) => displayId(id))
-        .replace(/\*\*/g, '')
         .replace(/[`*_]/g, '')
         .replace(/\{rot:[^}]+\}/g, '')
         .trim();
 }
 
-function rankedItems(groups, maximum = 5) {
-
-    if (!Array.isArray(groups)) {
-        return [];
-    }
-
-    return groups
-        .slice(0, maximum)
-        .map((group, index) => {
-
-            const items = group.items || [];
-
-            const names = items.map(item => {
-
-                if (typeof item === 'string') {
-                    return displayId(item);
-                }
-
-                let name = displayId(item.name);
-
-                if (item.refinement) {
-                    name += ` R${item.refinement}`;
-                }
-
-                if (item.note) {
-                    name += ` (${cleanGuideNote(item.note)})`;
-                }
-
-                return name;
-            });
-
-            return `${index + 1}. ${names.join(' / ')}`;
-        });
-}
-
-function formatWeapons(data) {
-
-    const weapons = data?.weapons?.weapons;
-
-    const result = rankedItems(weapons, 6);
-
-    return result.length
-        ? result.join('\n')
-        : 'No hay clasificación disponible.';
-}
-
-function formatArtifacts(data) {
-
-    const sets = data?.['artifacts-sets']?.artifact_sets;
-
-    if (!Array.isArray(sets) || !sets.length) {
-        return 'No hay clasificación disponible.';
-    }
-
-    return sets.slice(0, 3).map((entry, index) => {
-
-        const groups = entry.groups || [];
-
-        const options = groups.map(group => {
-
-            const items = group.items || [];
-
-            return items.map(item => {
-
-                const nombre = displayId(item.name || item);
-
-                const pieces = item.pieces
-                    ? ` ${item.pieces} piezas`
-                    : '';
-
-                return `${nombre}${pieces}`;
-            }).join(' + ');
-
-        }).filter(Boolean);
-
-        return `${index + 1}. ${options.join(' / ')}`;
-
-    }).join('\n');
-}
-
-function formatMainStats(data) {
-
-    const stats =
-        data?.['artifacts-mainstats']?.main_stats;
-
-    if (!stats) {
-        return 'No disponible.';
-    }
-
-    const format = list => {
-
-        if (!Array.isArray(list)) return 'No especificado';
-
-        return list.slice(0, 3)
-            .map(item => displayId(item))
-            .join(' / ');
-    };
-
-    return (
-        `Reloj: ${format(stats.sands)}\n` +
-        `Cáliz: ${format(stats.goblet)}\n` +
-        `Corona: ${format(stats.circlet)}`
-    );
-}
-
-function formatSubStats(data) {
-
-    const list =
-        data?.['artifacts-substats']?.substats_priority;
-
-    if (!Array.isArray(list)) {
-        return 'No disponible.';
-    }
-
-    return list.slice(0, 6).map((item, index) => {
-
-        if (typeof item === 'string') {
-            return `${index + 1}. ${displayId(item)}`;
-        }
-
-        if (item.items) {
-            return `${index + 1}. ${item.items.map(displayId).join(' / ')}`;
-        }
-
-        return `${index + 1}. ${displayId(item.name)}`;
-
-    }).join('\n');
-}
-
-function formatTalents(data) {
-
-    const talents = data?.talents?.talents;
-
-    if (!Array.isArray(talents)) {
-        return 'No disponible.';
-    }
-
-    return rankedItems(talents, 4);
-}
-
-function formatBuildNotes(notes) {
-
-    if (!notes) return '';
-
-    const values = (notes.notes || [])
-        .map(cleanGuideNote)
-        .filter(Boolean)
-        .slice(0, 3);
-
-    return values.join('\n');
-}
-
 // ============================================================================
-// CARGAR GUÍAS DE PERSONAJES
+// ANARCHY API — CADA BOT UTILIZA SU TOKEN PROPIO
 // ============================================================================
 
-async function getCharacterGuide(query) {
-
-    const key = normalizar(query);
-
-    if (characterCache.has(key)) {
-        return characterCache.get(key);
-    }
-
-    const dbResult = await gameSearch(
-        'characters',
-        query
-    );
-
-    const character = dbResult.result;
-
-    if (!character) {
-        return null;
-    }
-
-    const name = character.name || query;
-
-    const candidates = characterSlugCandidates(
-        query,
-        character,
-        dbResult.payload
-    );
-
-    const tree = await getBuildTree();
-
-    const metadataPath = tree.find(file => {
-
-        if (!file.endsWith('/metadata.json')) {
-            return false;
-        }
-
-        const folder = file
-            .split('/')
-            .slice(-2, -1)[0]
-            .toLowerCase();
-
-        return candidates.some(
-            candidate => candidate.toLowerCase() === folder
-        );
-    });
-
-    let root = null;
-
-    let metadata = null;
-
-    if (metadataPath) {
-
-        root = metadataPath.replace(
-            /\/metadata\.json$/,
-            ''
-        );
-
-        metadata = await fetchRawJson(metadataPath);
-    }
-
-    let builds = [];
-
-    if (root) {
-
-        const folderNames = getBuildFolders(
-            tree,
-            root
-        );
-
-        const candidatesBuild = folderNames.slice(0, 12);
-
-        builds = await Promise.all(
-            candidatesBuild.map(async folder => {
-
-                const notes = await fetchRawJson(
-                    `${root}/${folder}/build-notes.json`
-                );
-
-                return {
-                    folder,
-                    notes
-                };
-            })
-        );
-
-        builds = builds.sort((a, b) => {
-
-            if (a.notes?.best && !b.notes?.best) return -1;
-            if (!a.notes?.best && b.notes?.best) return 1;
-
-            return a.folder.localeCompare(b.folder);
-        });
-
-        builds = builds.slice(0, 3);
-
-        builds = await Promise.all(
-            builds.map(async build => {
-
-                const files = {};
-
-                const names = [
-                    'weapons.json',
-                    'artifacts-sets.json',
-                    'artifacts-mainstats.json',
-                    'artifacts-substats.json',
-                    'talents.json'
-                ];
-
-                for (const filename of names) {
-
-                    files[filename] = await fetchRawJson(
-                        `${root}/${build.folder}/${filename}`
-                    );
-
-                    // Los archivos compartidos pueden estar en la carpeta raíz.
-                    if (!files[filename]) {
-
-                        files[filename] = await fetchRawJson(
-                            `${root}/${filename}`
-                        );
-                    }
-                }
-
-                return {
-                    ...build,
-                    files
-                };
-            })
-        );
-    }
-
-    const result = {
-        name,
-        character,
-        metadata,
-        builds,
-        root,
-        payload: dbResult.payload
-    };
-
-    characterCache.set(key, result);
-
-    return result;
+function tokenFor(source) {
+    return source === 'community'
+        ? COMMUNITY_BOT_TOKEN
+        : BOT_TOKEN;
 }
 
-// ============================================================================
-// MATERIALES DE ASCENSIÓN Y TALENTOS
-// ============================================================================
-
-function extractMaterials(character) {
-
-    const roots = [];
-
-    const directKeys = [
-        'costs',
-        'ascensionCosts',
-        'ascensionMaterials',
-        'talentMaterials',
-        'materials'
-    ];
-
-    for (const key of directKeys) {
-
-        if (character[key]) {
-            roots.push({
-                path: key,
-                data: character[key]
-            });
-        }
-    }
-
-    const grouped = {
-        ascension: new Map(),
-        talent: new Map(),
-        other: new Map()
-    };
-
-    function addMaterial(name, count, category) {
-
-        if (!name) return;
-
-        const group =
-            category === 'ascension'
-                ? grouped.ascension
-                : category === 'talent'
-                    ? grouped.talent
-                    : grouped.other;
-
-        const key = String(name);
-
-        const numeric = Number(count);
-
-        const value = Number.isFinite(numeric)
-            ? numeric
-            : 0;
-
-        group.set(
-            key,
-            (group.get(key) || 0) + value
-        );
-    }
-
-    function walk(node, route = [], depth = 0) {
-
-        if (!node || depth > 12) return;
-
-        if (Array.isArray(node)) {
-
-            for (const item of node) {
-                walk(item, route, depth + 1);
-            }
-
-            return;
-        }
-
-        if (typeof node !== 'object') return;
-
-        const name =
-            node.name ||
-            node.materialName ||
-            node.itemName ||
-            node.material;
-
-        const count =
-            node.count ??
-            node.amount ??
-            node.quantity;
-
-        if (
-            name &&
-            count !== undefined &&
-            count !== null
-        ) {
-
-            const categoryPath = route
-                .join('.')
-                .toLowerCase();
-
-            let category = 'other';
-
-            if (/ascend|promote|character/.test(categoryPath)) {
-                category = 'ascension';
-            } else if (/talent|skill/.test(categoryPath)) {
-                category = 'talent';
-            }
-
-            addMaterial(
-                typeof name === 'object'
-                    ? localized(name)
-                    : name,
-                count,
-                category
-            );
-
-            return;
-        }
-
-        for (const [key, value] of Object.entries(node)) {
-
-            if (['description', 'icon', 'image'].includes(key)) {
-                continue;
-            }
-
-            walk(
-                value,
-                [...route, key],
-                depth + 1
-            );
-        }
-    }
-
-    for (const item of roots) {
-        walk(item.data, [item.path]);
-    }
-
-    function formatGroup(group) {
-
-        return [...group.entries()]
-            .filter(([name]) => name)
-            .map(([name, count]) => {
-
-                const amount = count > 0
-                    ? `${count} × `
-                    : '';
-
-                return `${amount}${name}`;
-            });
-    }
-
-    return {
-        ascension: formatGroup(grouped.ascension),
-        talent: formatGroup(grouped.talent),
-        other: formatGroup(grouped.other)
-    };
-}
-
-function formatMaterials(character) {
-
-    const materials = extractMaterials(character);
-
-    const lines = [];
-
-    if (materials.ascension.length) {
-
-        lines.push(
-            'ASCENSIÓN',
-            ...materials.ascension.slice(0, 20).map(x => `• ${x}`)
-        );
-    }
-
-    if (materials.talent.length) {
-
-        lines.push(
-            'TALENTOS',
-            ...materials.talent.slice(0, 20).map(x => `• ${x}`)
-        );
-    }
-
-    if (materials.other.length) {
-
-        lines.push(
-            'OTROS MATERIALES',
-            ...materials.other.slice(0, 10).map(x => `• ${x}`)
-        );
-    }
-
-    if (!lines.length) {
-
-        lines.push(
-            'La fuente de datos no devolvió la tabla de costes para este personaje.',
-            'Puedes consultar su progresión en https://genshindb.com/es/'
-        );
-    }
-
-    return lines.join('\n');
-}
-
-// ============================================================================
-// EQUIPOS
-// ============================================================================
-
-function getRecommendedTeams(name) {
-
-    const key = normalize(name);
-
-    const teams = TEAM_GUIDES[key];
-
-    if (!teams) {
-        return (
-            'No tengo una composición verificada guardada para este personaje.\n' +
-            'Puedes consultar guías de teoría de juego en https://keqingmains.com/'
-        );
-    }
-
-    return (
-        'EQUIPOS RECOMENDADOS\n\n' +
-        teams.map((team, index) => `${index + 1}. ${team}`).join('\n')
-    );
-}
-
-// ============================================================================
-// GENERAR FICHA COMPLETA
-// ============================================================================
-
-function characterSummary(guide) {
-
-    const character = guide.character;
-
-    const element =
-        character.elementType ||
-        character.element ||
-        character.vision ||
-        'No especificado';
-
-    const weapon =
-        character.weaponType ||
-        character.weapon ||
-        'No especificado';
-
-    const rarity =
-        character.rarity ||
-        character.stars ||
-        '?';
-
-    return (
-        `${guide.name}\n` +
-        `Rareza: ${rarity} estrellas\n` +
-        `Elemento: ${element}\n` +
-        `Arma: ${weapon}\n` +
-        `Región: ${character.region || character.nation || 'No especificada'}`
-    );
-}
-
-function characterBuildText(guide, buildIndex = 0) {
-
-    if (!guide.builds.length) {
-
-        return (
-            'No encontré una build publicada para este personaje en la fuente consultada.\n' +
-            'Fuente: https://genshin-impact-helper-team.github.io/genshin-builds/'
-        );
-    }
-
-    const index = Math.max(
-        0,
-        Math.min(buildIndex, guide.builds.length - 1)
-    );
-
-    const build = guide.builds[index];
-
-    const files = build.files;
-
-    const notes = build.notes || {};
-
-    const title =
-        cleanGuideNote(notes.name) ||
-        displayId(build.folder);
-
-    const version =
-        notes.last_updated ||
-        guide.metadata?.last_updated ||
-        'No indicada';
-
-    const parts = [
-
-        `BUILD: ${title}`,
-
-        `Actualización de guía: ${version}`,
-
-        '',
-
-        'ARMAS RECOMENDADAS',
-
-        formatWeapons({
-            weapons: files['weapons.json']
-        }),
-
-        '',
-
-        'ARTEFACTOS',
-
-        formatArtifacts({
-            'artifacts-sets.json':
-                files['artifacts-sets.json']
-        }),
-
-        '',
-
-        'ESTADÍSTICAS PRINCIPALES',
-
-        formatMainStats({
-            'artifacts-mainstats.json':
-                files['artifacts-mainstats.json']
-        }),
-
-        '',
-
-        'SUBESTADÍSTICAS',
-
-        formatSubStats({
-            'artifacts-substats.json':
-                files['artifacts-substats.json']
-        }),
-
-        '',
-
-        'PRIORIDAD DE TALENTOS',
-
-        formatTalents({
-            'talents.json':
-                files['talents.json']
-        })
-    ];
-
-    const notesText = formatBuildNotes(notes);
-
-    if (notesText) {
-        parts.push('', 'NOTAS DE LA BUILD', notesText);
-    }
-
-    parts.push(
-        '',
-        'Fuente de builds: https://genshin-impact-helper-team.github.io/genshin-builds/'
-    );
-
-    return parts.join('\n');
-}
-
-async function fullCharacterReport(name) {
-
-    const guide = await getCharacterGuide(name);
-
-    if (!guide) {
-        return `No encontré información de ${name} en Genshin-DB. Revisa el nombre e inténtalo nuevamente.`;
-    }
-
-    const build = characterBuildText(guide);
-
-    const materials = formatMaterials(
-        guide.character
-    );
-
-    const teams = getRecommendedTeams(
-        guide.name
-    );
-
-    return [
-        'KATHERINE — ARCHIVO DE PERSONAJE',
-        '',
-        characterSummary(guide),
-        '',
-        build,
-        '',
-        'MATERIALES DE PROGRESIÓN',
-        materials,
-        '',
-        teams
-    ].join('\n');
-}
-
-// ============================================================================
-// CACHÉ DE JUEGOS Y ENTRETENIMIENTO
-// ============================================================================
-
-const triviaQuestions = [
-
-    {
-        question: '¿Qué elemento utiliza Cyno?',
-        options: ['Pyro', 'Electro', 'Dendro', 'Anemo'],
-        answer: 1
-    },
-
-    {
-        question: '¿Cómo se llama la Arconte Dendro?',
-        options: ['Ei', 'Furina', 'Nahida', 'Mavuika'],
-        answer: 2
-    },
-
-    {
-        question: '¿Qué ciudad está vinculada a los contratos?',
-        options: ['Mondstadt', 'Liyue', 'Inazuma', 'Fontaine'],
-        answer: 1
-    },
-
-    {
-        question: '¿Qué organización posee once Heraldos?',
-        options: ['Caballeros de Favonius', 'Fatui', 'Adeptus', 'Gremio'],
-        answer: 1
-    },
-
-    {
-        question: '¿Cuál es el arma de Dehya?',
-        options: ['Arco', 'Lanza', 'Mandoble', 'Catalizador'],
-        answer: 2
-    },
-
-    {
-        question: '¿Qué planeta es conocido como el planeta rojo?',
-        options: ['Venus', 'Marte', 'Júpiter', 'Saturno'],
-        answer: 1
-    },
-
-    {
-        question: '¿Cuántos corazones tiene un pulpo?',
-        options: ['Uno', 'Dos', 'Tres', 'Cuatro'],
-        answer: 2
-    },
-
-    {
-        question: '¿Qué gas es el más abundante en la atmósfera terrestre?',
-        options: ['Oxígeno', 'Nitrógeno', 'Dióxido de carbono', 'Hidrógeno'],
-        answer: 1
-    },
-
-    {
-        question: '¿Quién dirige la Funeraria Wangsheng?',
-        options: ['Yelan', 'Hu Tao', 'Ganyu', 'Ningguang'],
-        answer: 1
-    },
-
-    {
-        question: '¿Qué elemento representa la libertad?',
-        options: ['Anemo', 'Geo', 'Electro', 'Hydro'],
-        answer: 0
-    },
-
-    {
-        question: '¿Cuál es el satélite natural de la Tierra?',
-        options: ['Fobos', 'Luna', 'Europa', 'Titán'],
-        answer: 1
-    },
-
-    {
-        question: '¿Qué país tiene forma de bota?',
-        options: ['España', 'Italia', 'Portugal', 'Grecia'],
-        answer: 1
-    },
-
-    {
-        question: '¿Cómo se llama la asistente de Cyno?',
-        options: ['Collei', 'Candace', 'No existe una asistente oficial con ese cargo', 'Nilou'],
-        answer: 2
-    },
-
-    {
-        question: '¿Qué instrumento utiliza Venti?',
-        options: ['Lira', 'Violín', 'Piano', 'Flauta traversa'],
-        answer: 0
-    }
-];
-
-const jokes = [
-    '¿Por qué el Viajero nunca se pierde? Porque siempre tiene un punto de teletransporte pendiente.',
-    'Cyno entró a una biblioteca. No contó ningún chiste: estaba en modo serio de investigación.',
-    '¿Qué le dijo un slime a otro? ¡Nos vemos en la siguiente reacción!',
-    '¿Por qué el Abismo no tiene vacaciones? Porque siempre está trabajando en las profundidades.',
-    'Mi conexión con Teyvat es tan fuerte que hasta el lag quiere quedarse conmigo.',
-    '¿Qué hace un Hilichurl cuando tiene frío? Se acerca al Pyro Regisvid.',
-    '¿Por qué el jugador nunca tiene Mora? Porque cada mejora tiene un precio.',
-    'El jefe dijo que hoy había que trabajar en equipo. Yo elegí cuatro personajes y me fui a la Espiral.'
-];
-
-const phrases = [
-    'No necesitas recorrer todo Teyvat en un día. Una aventura también se construye paso a paso.',
-    'Incluso el viajero más fuerte necesita descansar.',
-    'Los caminos difíciles también conducen a lugares extraordinarios.',
-    'No todas las victorias se consiguen luchando. Algunas se consiguen resistiendo.',
-    'Que tu próximo destino sea más brillante que el anterior.',
-    'Los recuerdos de cada aventura también son parte del tesoro.'
-];
-
-const challenges = [
-    'Completa un dominio sin utilizar comida.',
-    'Derrota un jefe usando un personaje que no sueles utilizar.',
-    'Explora una zona que todavía no hayas completado al 100%.',
-    'Gana una batalla utilizando un equipo de cuatro elementos diferentes.',
-    'Completa un desafío sin usar teletransporte.',
-    'Utiliza un personaje de cuatro estrellas durante toda una expedición.',
-    'Consigue un logro que todavía no tengas.',
-    'Visita una estatua de los Siete y recupera tus fuerzas.'
-];
-
-const standardFiveStars = [
-    'Diluc',
-    'Jean',
-    'Mona',
-    'Qiqi',
-    'Keqing',
-    'Tighnari',
-    'Dehya'
-];
-
-const featuredFiveStars = [
-    'Cyno',
-    'Nahida',
-    'Furina',
-    'Neuvillette',
-    'Arlecchino',
-    'Mavuika',
-    'Dehya'
-];
-
-function getScoreKey(uid) {
-    return String(uid);
-}
-
-function addPoints(uid, amount) {
-
-    const key = getScoreKey(uid);
-
-    estado.puntos.set(
-        key,
-        (estado.puntos.get(key) || 0) + amount
-    );
-}
-
-// ============================================================================
-// DESEOS SIMULADOS
-// ============================================================================
-
-function getWishState(uid) {
-
-    const key = String(uid);
-
-    if (!estado.deseos.has(key)) {
-
-        estado.deseos.set(key, {
-            pity5: 0,
-            pity4: 0,
-            guaranteed: false,
-            fiveStars: 0,
-            fourStars: 0
-        });
-    }
-
-    return estado.deseos.get(key);
-}
-
-function simulateWish(uid) {
-
-    const data = getWishState(uid);
-
-    data.pity5++;
-    data.pity4++;
-
-    let chanceFive = 0.006;
-
-    if (data.pity5 >= 74) {
-        chanceFive = Math.min(
-            1,
-            0.006 + (data.pity5 - 73) * 0.06
-        );
-    }
-
-    const fiveStar =
-        data.pity5 >= 90 ||
-        Math.random() < chanceFive;
-
-    if (fiveStar) {
-
-        const featured =
-            data.guaranteed || Math.random() < 0.5;
-
-        const result = featured
-            ? randomItem(featuredFiveStars)
-            : randomItem(standardFiveStars);
-
-        data.guaranteed = !featured;
-
-        data.pity5 = 0;
-        data.pity4 = 0;
-
-        data.fiveStars++;
-
-        return {
-            stars: 5,
-            name: result,
-            featured
-        };
-    }
-
-    const fourStar =
-        data.pity4 >= 10 ||
-        Math.random() < 0.051;
-
-    if (fourStar) {
-
-        data.pity4 = 0;
-
-        data.fourStars++;
-
-        return {
-            stars: 4,
-            name: randomItem([
-                'Bennett',
-                'Xingqiu',
-                'Fischl',
-                'Sucrose',
-                'Diona',
-                'Rosaria',
-                'Kuki Shinobu',
-                'Yaoyao'
-            ])
-        };
-    }
-
-    return {
-        stars: 3,
-        name: randomItem([
-            'Espada del Alba',
-            'Gran Espada Sangrienta',
-            'Arco de Cuervo',
-            'Cuentos de Cazadores de Dragones',
-            'Lanza de Hierro Blanco'
-        ])
-    };
-}
-
-// ============================================================================
-// ANARCHY API — TOKEN SEGÚN ORIGEN
-// ============================================================================
-
-function getToken(source) {
-
-    if (source === 'community') {
-        return COMMUNITY_BOT_TOKEN;
-    }
-
-    return BOT_TOKEN;
-}
-
-async function anarchyAPI(
+async function anarchy(
     endpoint,
     method = 'GET',
     body = null,
     source = 'developer',
-    sensitive = false
+    hide = false
 ) {
-
-    const token = getToken(source);
+    const token = tokenFor(source);
 
     if (!token) {
-
         return {
             ok: false,
             status: 500,
             data: {
-                error: `Falta token para el origen ${source}.`
+                error: `Falta token ${source}.`
             }
         };
     }
 
     try {
+        const options = {
+            method,
 
-        const response = await fetch(
-            `${API_BASE}${endpoint}`,
-            {
-                method,
+            headers: {
+                Authorization: `Bot ${token}`,
+                'Content-Type': 'application/json',
+                Accept: 'application/json'
+            },
 
-                headers: {
-                    'Authorization': `Bot ${token}`,
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json'
-                },
+            signal: AbortSignal.timeout(15000)
+        };
 
-                body: body === null
-                    ? undefined
-                    : JSON.stringify(body),
+        if (body !== null) {
+            options.body = JSON.stringify(body);
+        }
 
-                signal: AbortSignal.timeout(15000)
-            }
-        );
+        const response = await fetch(`${API}${endpoint}`, options);
 
         const raw = await response.text();
 
@@ -1937,16 +317,10 @@ async function anarchyAPI(
             data = { raw };
         }
 
-        if (sensitive) {
-            console.log(
-                `[ANARCHY API] ${method} ${endpoint} -> ${response.status} (respuesta protegida)`
-            );
-        } else {
-            console.log(
-                `[ANARCHY API] ${method} ${endpoint} -> ${response.status}`,
-                data
-            );
-        }
+        console.log(
+            `[ANARCHY] ${method} ${endpoint} -> ${response.status}`,
+            hide ? '(respuesta protegida)' : data
+        );
 
         return {
             ok: response.ok,
@@ -1955,65 +329,50 @@ async function anarchyAPI(
             retryAfter: response.headers.get('retry-after')
         };
 
-    } catch (err) {
-
-        console.error(
-            '[ANARCHY API ERROR]',
-            err.message
-        );
+    } catch (error) {
+        console.error('[ANARCHY FETCH]', error.message);
 
         return {
             ok: false,
             status: 500,
             data: {
-                error: err.message
+                error: error.message
             }
         };
     }
 }
 
 // ============================================================================
-// DIAGNÓSTICO DE AMBOS BOTS
+// CARGAR PERFILES DE AMBOS BOTS
 // ============================================================================
 
-async function loadBotProfiles() {
-
-    console.log('[KATHERINE] Consultando perfil de Desarrolladores.');
-
-    const developer = await anarchyAPI(
+async function loadProfiles() {
+    const dev = await anarchy(
         '/me',
         'GET',
         null,
         'developer'
     );
 
-    if (developer.ok) {
+    if (dev.ok) {
+        state.developerUid = dev.data?.bot?.uid || null;
 
-        const bot = developer.data?.bot || {};
-
-        estado.developerBotUid = bot.uid || null;
-
-        console.log('[DEVELOPER BOT]', {
-            name: bot.name,
-            uid: bot.uid,
-            botId: bot.botId,
-            threadIds: developer.data?.threadIds || []
-        });
-
+        console.log(
+            '[BOT DESARROLLADOR]',
+            dev.data?.bot,
+            'Chats:',
+            dev.data?.threadIds || []
+        );
     } else {
-
         console.error(
-            '[DEVELOPER BOT ERROR]',
-            developer.status,
-            developer.data
+            '[BOT DESARROLLADOR]',
+            dev.status,
+            dev.data
         );
     }
 
     if (COMMUNITY_BOT_TOKEN) {
-
-        console.log('[KATHERINE] Consultando perfil de comunidad.');
-
-        const community = await anarchyAPI(
+        const community = await anarchy(
             '/me',
             'GET',
             null,
@@ -2021,30 +380,22 @@ async function loadBotProfiles() {
         );
 
         if (community.ok) {
+            state.communityUid = community.data?.bot?.uid || null;
 
-            const bot = community.data?.bot || {};
-
-            estado.communityBotUid = bot.uid || null;
-
-            console.log('[COMMUNITY BOT]', {
-                name: bot.name,
-                uid: bot.uid,
-                threadIds: community.data?.threadIds || []
-            });
-
+            console.log(
+                '[BOT COMUNIDAD]',
+                community.data?.bot,
+                'Chats:',
+                community.data?.threadIds || []
+            );
         } else {
-
             console.error(
-                '[COMMUNITY BOT ERROR]',
+                '[BOT COMUNIDAD]',
                 community.status,
                 community.data
             );
         }
     }
-
-    console.log(
-        '[KATHERINE] Perfiles consultados.'
-    );
 }
 
 // ============================================================================
@@ -2055,64 +406,42 @@ function sendMessage(
     threadId,
     text,
     source = 'developer',
-    replyMessageId = null,
-    buttons = null
+    replyId = null
 ) {
-
     const id = String(threadId || '');
-
-    const content = cleanText(text);
+    const content = clean(text).slice(0, 2000);
 
     if (!id || !content) {
-
         return Promise.resolve({
             ok: false,
             status: 400,
             data: {
-                error: 'Falta threadId o contenido.'
+                error: 'Falta threadId o texto.'
             }
         });
     }
 
-    const task = messageQueue.then(async () => {
+    const task = sendQueue.then(async () => {
+        const key = `${source}:${id}`;
 
-        const now = Date.now();
+        const previous = lastSent.get(key) || 0;
 
-        const globalLast =
-            lastGlobalMessage.get(source) || 0;
-
-        const chatKey = `${source}:${id}`;
-
-        const chatLast =
-            lastChatMessage.get(chatKey) || 0;
-
-        const globalWait = Math.max(
+        const wait = Math.max(
             0,
-            1050 - (now - globalLast)
+            1100 - (Date.now() - previous)
         );
 
-        const chatWait = Math.max(
-            0,
-            2050 - (now - chatLast)
-        );
-
-        await sleep(
-            Math.max(globalWait, chatWait)
-        );
+        if (wait) await sleep(wait);
 
         const payload = {
             content
         };
 
-        if (replyMessageId) {
-            payload.replyMessageId = String(replyMessageId);
+        if (replyId) {
+            payload.replyMessageId = String(replyId);
         }
 
-        if (Array.isArray(buttons) && buttons.length) {
-            payload.buttons = buttons.slice(0, 5);
-        }
-
-        let result = await anarchyAPI(
+        let result = await anarchy(
             `/threads/${encodeURIComponent(id)}/messages`,
             'POST',
             payload,
@@ -2120,20 +449,15 @@ function sendMessage(
         );
 
         if (result.status === 429) {
-
             const retry = Number(result.retryAfter);
 
-            const wait = Number.isFinite(retry) && retry > 0
-                ? retry * 1000
-                : 3000;
-
-            console.warn(
-                `[RATE LIMIT] Esperando ${wait} ms.`
+            await sleep(
+                Number.isFinite(retry) && retry > 0
+                    ? retry * 1000
+                    : 2500
             );
 
-            await sleep(wait);
-
-            result = await anarchyAPI(
+            result = await anarchy(
                 `/threads/${encodeURIComponent(id)}/messages`,
                 'POST',
                 payload,
@@ -2142,122 +466,1677 @@ function sendMessage(
         }
 
         if (result.ok) {
-
-            const sent = Date.now();
-
-            lastGlobalMessage.set(source, sent);
-
-            lastChatMessage.set(chatKey, sent);
+            lastSent.set(key, Date.now());
+        } else {
+            console.error(
+                '[SEND ERROR]',
+                result.status,
+                result.data
+            );
         }
 
         return result;
     });
 
-    messageQueue = task.catch(err => {
-        console.error('[MESSAGE QUEUE ERROR]', err);
+    sendQueue = task.catch(error => {
+        console.error('[SEND QUEUE]', error);
     });
 
     return task;
 }
 
-async function sendLongMessage(
+async function sendLong(
     threadId,
     text,
     source = 'developer',
-    replyMessageId = null
+    replyId = null
 ) {
-
-    const chunks = splitMessage(
-        cleanText(text),
-        1800
-    );
+    const chunks = splitText(clean(text));
 
     const results = [];
 
     for (let i = 0; i < chunks.length; i++) {
-
         const result = await sendMessage(
             threadId,
             chunks[i],
             source,
-            i === 0 ? replyMessageId : null
+            i === 0 ? replyId : null
         );
 
         results.push(result);
 
-        if (!result.ok) {
-            break;
-        }
+        if (!result.ok) break;
     }
 
     return results;
 }
 
 // ============================================================================
-// LIVE-ROOMS — LIMITES DE ANARCHY
+// GENSHIN-DB — BASE DE DATOS LOCAL Y API DE RESPALDO
+// ============================================================================
+
+const DB_OPTIONS = {
+    dumpResult: true,
+    matchNames: true,
+    matchAltNames: true,
+    matchAliases: true,
+    queryLanguages: ['English', 'Spanish'],
+    resultLanguage: 'Spanish'
+};
+
+function unwrap(value) {
+    if (!value) return null;
+
+    if (Array.isArray(value)) {
+        return value[0] || null;
+    }
+
+    if (value.result !== undefined) {
+        return value.result;
+    }
+
+    return value;
+}
+
+async function gameData(folder, query) {
+    const key = `game:${folder}:${normalize(query)}`;
+
+    const cached = cache.get(key);
+
+    if (cached && cached.until > Date.now()) {
+        return cached.value;
+    }
+
+    // Primera opción: base de datos local.
+    try {
+        const result = unwrap(
+            GDB.searchFolder(folder, query, DB_OPTIONS)
+        );
+
+        if (result) {
+            cache.set(key, {
+                value: result,
+                until: Date.now() + 12 * 60 * 60 * 1000
+            });
+
+            return result;
+        }
+
+    } catch (error) {
+        console.warn(
+            `[GENSHIN DB LOCAL] ${folder}/${query}: ${error.message}`
+        );
+    }
+
+    // Segunda opción: API HTTP.
+    try {
+        const params = new URLSearchParams({
+            query,
+            dumpResult: 'true',
+            matchNames: 'true',
+            matchAltNames: 'true',
+            matchAliases: 'true',
+            queryLanguages: 'english,spanish',
+            resultLanguage: 'spanish'
+        });
+
+        const response = await fetch(
+            `${GAME_API}/${encodeURIComponent(folder)}?${params}`,
+            {
+                headers: {
+                    Accept: 'application/json'
+                },
+                signal: AbortSignal.timeout(15000)
+            }
+        );
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+
+        const result = unwrap(await response.json());
+
+        if (!result) return null;
+
+        cache.set(key, {
+            value: result,
+            until: Date.now() + 6 * 60 * 60 * 1000
+        });
+
+        return result;
+
+    } catch (error) {
+        console.error(
+            `[GENSHIN DB HTTP] ${folder}/${query}: ${error.message}`
+        );
+
+        return null;
+    }
+}
+
+// ============================================================================
+// GENSHIN BUILDS — ÍNDICE DEL REPOSITORIO
+// ============================================================================
+
+async function getBuildTree(force = false) {
+    if (
+        !force &&
+        treeCache &&
+        treeExpires > Date.now()
+    ) {
+        return treeCache;
+    }
+
+    if (treePromise) return treePromise;
+
+    treePromise = (async () => {
+        const headers = {
+            Accept: 'application/vnd.github+json',
+            'User-Agent': 'Katherine-Genshin-Bot',
+            'X-GitHub-Api-Version': '2022-11-28'
+        };
+
+        if (GITHUB_TOKEN) {
+            headers.Authorization = `Bearer ${GITHUB_TOKEN}`;
+        }
+
+        const response = await fetch(
+            TREE_URL,
+            {
+                headers,
+                signal: AbortSignal.timeout(25000)
+            }
+        );
+
+        if (!response.ok) {
+            throw new Error(`GitHub respondió HTTP ${response.status}.`);
+        }
+
+        const payload = await response.json();
+
+        if (!Array.isArray(payload.tree) || payload.truncated) {
+            throw new Error('GitHub devolvió un índice incompleto.');
+        }
+
+        treeCache = payload.tree
+            .filter(x => x.type === 'blob')
+            .map(x => x.path);
+
+        treeExpires = Date.now() + 60 * 60 * 1000;
+
+        console.log(
+            `[BUILDS] Índice cargado: ${treeCache.length} archivos.`
+        );
+
+        return treeCache;
+    })();
+
+    try {
+        return await treePromise;
+    } finally {
+        treePromise = null;
+    }
+}
+
+const aliases = {
+    raiden: 'raiden-shogun',
+    ayaka: 'kamisato-ayaka',
+    kazuha: 'kaedehara-kazuha',
+    kokomi: 'sangonomiya-kokomi',
+    itto: 'arataki-itto',
+    yae: 'yae-miko',
+    childe: 'tartaglia',
+    scaramouche: 'wanderer',
+    shinobu: 'kuki-shinobu',
+    kuki: 'kuki-shinobu'
+};
+
+function slugCandidates(query, character) {
+    const result = new Set();
+
+    for (const value of [
+        query,
+        character?.name,
+        character?.id,
+        character?.filename
+    ]) {
+        if (typeof value !== 'string' || !value.trim()) continue;
+
+        const slug = slugify(value);
+
+        result.add(slug);
+
+        if (aliases[slug]) {
+            result.add(aliases[slug]);
+        }
+    }
+
+    return [...result];
+}
+
+async function fetchBuildFile(file) {
+    const key = `build:${file}`;
+
+    const cached = cache.get(key);
+
+    if (cached && cached.until > Date.now()) {
+        return cached.value;
+    }
+
+    const url = RAW_URL +
+        file.split('/').map(encodeURIComponent).join('/');
+
+    try {
+        const response = await fetch(
+            url,
+            {
+                headers: {
+                    Accept: 'application/json'
+                },
+                signal: AbortSignal.timeout(15000)
+            }
+        );
+
+        if (!response.ok) return null;
+
+        const json = await response.json();
+
+        cache.set(key, {
+            value: json,
+            until: Date.now() + 6 * 60 * 60 * 1000
+        });
+
+        return json;
+
+    } catch (error) {
+        console.warn(
+            `[BUILDS] No se pudo leer ${file}: ${error.message}`
+        );
+
+        return null;
+    }
+}
+
+const BUILD_FILES = [
+    'build-notes.json',
+    'weapons.json',
+    'artifacts-sets.json',
+    'artifacts-mainstats.json',
+    'artifacts-substats.json',
+    'talents.json'
+];
+
+async function findCharacterBuilds(query, character) {
+    const tree = await getBuildTree();
+
+    const candidates = slugCandidates(
+        query,
+        character
+    );
+
+    const metadataPath = tree.find(file =>
+        file.startsWith('src/content/') &&
+        file.endsWith('/metadata.json') &&
+        candidates.includes(file.split('/').at(-2))
+    );
+
+    if (!metadataPath) return null;
+
+    const root = metadataPath.slice(0, -'/metadata.json'.length);
+    const prefix = `${root}/`;
+
+    const rootFiles = new Set();
+    const folders = new Map();
+
+    for (const file of tree) {
+        if (!file.startsWith(prefix)) continue;
+
+        const parts = file.slice(prefix.length).split('/');
+
+        if (parts.length === 1) {
+            rootFiles.add(parts[0]);
+        } else if (
+            parts.length === 2 &&
+            BUILD_FILES.includes(parts[1])
+        ) {
+            if (!folders.has(parts[0])) {
+                folders.set(parts[0], new Set());
+            }
+
+            folders.get(parts[0]).add(parts[1]);
+        }
+    }
+
+    const metadata = await fetchBuildFile(metadataPath) || {};
+
+    const shared = {};
+
+    for (const filename of BUILD_FILES) {
+        if (rootFiles.has(filename)) {
+            shared[filename] = await fetchBuildFile(
+                `${root}/${filename}`
+            );
+        }
+    }
+
+    const builds = [];
+
+    for (const [folder, files] of folders.entries()) {
+        const data = {};
+
+        for (const filename of BUILD_FILES) {
+            data[filename] = files.has(filename)
+                ? await fetchBuildFile(`${root}/${folder}/${filename}`)
+                : (shared[filename] || null);
+        }
+
+        const notes = data['build-notes.json'] || {};
+
+        const updated =
+            notes.last_updated ||
+            metadata.last_updated ||
+            '';
+
+        if (String(updated).toUpperCase() === 'WIP') continue;
+
+        builds.push({
+            folder,
+            name: guideText(notes.name) || displayId(folder),
+            best: Boolean(notes.best),
+            updated,
+            data
+        });
+    }
+
+    if (
+        !builds.length &&
+        BUILD_FILES.some(file => shared[file])
+    ) {
+        builds.push({
+            folder: 'general',
+            name: 'Build general',
+            best: true,
+            updated: metadata.last_updated || '',
+            data: shared
+        });
+    }
+
+    builds.sort((a, b) =>
+        a.best !== b.best
+            ? Number(b.best) - Number(a.best)
+            : a.name.localeCompare(b.name)
+    );
+
+    return {
+        root,
+        metadata,
+        builds
+    };
+}
+
+// ============================================================================
+// FORMATO DE BUILDS
+// ============================================================================
+
+function buildItem(item) {
+    if (typeof item === 'string') return displayId(item);
+    if (!item || typeof item !== 'object') return displayId(item);
+
+    let value = displayId(item.name || item.id);
+
+    if (item.refinement) value += ` R${item.refinement}`;
+    if (item.pieces) value += ` (${item.pieces} piezas)`;
+
+    const note = guideText(item.note);
+
+    if (note) value += ` — ${note}`;
+
+    return value;
+}
+
+function formatWeapons(data) {
+    const list = data?.weapons?.weapons;
+
+    if (!Array.isArray(list) || !list.length) {
+        return 'No disponible en esta build.';
+    }
+
+    const ranked = list.map((group, index) => {
+        const items = (group.items || [])
+            .map(buildItem)
+            .filter(Boolean);
+
+        return items.length
+            ? `${index + 1}. ${items[0]}${items.length > 1 ? `\n   Alternativas: ${items.slice(1).join(' / ')}` : ''}`
+            : null;
+    }).filter(Boolean);
+
+    const conditional = (data.weapons.conditional || [])
+        .map(buildItem)
+        .filter(Boolean);
+
+    return `ARMAS RECOMENDADAS\n${ranked.join('\n')}` +
+        (conditional.length
+            ? `\n\nARMAS CONDICIONALES\n${conditional.join('\n')}`
+            : '');
+}
+
+function formatArtifacts(data) {
+    const sets = data?.artifact_sets;
+
+    if (!Array.isArray(sets) || !sets.length) {
+        return 'No disponible en esta build.';
+    }
+
+    return sets.slice(0, 6).map((entry, index) => {
+        const groups = (entry.groups || []).map(group => {
+            if (Array.isArray(group.choices)) {
+                return group.choices
+                    .map(choice => (choice.items || []).map(buildItem).join(' + '))
+                    .filter(Boolean)
+                    .join(' O ');
+            }
+
+            const items = (group.items || [])
+                .map(buildItem)
+                .filter(Boolean)
+                .join(' / ');
+
+            return group.choose
+                ? `Elegir entre: ${items}`
+                : items;
+        }).filter(Boolean);
+
+        return `${index + 1}. ${groups.join(' + ')}`;
+    }).join('\n');
+}
+
+function formatMainStats(data) {
+    const stats = data?.main_stats;
+
+    if (!stats) return 'No disponible en esta build.';
+
+    const show = value =>
+        Array.isArray(value)
+            ? value.map(buildItem).join(' / ')
+            : 'No especificado';
+
+    return (
+        `Reloj: ${show(stats.sands)}\n` +
+        `Cáliz: ${show(stats.goblet)}\n` +
+        `Corona: ${show(stats.circlet)}`
+    );
+}
+
+function formatSubstats(data) {
+    const list = data?.substats_priority;
+
+    if (!Array.isArray(list) || !list.length) {
+        return 'No disponible en esta build.';
+    }
+
+    return list.map((item, index) => {
+        if (typeof item === 'string') {
+            return `${index + 1}. ${displayId(item)}`;
+        }
+
+        const group = Array.isArray(item.items)
+            ? item.items
+            : [item];
+
+        return `${index + 1}. ${item.approx ? '≈ ' : ''}${group.map(buildItem).join(' / ')}`;
+    }).join('\n');
+}
+
+function formatTalents(data) {
+    const list = data?.talents;
+
+    if (!Array.isArray(list) || !list.length) {
+        return 'No disponible en esta build.';
+    }
+
+    return list.map((group, index) =>
+        `${index + 1}. ${(group.items || []).map(buildItem).join(' = ')}${group.approx ? ' (prioridad similar)' : ''}`
+    ).join('\n');
+}
+
+function formatBuild(build, index, total) {
+    const data = build.data;
+
+    const notes = data['build-notes.json']?.notes || [];
+
+    const notesText = Array.isArray(notes)
+        ? notes.map(guideText).filter(Boolean).join('\n')
+        : '';
+
+    return [
+        `BUILD ${index + 1}/${total}: ${build.name}${build.best ? ' (RECOMENDADA COMO PRINCIPAL EN LA GUÍA)' : ''}`,
+        build.updated ? `Versión indicada: ${build.updated}` : '',
+        '',
+        formatWeapons(data['weapons.json']),
+        '',
+        'ARTEFACTOS',
+        formatArtifacts(data['artifacts-sets.json']),
+        '',
+        'ESTADÍSTICAS PRINCIPALES',
+        formatMainStats(data['artifacts-mainstats.json']),
+        '',
+        'SUBESTADÍSTICAS',
+        formatSubstats(data['artifacts-substats.json']),
+        '',
+        'PRIORIDAD DE TALENTOS',
+        formatTalents(data['talents.json']),
+        notesText ? `\nNOTAS\n${notesText}` : ''
+    ].filter(Boolean).join('\n');
+}
+
+// ============================================================================
+// MATERIALES DE PERSONAJES
+// ============================================================================
+
+function extractMaterials(character) {
+    const totals = new Map();
+
+    const ignoredKeys = new Set([
+        'name', 'description', 'desc',
+        'icon', 'image', 'rarity', 'type'
+    ]);
+
+    function add(category, name, amount) {
+        if (
+            !name ||
+            !Number.isFinite(Number(amount)) ||
+            Number(amount) <= 0
+        ) return;
+
+        const key = `${category}|${name}`;
+
+        totals.set(
+            key,
+            (totals.get(key) || 0) + Number(amount)
+        );
+    }
+
+    function walk(node, category, depth = 0) {
+        if (!node || depth > 12) return;
+
+        if (Array.isArray(node)) {
+            for (const child of node) {
+                walk(child, category, depth + 1);
+            }
+            return;
+        }
+
+        if (typeof node !== 'object') return;
+
+        // Acepta tanto [{name, count}] como {Material: cantidad}.
+        const explicitName = localize(
+            node.name ||
+            node.itemName ||
+            node.material ||
+            node.item
+        );
+
+        const explicitAmount =
+            node.count ??
+            node.amount ??
+            node.quantity;
+
+        if (
+            explicitName &&
+            explicitAmount !== undefined
+        ) {
+            add(category, explicitName, explicitAmount);
+            return;
+        }
+
+        for (const [key, value] of Object.entries(node)) {
+            if (ignoredKeys.has(key)) continue;
+
+            const nextCategory =
+                /ascend|promote/i.test(key)
+                    ? 'Ascensión'
+                    : /talent|skill|^lvl/i.test(key)
+                        ? 'Talentos'
+                        : category;
+
+            if (
+                typeof value === 'number' ||
+                (typeof value === 'string' && /^\d+(?:\.\d+)?$/.test(value))
+            ) {
+                add(nextCategory, key, value);
+            } else {
+                walk(value, nextCategory, depth + 1);
+            }
+        }
+    }
+
+    for (const [key, value] of Object.entries(character?.costs || {})) {
+        const category =
+            /ascend|promote/i.test(key)
+                ? 'Ascensión'
+                : /talent|skill|^lvl/i.test(key)
+                    ? 'Talentos'
+                    : 'Otros';
+
+        walk(value, category);
+    }
+
+    const result = {
+        Ascensión: [],
+        Talentos: [],
+        Otros: []
+    };
+
+    for (const [key, amount] of totals.entries()) {
+        const separator = key.indexOf('|');
+        const category = key.slice(0, separator);
+        const name = key.slice(separator + 1);
+
+        (result[category] || result.Otros).push(
+            `${amount.toLocaleString('es-CL')} × ${name}`
+        );
+    }
+
+    return result;
+}
+
+function formatMaterials(character) {
+    const materials = extractMaterials(character);
+    const sections = [];
+
+    for (const category of ['Ascensión', 'Talentos', 'Otros']) {
+        if (materials[category].length) {
+            sections.push(
+                `${category.toUpperCase()}\n${materials[category].map(x => `- ${x}`).join('\n')}`
+            );
+        }
+    }
+
+    return sections.length
+        ? sections.join('\n\n')
+        : 'La ficha no incluye una lista de materiales reconocible; no voy a inventarlos.';
+}
+
+// ============================================================================
+// EQUIPOS RECOMENDADOS
+// ============================================================================
+
+const TEAM_GUIDES = {
+    cyno: [
+        'Cyno / Nahida / Furina / Baizhu — Quickbloom.',
+        'Cyno / Nahida / Xingqiu / Baizhu — Hyperbloom.'
+    ],
+    nahida: [
+        'Nahida / Nilou / Kokomi / Collei — Florecimiento.',
+        'Nahida / Cyno / Furina / Baizhu — Quickbloom.',
+        'Nahida / Alhaitham / Yae Miko / Kuki Shinobu — Aceleración.'
+    ],
+    dehya: [
+        'Dehya / Bennett / Xiangling / Kazuha — Pyro.',
+        'Dehya / Furina / Bennett / Jean — equipo con Furina.'
+    ],
+    alhaitham: [
+        'Alhaitham / Nahida / Yae Miko / Kuki Shinobu — Aceleración.',
+        'Alhaitham / Nahida / Xingqiu / Kuki Shinobu — Hyperbloom.'
+    ],
+    tighnari: [
+        'Tighnari / Nahida / Yae Miko / Zhongli — Aceleración.',
+        'Tighnari / Fischl / Nahida / Baizhu — Aceleración.'
+    ],
+    nilou: [
+        'Nilou / Nahida / Kokomi / Collei — Florecimiento.',
+        'Nilou / Nahida / Barbara / Yaoyao — Florecimiento.'
+    ],
+    'hu tao': [
+        'Hu Tao / Xingqiu / Yelan / Zhongli — Vaporizado.',
+        'Hu Tao / Furina / Yelan / Xianyun — Vaporizado.'
+    ],
+    xiao: [
+        'Xiao / Faruzan / Furina / Xianyun — ataques en caída.',
+        'Xiao / Faruzan / Bennett / Zhongli — Anemo.'
+    ],
+    'raiden shogun': [
+        'Raiden / Xiangling / Bennett / Xingqiu — Nacional.',
+        'Raiden / Nahida / Yelan / Baizhu — Hyperbloom.'
+    ],
+    furina: [
+        'Furina / Neuvillette / Kazuha / Xilonen — Hydro.',
+        'Furina / Hu Tao / Yelan / Xianyun — Vaporizado.'
+    ],
+    neuvillette: [
+        'Neuvillette / Furina / Kazuha / Xilonen — Hydro.',
+        'Neuvillette / Furina / Fischl / Baizhu — Hydro y Electro.'
+    ],
+    arlecchino: [
+        'Arlecchino / Yelan / Bennett / Kazuha — Vaporizado.',
+        'Arlecchino / Xingqiu / Bennett / Zhongli — Vaporizado.'
+    ],
+    mavuika: [
+        'Mavuika / Citlali / Xilonen / Bennett — Pyro.',
+        'Mavuika / Furina / Xilonen / Bennett — Vaporizado.'
+    ],
+    yelan: [
+        'Yelan / Hu Tao / Xingqiu / Zhongli — Vaporizado.',
+        'Yelan / Arlecchino / Bennett / Kazuha — Vaporizado.'
+    ],
+    fischl: [
+        'Fischl / Clorinde / Nahida / Kazuha — Aceleración.',
+        'Fischl / Tighnari / Nahida / Baizhu — Aceleración.'
+    ],
+    kaeya: [
+        'Kaeya / Shenhe / Kazuha / Kokomi — Congelamiento.',
+        'Kaeya / Xiangling / Bennett / Chongyun — Derretido.'
+    ]
+};
+
+// ============================================================================
+// FICHA COMPLETA DE PERSONAJE
+// ============================================================================
+
+async function characterReport(query, index = 0) {
+    const character = await gameData('characters', query);
+
+    if (!character) {
+        throw new Error(`Genshin-DB no encontró ${query}.`);
+    }
+
+    let info = null;
+    let buildLookupError = '';
+
+    try {
+        info = await findCharacterBuilds(query, character);
+    } catch (error) {
+        buildLookupError = error.message;
+        console.error('[BUILD TREE]', error.message);
+    }
+
+    const builds = info?.builds || [];
+    const name = character.name || query;
+    const teams = TEAM_GUIDES[normalize(name)] || null;
+
+    const selected = builds.length
+        ? Math.max(0, Math.min(index, builds.length - 1))
+        : 0;
+
+    const build = builds.length
+        ? formatBuild(builds[selected], selected, builds.length)
+        : 'No encontré una build publicada para este personaje.';
+
+    const sections = [
+        `KATHERINE — FICHA DE ${name.toUpperCase()}`,
+        `Rareza: ${character.rarity || 'No indicada'} estrellas`,
+        `Elemento: ${character.elementType || 'No indicado'}`,
+        `Arma: ${character.weaponType || info?.metadata?.weapon || 'No indicada'}`,
+        `Región: ${character.region || 'No indicada'}`,
+        character.description || character.desc || '',
+        '',
+        'MATERIALES DE PROGRESIÓN',
+        formatMaterials(character),
+        '',
+        'EQUIPOS RECOMENDADOS',
+        teams
+            ? teams.map((x, i) => `${i + 1}. ${x}`).join('\n')
+            : 'No tengo una composición curada para este personaje.',
+        buildLookupError
+            ? `No pude consultar el repositorio de builds: ${buildLookupError}`
+            : '',
+        '',
+        build,
+        builds.length
+            ? `Hay ${builds.length} build(s). Usa !build ${name} 2 para consultar otra.`
+            : '',
+        '',
+        'Fuentes: Genshin-DB y Genshin Builds. Las recomendaciones pueden cambiar con las actualizaciones.'
+    ];
+
+    return {
+        character,
+        builds,
+        text: sections.filter(Boolean).join('\n')
+    };
+}
+
+// ============================================================================
+// COMANDOS DE DATOS GENSHIN
+// ============================================================================
+
+async function characterCommand(thread, args, source, replyId) {
+    if (!args.length) {
+        await sendMessage(
+            thread,
+            'Uso: !personaje nombre. Ejemplo: !personaje Cyno.',
+            source,
+            replyId
+        );
+        return;
+    }
+
+    const query = args.join(' ');
+
+    await sendMessage(
+        thread,
+        `Consultando la ficha de ${query}...`,
+        source
+    );
+
+    try {
+        const report = await characterReport(query);
+        await sendLong(thread, report.text, source);
+    } catch (error) {
+        console.error('[PERSONAJE]', error);
+
+        await sendMessage(
+            thread,
+            `No pude completar la ficha de ${query}: ${error.message}`,
+            source
+        );
+    }
+}
+
+async function buildCommand(thread, args, source, replyId) {
+    if (!args.length) {
+        await sendMessage(
+            thread,
+            'Uso: !build nombre [número]. Ejemplo: !build Cyno 2.',
+            source,
+            replyId
+        );
+        return;
+    }
+
+    let index = 0;
+    const last = Number(args.at(-1));
+
+    if (Number.isInteger(last) && last >= 1) {
+        index = last - 1;
+        args.pop();
+    }
+
+    const query = args.join(' ');
+
+    try {
+        const character = await gameData('characters', query);
+
+        if (!character) {
+            throw new Error(`No se encontró ${query}.`);
+        }
+
+        const info = await findCharacterBuilds(query, character);
+        const builds = info?.builds || [];
+
+        if (!builds.length) {
+            await sendMessage(
+                thread,
+                `No encontré builds para ${query}. Usa !diagnosticogenshin ${query}.`,
+                source,
+                replyId
+            );
+            return;
+        }
+
+        if (!builds[index]) {
+            await sendMessage(
+                thread,
+                `Encontré ${builds.length} build(s). Usa !build ${character.name || query} 1 hasta ${builds.length}.`,
+                source,
+                replyId
+            );
+            return;
+        }
+
+        await sendLong(
+            thread,
+            formatBuild(builds[index], index, builds.length),
+            source,
+            replyId
+        );
+
+    } catch (error) {
+        console.error('[BUILD]', error);
+
+        await sendMessage(
+            thread,
+            `Error consultando build: ${error.message}`,
+            source,
+            replyId
+        );
+    }
+}
+
+async function materialsCommand(thread, args, source, replyId) {
+    if (!args.length) {
+        await sendMessage(
+            thread,
+            'Uso: !materiales nombre del personaje.',
+            source,
+            replyId
+        );
+        return;
+    }
+
+    const character = await gameData(
+        'characters',
+        args.join(' ')
+    );
+
+    if (!character) {
+        await sendMessage(
+            thread,
+            'No encontré ese personaje.',
+            source,
+            replyId
+        );
+        return;
+    }
+
+    await sendLong(
+        thread,
+        `MATERIALES DE ${character.name}\n\n${formatMaterials(character)}`,
+        source,
+        replyId
+    );
+}
+
+async function teamsCommand(thread, args, source, replyId) {
+    if (!args.length) {
+        await sendMessage(
+            thread,
+            'Uso: !equipos nombre del personaje.',
+            source,
+            replyId
+        );
+        return;
+    }
+
+    const character = await gameData(
+        'characters',
+        args.join(' ')
+    );
+
+    if (!character) {
+        await sendMessage(
+            thread,
+            'No encontré ese personaje.',
+            source,
+            replyId
+        );
+        return;
+    }
+
+    const list = TEAM_GUIDES[
+        normalize(character.name || args.join(' '))
+    ];
+
+    await sendMessage(
+        thread,
+        list
+            ? `EQUIPOS PARA ${character.name}\n\n${list.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\nComposiciones orientativas.`
+            : `No tengo equipos curados para ${character.name}.`,
+        source,
+        replyId
+    );
+}
+
+async function objectCommand(thread, folder, args, source, replyId) {
+    const examples = {
+        weapons: '!arma Báculo de Homa',
+        artifacts: '!artefacto Sueños Áureos',
+        domains: '!dominio nombre',
+        enemies: '!enemigo nombre',
+        foods: '!comida nombre',
+        materials: '!material nombre',
+        achievements: '!logro nombre'
+    };
+
+    if (!args.length) {
+        await sendMessage(
+            thread,
+            `Uso: ${examples[folder]}`,
+            source,
+            replyId
+        );
+        return;
+    }
+
+    const query = args.join(' ');
+
+    const item = await gameData(folder, query);
+
+    if (!item) {
+        await sendMessage(
+            thread,
+            `No encontré "${query}" en ${folder}.`,
+            source,
+            replyId
+        );
+        return;
+    }
+
+    const fields = [
+        'description', 'desc', 'effectName', 'effect',
+        'passiveName', 'passiveDesc', 'lore', 'story',
+        'weaponType', 'rarity', 'baseAttack', 'subStatText',
+        'subStat', 'location', 'region', 'domainType',
+        'enemyType', 'foodType', 'ingredients', 'recipe',
+        'source', 'drop'
+    ];
+
+    const lines = [item.name || query];
+
+    for (const field of fields) {
+        const value = item[field];
+
+        if (value == null || value === '') continue;
+
+        if (Array.isArray(value)) {
+            const text = value.map(localize).filter(Boolean).join(', ');
+            if (text) lines.push(`${field}: ${text}`);
+        } else if (typeof value === 'object') {
+            const text = localize(value);
+            if (text) lines.push(`${field}: ${text}`);
+        } else {
+            lines.push(`${field}: ${value}`);
+        }
+    }
+
+    await sendLong(
+        thread,
+        lines.join('\n'),
+        source,
+        replyId
+    );
+}
+
+async function talentCommand(thread, args, source, replyId) {
+    if (!args.length) {
+        await sendMessage(
+            thread,
+            'Uso: !talento nombre del personaje.',
+            source,
+            replyId
+        );
+        return;
+    }
+
+    const character = await gameData(
+        'characters',
+        args.join(' ')
+    );
+
+    if (!character) {
+        await sendMessage(
+            thread,
+            'No encontré ese personaje.',
+            source,
+            replyId
+        );
+        return;
+    }
+
+    const fields = [
+        ['Ataque normal', character.combat1],
+        ['Habilidad elemental', character.combat2],
+        ['Habilidad definitiva', character.combat3],
+        ['Pasiva 1', character.passive1],
+        ['Pasiva 2', character.passive2],
+        ['Pasiva 3', character.passive3]
+    ];
+
+    const text = fields
+        .filter(([, value]) => value)
+        .map(([label, value]) =>
+            `${label}: ${value.name || label}\n${value.description || value.desc || ''}`
+        )
+        .join('\n\n');
+
+    await sendLong(
+        thread,
+        `TALENTOS DE ${character.name}\n\n${text || 'No hay datos disponibles.'}`,
+        source,
+        replyId
+    );
+}
+
+async function constellationCommand(thread, args, source, replyId) {
+    if (!args.length) {
+        await sendMessage(
+            thread,
+            'Uso: !constelacion nombre del personaje.',
+            source,
+            replyId
+        );
+        return;
+    }
+
+    const character = await gameData(
+        'characters',
+        args.join(' ')
+    );
+
+    if (!character) {
+        await sendMessage(
+            thread,
+            'No encontré ese personaje.',
+            source,
+            replyId
+        );
+        return;
+    }
+
+    const lines = [];
+
+    for (let i = 1; i <= 6; i++) {
+        const item = character[`constellation${i}`];
+
+        if (item) {
+            lines.push(
+                `${i}. ${item.name || `Constelación ${i}`}\n${item.description || item.desc || ''}`
+            );
+        }
+    }
+
+    await sendLong(
+        thread,
+        `CONSTELACIONES DE ${character.name}\n\n${lines.join('\n\n') || 'No hay datos disponibles.'}`,
+        source,
+        replyId
+    );
+}
+
+async function genshinDiagnostic(thread, args, source, replyId) {
+    if (!args.length) {
+        await sendMessage(
+            thread,
+            'Uso: !diagnosticogenshin Cyno.',
+            source,
+            replyId
+        );
+        return;
+    }
+
+    const query = args.join(' ');
+
+    let local = null;
+    let localError = '';
+
+    try {
+        local = unwrap(
+            GDB.searchFolder('characters', query, DB_OPTIONS)
+        );
+    } catch (error) {
+        localError = error.message;
+    }
+
+    const character = local || await gameData('characters', query);
+
+    let builds = null;
+    let buildError = '';
+
+    if (character) {
+        try {
+            builds = await findCharacterBuilds(query, character);
+        } catch (error) {
+            buildError = error.message;
+        }
+    }
+
+    await sendMessage(
+        thread,
+        [
+            'DIAGNÓSTICO GENSHIN',
+            `Búsqueda: ${query}`,
+            `Genshin-DB local: ${local ? 'OK' : `No encontrado ${localError}`}`,
+            `API de respaldo: ${character ? 'OK' : 'No encontrado'}`,
+            `Nombre devuelto: ${character?.name || 'Ninguno'}`,
+            `Repositorio Builds: ${builds ? 'OK' : buildError || 'No encontrado'}`,
+            `Carpeta: ${builds?.root || 'No encontrada'}`,
+            `Builds: ${builds?.builds?.map(x => x.folder).join(', ') || 'Ninguna'}`
+        ].join('\n'),
+        source,
+        replyId
+    );
+}
+
+// ============================================================================
+// CURIOSIDADES GENSHIN — SIN REPETIR HASTA AGOTAR LA LISTA
+// ============================================================================
+
+const curiosities = [
+    'Cyno es el General Mahamatra de la Akademiya de Sumeru.',
+    'Nahida también es conocida como la Pequeña Señorita Kusanali.',
+    'Dehya recibe el título de Melena Llameante y pertenece a los Eremitas.',
+    'Alhaitham ocupa el cargo de escriba de la Akademiya.',
+    'Tighnari trabaja como guardabosques en el Bosque Avidya.',
+    'Nilou es una bailarina del Teatro Zubayr.',
+    'Kaeya pertenece al linaje Alberich, vinculado a Khaenri’ah.',
+    'Dainsleif es conocido como el Guardarramas.',
+    'La catástrofe de Khaenri’ah ocurrió aproximadamente quinientos años antes de la aventura principal.',
+    'Los Fatui tienen once Heraldos.',
+    'La Orden del Abismo y los Fatui son organizaciones distintas.',
+    'La Invocación de los Siete es el juego de cartas coleccionables de Teyvat.',
+    'Dvalin es conocido como Stormterror y forma parte de los Cuatro Vientos.',
+    'Andrius también recibe el nombre de Lupus Boreas.',
+    'Enkanomiya es una región subterránea vinculada a Watatsumi.',
+    'Dragonspine tiene una mecánica especial de frío extremo.',
+    'Arlecchino recibe el título de Padre dentro de la Casa de la Hoguera.',
+    'Hu Tao dirige la Funeraria Wangsheng.',
+    'Neuvillette es el Juez Supremo de Fontaine.',
+    'Los melusinos son una especie característica de Fontaine.',
+    'Los Adeptus están estrechamente relacionados con la protección de Liyue.',
+    'Las Visiones permiten a ciertos individuos canalizar poderes elementales.',
+    'La Espiral del Abismo es un desafío de combate independiente de la exploración normal.',
+    'El Viajero puede resonar con distintos elementos mediante las Estatuas de los Siete.',
+    'La Akademiya fue uno de los centros de conocimiento más importantes de Teyvat.',
+    'Oz es el compañero de Fischl.',
+    'La historia de Inazuma está profundamente relacionada con el concepto de eternidad.',
+    'Los Dragones Soberanos tienen una conexión antigua con los elementos de Teyvat.',
+    'La historia de Natlan está ligada a sus tribus y tradiciones.',
+    'El Gremio de Aventureros tiene presencia en varias naciones.',
+    'Los Aranara están relacionados con los sueños y las leyendas de Sumeru.',
+    'La Funeraria Wangsheng tiene una larga historia dentro de Liyue.',
+    'La Casa de la Hoguera está relacionada con los Fatui.',
+    'La historia de Fontaine está vinculada a la justicia y al poder Hydro.',
+    'Los Cuatro Vientos son figuras importantes en la historia de Mondstadt.'
+];
+
+let curiosityBag = [];
+let lastCuriosity = -1;
+
+function nextCuriosity() {
+    if (!curiosityBag.length) {
+        curiosityBag = shuffle(curiosities.map((_, i) => i));
+
+        if (
+            curiosityBag.length > 1 &&
+            curiosityBag[0] === lastCuriosity
+        ) {
+            [curiosityBag[0], curiosityBag[1]] =
+                [curiosityBag[1], curiosityBag[0]];
+        }
+    }
+
+    lastCuriosity = curiosityBag.pop();
+
+    return curiosities[lastCuriosity];
+}
+
+// ============================================================================
+// INTERACCIONES SOCIALES
+// ============================================================================
+
+const socialActions = {
+    abrazo: ['abraza cariñosamente a', 'corre hacia y abraza a', 'rodea con sus brazos a'],
+    abrazar: ['abraza cariñosamente a', 'corre hacia y abraza a', 'rodea con sus brazos a'],
+    beso: ['le da un beso a', 'deja un beso en la mejilla de', 'se acerca y besa a'],
+    besar: ['le da un beso a', 'deja un beso en la mejilla de', 'se acerca y besa a'],
+    patada: ['le da una patada de broma a', 'lanza una patadita teatral hacia', 'intenta sorprender con una patada a'],
+    golpe: ['le da un golpecito de broma a', 'le da un pequeño golpe teatral a'],
+    cachetada: ['le da una cachetada teatral a', 'le da una bofetada de telenovela a'],
+    acariciar: ['acaricia suavemente a', 'le acomoda el cabello a'],
+    mimar: ['mima cariñosamente a', 'llena de cariño a'],
+    morder: ['le da un mordisquito de broma a', 'intenta morder juguetonamente a'],
+    consolar: ['consola a'],
+    felicitar: ['felicita a', 'aplaude a'],
+    saludar: ['saluda alegremente a', 'levanta la mano para saludar a'],
+    proteger: ['protege a'],
+    bailar: ['invita a bailar a', 'comienza a bailar junto a'],
+    cosquillas: ['le hace cosquillas a', 'intenta hacer reír con cosquillas a'],
+    chocar: ['choca los cinco con', 'celebra chocando la mano de'],
+    highfive: ['choca los cinco con', 'celebra chocando la mano de'],
+    ayudar: ['ayuda a', 'se ofrece a ayudar a'],
+    regalar: ['le entrega una pequeña sorpresa a', 'regala un obsequio a'],
+    acompañar: ['acompaña a', 'decide viajar junto a'],
+    asustar: ['intenta asustar a', 'aparece de repente frente a'],
+    curar: ['cura las heridas de', 'atiende a'],
+    cargar: ['carga en brazos a', 'levanta con cuidado a'],
+    empujar: ['empuja suavemente a', 'da un pequeño empujón a'],
+    regañar: ['regaña a', 'llama la atención de'],
+    admirar: ['admira a', 'observa con admiración a'],
+    apoyar: ['muestra su apoyo a', 'anima a'],
+    dormir: ['se queda dormida junto a', 'se acomoda para descansar junto a'],
+    ignorar: ['decide ignorar dramáticamente a', 'finge no ver a'],
+    mirar: ['mira fijamente a', 'observa en silencio a'],
+    invitar: ['invita a una aventura a', 'propone una expedición a']
+};
+
+function getTarget(args, message) {
+    for (const list of [
+        message?.mentions,
+        message?.mentionedUsers,
+        message?.mentionList
+    ]) {
+        if (Array.isArray(list) && list.length) {
+            const item = list[0];
+
+            if (typeof item === 'string') {
+                return item.startsWith('@') ? item : `@${item}`;
+            }
+
+            const name = item.nickname || item.name || item.uid;
+
+            if (name) {
+                return `@${String(name).replace(/^@/, '')}`;
+            }
+        }
+    }
+
+    const raw = args.join(' ').trim();
+    const match = raw.match(/@[^\s,;]+/);
+
+    if (match) return match[0];
+
+    return raw
+        ? `@${raw.split(/[\s,;]+/)[0].replace(/^@/, '')}`
+        : null;
+}
+
+async function socialCommand(thread, command, args, event, source, replyId) {
+    const target = getTarget(args, event.message);
+    const actor = event.message?.author?.nickname || 'Viajero';
+
+    if (!target) {
+        await sendMessage(
+            thread,
+            `Uso: !${command} @usuario\nEjemplo: !${command} @zzzinn3r`,
+            source,
+            replyId
+        );
+        return;
+    }
+
+    const endings = {
+        abrazo: 'Un abrazo siempre viene bien.',
+        abrazar: 'Un abrazo siempre viene bien.',
+        beso: 'Qué momento tan bonito.',
+        besar: 'Qué momento tan bonito.',
+        patada: '¡Que comience el combate!',
+        golpe: 'Eso fue inesperado.',
+        cachetada: 'Drama en Teyvat.',
+        acariciar: 'Un gesto de cariño.',
+        mimar: 'Se merece todo el cariño.',
+        morder: '¡Auch! Eso sí fue inesperado.',
+        consolar: 'Nadie tiene que afrontar una mala aventura en soledad.',
+        felicitar: '¡Bien hecho!',
+        saludar: '¡Hola, viajero!',
+        proteger: 'No permitiré que le hagan daño.',
+        bailar: '¡Que suene la música!',
+        cosquillas: '¡No puede dejar de reír!',
+        chocar: '¡Buen trabajo en equipo!',
+        highfive: '¡Buen trabajo en equipo!',
+        ayudar: 'Para eso están los compañeros.',
+        regalar: 'Un regalo inesperado.',
+        acompañar: 'Nunca hay que viajar solo.',
+        asustar: '¡Sorpresa!',
+        curar: '¡De vuelta a la aventura!',
+        cargar: 'Qué compañerismo.',
+        empujar: '¡Cuidado!',
+        regañar: 'A portarse bien.',
+        admirar: 'Una persona digna de admiración.',
+        apoyar: 'Siempre habrá alguien de tu lado.',
+        dormir: 'Hora de descansar.',
+        ignorar: 'El silencio también es una respuesta.',
+        mirar: 'El silencio se vuelve incómodo...',
+        invitar: 'Prepara tu equipo.'
+    };
+
+    let sentence;
+
+    if (command === 'consolar') {
+        sentence = `${actor} se acerca a ${target} y le ofrece un abrazo reconfortante.`;
+    } else if (command === 'proteger') {
+        sentence = `${actor} se coloca delante de ${target} para protegerle.`;
+    } else {
+        sentence = `${actor} ${random(socialActions[command])} ${target}.`;
+    }
+
+    await sendMessage(
+        thread,
+        `${sentence}\n${endings[command] || '¡Una nueva interacción!'}`,
+        source,
+        replyId
+    );
+}
+
+// ============================================================================
+// ENTRETENIMIENTO
+// ============================================================================
+
+const triviaQuestions = [
+    { q: '¿Qué elemento utiliza Cyno?', a: ['Pyro', 'Electro', 'Dendro', 'Anemo'], c: 1 },
+    { q: '¿Quién es la Arconte Dendro?', a: ['Ei', 'Nahida', 'Furina', 'Mavuika'], c: 1 },
+    { q: '¿Quién dirige la Funeraria Wangsheng?', a: ['Ganyu', 'Yelan', 'Hu Tao', 'Keqing'], c: 2 },
+    { q: '¿Cuántos corazones tiene un pulpo?', a: ['Uno', 'Dos', 'Tres', 'Cuatro'], c: 2 },
+    { q: '¿Qué planeta se conoce como el planeta rojo?', a: ['Venus', 'Marte', 'Saturno', 'Júpiter'], c: 1 },
+    { q: '¿Qué organización tiene once Heraldos?', a: ['Fatui', 'Adeptus', 'Caballeros', 'Gremio'], c: 0 },
+    { q: '¿Cuál es el arma de Dehya?', a: ['Arco', 'Catalizador', 'Mandoble', 'Lanza'], c: 2 }
+];
+
+const jokes = [
+    '¿Por qué Cyno nunca pierde una discusión? Porque siempre tiene una sentencia preparada.',
+    '¿Qué le dijo un slime a otro? Nos vemos en la próxima reacción.',
+    '¿Por qué el jugador nunca tiene Mora? Porque todo se le va en artefactos.',
+    '¿Qué hace un Hilichurl cuando tiene frío? Busca un Pyro.',
+    'El Abismo pidió refuerzos, pero todos estaban gastando resina.',
+    '¿Por qué el Viajero no se pierde? Porque siempre tiene un punto de teletransporte cerca.',
+    'El artefacto tenía cuatro substats buenos. Al subirlo, todos fueron a DEF%.',
+    'No es mala suerte en el gachapón. Es una inversión emocional a largo plazo.'
+];
+
+const fortunes = [
+    'Hoy te esperan buenas noticias.',
+    'La paciencia será tu mejor aliada.',
+    'Una oportunidad inesperada aparecerá.',
+    'No abandones tu objetivo.',
+    'Los pequeños avances también cuentan.',
+    'Hoy es un buen día para comenzar algo nuevo.'
+];
+
+const challenges = [
+    'Completa un dominio con personajes que nunca utilizas.',
+    'Derrota un jefe sin consumir comida.',
+    'Consigue un logro que todavía no tengas.',
+    'Explora una zona que aún no hayas completado.',
+    'Completa un combate con cuatro elementos diferentes.',
+    'Utiliza solo personajes de cuatro estrellas durante una expedición.',
+    'Derrota un jefe sin usar tu personaje principal.'
+];
+
+function wishState(uid) {
+    if (!state.wishes.has(uid)) {
+        state.wishes.set(uid, {
+            pity5: 0,
+            pity4: 0,
+            guaranteed: false
+        });
+    }
+
+    return state.wishes.get(uid);
+}
+
+function simulateWish(uid) {
+    const wish = wishState(uid);
+
+    wish.pity5++;
+    wish.pity4++;
+
+    let chance = 0.006;
+
+    if (wish.pity5 >= 74) {
+        chance = Math.min(
+            1,
+            0.006 + (wish.pity5 - 73) * 0.06
+        );
+    }
+
+    if (wish.pity5 >= 90 || Math.random() < chance) {
+        const featured =
+            wish.guaranteed || Math.random() < 0.5;
+
+        const name = featured
+            ? random(['Cyno', 'Nahida', 'Furina', 'Neuvillette', 'Arlecchino', 'Mavuika'])
+            : random(['Diluc', 'Jean', 'Mona', 'Qiqi', 'Keqing', 'Tighnari', 'Dehya']);
+
+        wish.guaranteed = !featured;
+        wish.pity5 = 0;
+        wish.pity4 = 0;
+
+        return {
+            stars: 5,
+            name
+        };
+    }
+
+    if (wish.pity4 >= 10 || Math.random() < 0.051) {
+        wish.pity4 = 0;
+
+        return {
+            stars: 4,
+            name: random(['Bennett', 'Xingqiu', 'Fischl', 'Sucrose', 'Diona', 'Rosaria', 'Kuki Shinobu'])
+        };
+    }
+
+    return {
+        stars: 3,
+        name: random(['Espada del Alba', 'Arco de Cuervo', 'Gran Espada Sangrienta', 'Lanza de Hierro Blanco'])
+    };
+}
+
+function startTrivia(thread) {
+    const question = random(triviaQuestions);
+
+    state.trivia.set(String(thread), {
+        question,
+        attempts: 0,
+        expires: Date.now() + 120000
+    });
+
+    return `TRIVIA KATHERINE\n\n${question.q}\n\n${question.a.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\nResponde con !responder 1, 2, 3 o 4.`;
+}
+
+function answerTrivia(thread, uid, number) {
+    const trivia = state.trivia.get(String(thread));
+
+    if (!trivia) return 'No hay una trivia activa. Usa !trivia.';
+
+    if (Date.now() > trivia.expires) {
+        state.trivia.delete(String(thread));
+        return 'La trivia expiró.';
+    }
+
+    const answer = Number(number);
+
+    if (!Number.isInteger(answer) || answer < 1 || answer > 4) {
+        return 'Responde con un número del 1 al 4.';
+    }
+
+    trivia.attempts++;
+
+    if (answer - 1 === trivia.question.c) {
+        state.trivia.delete(String(thread));
+        state.points.set(uid, (state.points.get(uid) || 0) + 10);
+        return '¡Respuesta correcta! Has ganado 10 puntos.';
+    }
+
+    if (trivia.attempts >= 3) {
+        state.trivia.delete(String(thread));
+        return `Se acabaron los intentos. La respuesta correcta era ${trivia.question.a[trivia.question.c]}.`;
+    }
+
+    return `No es correcto. Te quedan ${3 - trivia.attempts} intento(s).`;
+}
+
+function startNumberGame(thread) {
+    state.numberGames.set(String(thread), {
+        number: Math.floor(Math.random() * 100) + 1,
+        attempts: 0,
+        expires: Date.now() + 300000
+    });
+
+    return 'He elegido un número entre 1 y 100. Tienes siete intentos. Usa !intento número.';
+}
+
+function tryNumber(thread, uid, value) {
+    const game = state.numberGames.get(String(thread));
+
+    if (!game) return 'No hay una partida activa. Usa !adivina.';
+
+    if (Date.now() > game.expires) {
+        state.numberGames.delete(String(thread));
+        return 'La partida expiró.';
+    }
+
+    const number = Number(value);
+
+    if (!Number.isInteger(number) || number < 1 || number > 100) {
+        return 'Escribe un entero del 1 al 100.';
+    }
+
+    game.attempts++;
+
+    if (number === game.number) {
+        state.numberGames.delete(String(thread));
+        state.points.set(uid, (state.points.get(uid) || 0) + 15);
+        return `¡Correcto! El número era ${number}. Ganaste 15 puntos.`;
+    }
+
+    if (game.attempts >= 7) {
+        state.numberGames.delete(String(thread));
+        return `Se terminaron los intentos. El número era ${game.number}.`;
+    }
+
+    return `${number < game.number ? 'El número es mayor.' : 'El número es menor.'}\nIntentos restantes: ${7 - game.attempts}.`;
+}
+
+// ============================================================================
+// LIVE-ROOMS — LÍMITES DE ANARCHY
 // ============================================================================
 
 async function getLiveRooms(force = false) {
-
     if (!COMMUNITY_BOT_TOKEN) {
-
         return {
             ok: false,
             error: 'Falta COMMUNITY_BOT_TOKEN.'
         };
     }
 
-    if (
-        !force &&
-        liveRoomsCache &&
-        Date.now() < liveRoomsCacheUntil
-    ) {
-
+    if (!force && roomCache && Date.now() < roomCacheExpires) {
         return {
             ok: true,
-            rooms: liveRoomsCache
+            rooms: roomCache
         };
     }
 
-    if (liveRoomsRequest) {
-        return liveRoomsRequest;
-    }
+    if (roomPromise) return roomPromise;
 
-    liveRoomsRequest = (async () => {
-
+    roomPromise = (async () => {
         const wait = Math.max(
             0,
-            3000 - (Date.now() - liveRoomsLastRequest)
+            3000 - (Date.now() - lastRoomRequest)
         );
 
-        if (wait) {
-            await sleep(wait);
-        }
+        if (wait) await sleep(wait);
 
         const now = Date.now();
 
         while (
-            liveRoomsRequests.length &&
-            liveRoomsRequests[0] < now - 3600000
+            roomRequests.length &&
+            roomRequests[0] < now - 3600000
         ) {
-            liveRoomsRequests.shift();
+            roomRequests.shift();
         }
 
-        if (liveRoomsRequests.length >= 300) {
-
+        if (roomRequests.length >= 300) {
             return {
                 ok: false,
-                error: 'Se alcanzó el máximo de 300 consultas de salas por hora.'
+                error: 'Límite de 300 consultas por hora alcanzado.'
             };
         }
 
-        liveRoomsLastRequest = Date.now();
+        lastRoomRequest = Date.now();
+        roomRequests.push(lastRoomRequest);
 
-        liveRoomsRequests.push(
-            liveRoomsLastRequest
-        );
-
-        const result = await anarchyAPI(
+        const result = await anarchy(
             '/live-rooms',
             'GET',
             null,
@@ -2265,113 +2144,69 @@ async function getLiveRooms(force = false) {
         );
 
         if (!result.ok) {
-
             return {
                 ok: false,
                 error: `HTTP ${result.status}: ${JSON.stringify(result.data)}`
             };
         }
 
-        const rooms = Array.isArray(result.data?.roomList)
+        roomCache = Array.isArray(result.data?.roomList)
             ? result.data.roomList
             : [];
 
-        liveRoomsCache = rooms;
-
-        liveRoomsCacheUntil =
-            Date.now() + 2500;
+        roomCacheExpires = Date.now() + 2500;
 
         return {
             ok: true,
-            rooms
+            rooms: roomCache
         };
-
     })();
 
     try {
-        return await liveRoomsRequest;
+        return await roomPromise;
     } finally {
-        liveRoomsRequest = null;
+        roomPromise = null;
     }
 }
 
 // ============================================================================
-// LIVEKIT — LIMPIEZA
+// LIVEKIT
 // ============================================================================
 
-async function closeCall(threadId, callLeaveApi = false) {
-
-    const id = String(threadId);
-
-    const call = estado.salas.get(id);
+async function closeLocalCall(thread) {
+    const id = String(thread);
+    const call = state.calls.get(id);
 
     if (!call) return;
 
     call.stopping = true;
-
-    estado.salas.delete(id);
-
-    estado.conectado = estado.salas.size > 0;
+    state.calls.delete(id);
 
     try {
-
         if (call.track) {
             await call.track.close();
         } else if (call.source) {
             await call.source.close();
         }
-
-    } catch (err) {
-
-        console.warn(
-            '[LIVEKIT] Error cerrando audio:',
-            err.message
-        );
+    } catch (error) {
+        console.warn('[LIVEKIT TRACK CLOSE]', error.message);
     }
 
     try {
-
         if (call.room?.isConnected) {
             await call.room.disconnect();
         }
-
-    } catch (err) {
-
-        console.warn(
-            '[LIVEKIT] Error desconectando:',
-            err.message
-        );
+    } catch (error) {
+        console.warn('[LIVEKIT DISCONNECT]', error.message);
     }
-
-    if (callLeaveApi && COMMUNITY_BOT_TOKEN) {
-
-        await anarchyAPI(
-            `/live-rooms/${encodeURIComponent(id)}/leave`,
-            'POST',
-            null,
-            'community'
-        );
-    }
-
-    console.log(
-        `[LIVEKIT] Katherine salió de ${id}.`
-    );
 }
 
-// ============================================================================
-// LIVEKIT — PUBLICAR MICRÓFONO SILENCIOSO
-// ============================================================================
-
-async function publishSilentMicrophone(call, sdk) {
-
-    const sampleRate = 48000;
+async function publishSilentMic(call, sdk) {
+    const rate = 48000;
     const channels = 1;
-    const samplesPerFrame = 960;
+    const samples = 480;
 
-    const source = new sdk.AudioSource(
-        sampleRate,
-        channels
-    );
+    const source = new sdk.AudioSource(rate, channels);
 
     const track = sdk.LocalAudioTrack.createAudioTrack(
         'Katherine-Microphone',
@@ -2386,158 +2221,123 @@ async function publishSilentMicrophone(call, sdk) {
     call.track = track;
 
     let attempts = 0;
-    let published = false;
 
     while (
         !call.stopping &&
         call.room.isConnected &&
-        !published
+        !call.published
     ) {
-
         try {
-
             await call.room.localParticipant.publishTrack(
                 track,
                 options
             );
 
-            published = true;
-
             call.published = true;
 
             console.log(
-                `[LIVEKIT] Micrófono habilitado en ${call.threadId}.`
+                `[LIVEKIT] Micrófono publicado en ${call.thread}.`
             );
 
-        } catch (err) {
-
+        } catch (error) {
             attempts++;
 
             if (attempts === 1 || attempts % 5 === 0) {
-
                 console.log(
-                    `[LIVEKIT] Esperando autorización de micrófono. Intento ${attempts}: ${err.message}`
+                    `[LIVEKIT] Esperando permiso, intento ${attempts}: ${error.message}`
                 );
             }
-
-            // Anarchy habilita la publicación unos segundos después
-            // de detectar la entrada del bot a la sala.
 
             await sleep(1200);
         }
     }
 
-    if (!published || call.stopping) {
-        return;
-    }
+    if (!call.published || call.stopping) return;
 
-    const silentBuffer = new Int16Array(
-        samplesPerFrame
-    );
+    const silence = new Int16Array(samples);
 
     while (
         !call.stopping &&
         call.room.isConnected
     ) {
-
         try {
-
-            const frame = new sdk.AudioFrame(
-                silentBuffer,
-                sampleRate,
-                channels,
-                samplesPerFrame
+            await source.captureFrame(
+                new sdk.AudioFrame(
+                    silence,
+                    rate,
+                    channels,
+                    samples
+                )
             );
-
-            await source.captureFrame(frame);
-
-        } catch (err) {
-
+        } catch (error) {
             if (!call.stopping) {
-
-                console.error(
-                    '[LIVEKIT] Error enviando audio:',
-                    err.message
-                );
+                console.error('[LIVEKIT AUDIO]', error.message);
             }
-
             break;
         }
 
-        await sleep(20);
+        await sleep(10);
     }
 }
 
-// ============================================================================
-// LIVEKIT — ENTRAR A UNA LLAMADA
-// ============================================================================
-
-async function joinCall(threadId) {
-
-    const id = String(threadId);
+async function joinCall(thread) {
+    const id = String(thread);
 
     if (!COMMUNITY_BOT_TOKEN) {
-
         return {
             ok: false,
-            message: 'No está configurado COMMUNITY_BOT_TOKEN. No puedo consultar ni entrar a las llamadas.'
+            message: 'Falta COMMUNITY_BOT_TOKEN.'
         };
     }
 
-    if (estado.salas.has(id)) {
-
+    if (state.calls.has(id)) {
         return {
             ok: true,
             message: 'Katherine ya está conectada a esta llamada.'
         };
     }
 
-    if (estado.salas.size >= 3) {
-
+    if (state.calls.size >= 3) {
         return {
             ok: false,
-            message: 'Katherine ya está conectada al máximo de tres salas simultáneas.'
+            message: 'Katherine ya está conectada al máximo de tres salas.'
         };
     }
 
-    try {
+    let room = null;
 
-        // Importar LiveKit antes de solicitar el token de 60 segundos.
+    try {
+        // Carga el SDK antes de solicitar el token de LiveKit de 60 segundos.
         const sdk = await import('@livekit/rtc-node');
 
         const listing = await getLiveRooms();
 
         if (!listing.ok) {
-
             return {
                 ok: false,
                 message: `No pude consultar las salas: ${listing.error}`
             };
         }
 
-        const liveRoom = listing.rooms.find(
-            room => String(room.threadId) === id
+        const info = listing.rooms.find(
+            item => String(item.threadId) === id
         );
 
-        if (!liveRoom) {
-
+        if (!info) {
             return {
                 ok: false,
-                message: 'No hay una llamada activa en este chat. Inicia una llamada y vuelve a utilizar !llamada!.'
+                message: 'No hay una llamada activa en este chat. Iníciala y vuelve a usar !llamada!.'
             };
         }
 
-        if (liveRoom.joined) {
-
+        if (info.joined) {
             return {
                 ok: false,
-                message: 'Anarchy indica que Katherine ya figura dentro de esta llamada. Revisa si Render acaba de reiniciarse.'
+                message: 'Anarchy indica que Katherine ya figura dentro de esta sala. Comprueba si Render se reinició.'
             };
         }
 
-        // Solicitar el token temporal de LiveKit.
-
-        const joinResult = await anarchyAPI(
+        const grant = await anarchy(
             `/live-rooms/${encodeURIComponent(id)}/join`,
             'POST',
             null,
@@ -2545,66 +2345,52 @@ async function joinCall(threadId) {
             true
         );
 
-        if (!joinResult.ok) {
-
+        if (!grant.ok) {
             return {
                 ok: false,
-                message: `Anarchy rechazó la entrada: HTTP ${joinResult.status}. ${JSON.stringify(joinResult.data)}`
+                message: `Anarchy rechazó el ingreso: HTTP ${grant.status}: ${JSON.stringify(grant.data)}`
             };
         }
 
-        const credentials = joinResult.data || {};
+        const credentials = grant.data || {};
 
         if (
             !credentials.url ||
             !credentials.token ||
             !credentials.identity
         ) {
-
             return {
                 ok: false,
                 message: 'Anarchy no devolvió url, token e identity.'
             };
         }
 
-        const room = new sdk.Room();
+        room = new sdk.Room();
 
         const call = {
-            threadId: id,
+            thread: id,
             room,
-            sdk,
-
             identity: credentials.identity,
-
-            stopping: false,
-            published: false,
-
             source: null,
-            track: null
+            track: null,
+            stopping: false,
+            published: false
         };
 
         room.on(
             sdk.RoomEvent.Disconnected,
             () => {
+                console.warn(`[LIVEKIT] Desconexión de ${id}.`);
 
-                console.warn(
-                    `[LIVEKIT] Desconexión inesperada en ${id}.`
-                );
+                call.stopping = true;
 
-                if (estado.salas.get(id) === call) {
-
-                    call.stopping = true;
-
-                    estado.salas.delete(id);
-
-                    estado.conectado =
-                        estado.salas.size > 0;
+                if (state.calls.get(id) === call) {
+                    state.calls.delete(id);
                 }
             }
         );
 
-        // Conectar inmediatamente. El permiso dura 60 segundos.
-
+        // El token dura 60 segundos, conectar enseguida.
         await room.connect(
             credentials.url,
             credentials.token,
@@ -2614,41 +2400,38 @@ async function joinCall(threadId) {
             }
         );
 
-        estado.salas.set(id, call);
-
-        estado.conectado = true;
+        state.calls.set(id, call);
 
         console.log(
-            `[LIVEKIT] Conectado a ${id} como ${credentials.identity}.`
+            `[LIVEKIT] Katherine conectada a ${id} como ${credentials.identity}.`
         );
 
-        // La publicación queda en segundo plano.
-        // No se bloquea la respuesta del comando.
-
-        call.audioTask = publishSilentMicrophone(
+        call.audioTask = publishSilentMic(
             call,
             sdk
-        ).catch(err => {
-
-            console.error(
-                '[LIVEKIT] Error en publicación:',
-                err
-            );
+        ).catch(error => {
+            console.error('[LIVEKIT PUBLISH]', error);
         });
 
         return {
             ok: true,
-            message: 'Katherine se ha unido a la llamada. Estoy habilitando mi micrófono.'
+            message: 'Katherine se unió a la llamada. Estoy habilitando el micrófono silencioso.'
         };
 
-    } catch (err) {
+    } catch (error) {
+        console.error('[LIVEKIT JOIN]', error);
 
-        console.error(
-            '[LIVEKIT JOIN ERROR]',
-            err
-        );
+        if (room) {
+            try {
+                if (room.isConnected) {
+                    await room.disconnect();
+                }
+            } catch (_) {
+                // La desconexión ya fue solicitada.
+            }
+        }
 
-        await anarchyAPI(
+        await anarchy(
             `/live-rooms/${encodeURIComponent(id)}/leave`,
             'POST',
             null,
@@ -2657,38 +2440,31 @@ async function joinCall(threadId) {
 
         return {
             ok: false,
-            message: `No pude conectar Katherine a LiveKit: ${err.message}`
+            message: `No pude conectar con LiveKit: ${error.message}`
         };
     }
 }
 
-// ============================================================================
-// LIVEKIT — SALIR
-// ============================================================================
-
-async function leaveCall(threadId) {
-
-    const id = String(threadId);
+async function leaveCall(thread) {
+    const id = String(thread);
 
     if (!COMMUNITY_BOT_TOKEN) {
-
         return {
             ok: false,
             message: 'Falta COMMUNITY_BOT_TOKEN.'
         };
     }
 
-    const result = await anarchyAPI(
+    const result = await anarchy(
         `/live-rooms/${encodeURIComponent(id)}/leave`,
         'POST',
         null,
         'community'
     );
 
-    await closeCall(id, false);
+    await closeLocalCall(id);
 
     if (!result.ok) {
-
         return {
             ok: false,
             message: `La desconexión local se realizó, pero Anarchy respondió HTTP ${result.status}.`
@@ -2702,643 +2478,102 @@ async function leaveCall(threadId) {
 }
 
 // ============================================================================
-// ENCUESTAS INTERACTIVAS
+// EVENTOS DE LLAMADA
 // ============================================================================
 
-function createPoll(threadId, question, options) {
+async function processRoomEvent(event) {
+    const thread = String(event.threadId || '');
 
-    const pollId = crypto.randomBytes(5).toString('hex');
+    if (!thread) return;
 
-    const buttons = options.map((option, index) => ({
+    const uid = String(event.user?.uid || '');
+    const nickname = event.user?.nickname || 'Aventurero';
 
-        id: `poll_${pollId}_${index}`,
+    const isBot = Boolean(
+        uid && (
+            uid === String(state.communityUid || '') ||
+            [...state.calls.values()].some(
+                call => String(call.identity) === uid
+            )
+        )
+    );
 
-        label: option.slice(0, 40)
-    }));
+    switch (event.type) {
+        case 'room.join':
+            console.log(`[ROOM JOIN] ${nickname} entró a ${thread}.`);
 
-    const poll = {
-        threadId: String(threadId),
-        question,
-        options: [...options],
-        votes: Array(options.length).fill(0),
-        voters: new Set(),
-        expiresAt: Date.now() + 30 * 60 * 1000
-    };
-
-    buttons.forEach((button, index) => {
-
-        estado.encuestas.set(
-            `${threadId}:${button.id}`,
-            {
-                poll,
-                index
+            if (!isBot) {
+                await sendMessage(
+                    thread,
+                    '¡Ad Astra Abbysosque! Bienvenido al chat.',
+                    'community'
+                );
             }
-        );
-    });
-
-    return buttons;
-}
-
-async function processInteraction(event, source) {
-
-    const threadId = String(event.threadId || '');
-
-    const buttonId = String(event.buttonId || '');
-
-    const key = `${threadId}:${buttonId}`;
-
-    const record = estado.encuestas.get(key);
-
-    if (!record) return;
-
-    const { poll, index } = record;
-
-    if (Date.now() > poll.expiresAt) {
-
-        for (const option of poll.options) {
-            void option;
-        }
-
-        return;
-    }
-
-    const user = event.user || {};
-
-    const uid = getUserId(user);
-
-    if (poll.voters.has(uid)) {
-
-        await sendMessage(
-            threadId,
-            'Ya registraste tu voto en esta encuesta.',
-            source
-        );
-
-        return;
-    }
-
-    poll.voters.add(uid);
-
-    poll.votes[index]++;
-
-    const total = poll.votes.reduce(
-        (sum, value) => sum + value,
-        0
-    );
-
-    const results = poll.options.map(
-        (option, i) =>
-            `${option}: ${poll.votes[i]} voto(s)`
-    );
-
-    await sendLongMessage(
-        threadId,
-
-        `ENCUESTA: ${poll.question}\n\n` +
-        `${user.nickname || 'Un viajero'} votó por: ${poll.options[index]}.\n\n` +
-        `RESULTADOS (${total} votos)\n` +
-        results.join('\n'),
-
-        source
-    );
-}
-
-// ============================================================================
-// TRIVIA Y PUNTOS
-// ============================================================================
-
-function startTrivia(threadId) {
-
-    const question = randomItem(triviaQuestions);
-
-    estado.trivia.set(String(threadId), {
-        question,
-        attempts: 0,
-        expiresAt: Date.now() + 120000
-    });
-
-    return (
-        `TRIVIA DE KATHERINE\n\n` +
-        `${question.question}\n\n` +
-        question.options.map(
-            (option, index) => `${index + 1}. ${option}`
-        ).join('\n') +
-        '\n\nResponde con !responder 1, 2, 3 o 4.'
-    );
-}
-
-function answerTrivia(threadId, uid, answer) {
-
-    const trivia = estado.trivia.get(String(threadId));
-
-    if (!trivia) {
-        return 'No hay una trivia activa en este chat. Usa !trivia.';
-    }
-
-    if (Date.now() > trivia.expiresAt) {
-
-        estado.trivia.delete(String(threadId));
-
-        return 'La trivia ha expirado. Inicia otra con !trivia.';
-    }
-
-    const selected = Number(answer);
-
-    if (
-        !Number.isInteger(selected) ||
-        selected < 1 ||
-        selected > trivia.question.options.length
-    ) {
-
-        return 'Debes responder con un número válido.';
-    }
-
-    trivia.attempts++;
-
-    if (selected - 1 === trivia.question.answer) {
-
-        estado.trivia.delete(String(threadId));
-
-        addPoints(uid, 10);
-
-        return (
-            '¡Respuesta correcta!\n' +
-            '+10 puntos para ti.\n' +
-            `Respuesta: ${trivia.question.options[trivia.question.answer]}`
-        );
-    }
-
-    if (trivia.attempts >= 3) {
-
-        estado.trivia.delete(String(threadId));
-
-        return (
-            'Se terminaron los intentos.\n' +
-            `La respuesta correcta era: ${trivia.question.options[trivia.question.answer]}.`
-        );
-    }
-
-    return 'No es correcto. Inténtalo nuevamente.';
-}
-
-// ============================================================================
-// JUEGO DE ADIVINAR
-// ============================================================================
-
-function startGuessGame(threadId) {
-
-    const secret = Math.floor(Math.random() * 100) + 1;
-
-    estado.juegos.set(String(threadId), {
-        secret,
-        attempts: 0,
-        expiresAt: Date.now() + 300000
-    });
-
-    return (
-        'He elegido un número entre 1 y 100.\n' +
-        'Tienes siete intentos para descubrirlo.\n' +
-        'Utiliza !intento número.'
-    );
-}
-
-function guessNumber(threadId, uid, number) {
-
-    const game = estado.juegos.get(String(threadId));
-
-    if (!game) {
-        return 'No hay una partida activa. Escribe !adivina.';
-    }
-
-    if (Date.now() > game.expiresAt) {
-
-        estado.juegos.delete(String(threadId));
-
-        return 'La partida expiró. Vuelve a iniciar con !adivina.';
-    }
-
-    const guess = Number(number);
-
-    if (
-        !Number.isInteger(guess) ||
-        guess < 1 ||
-        guess > 100
-    ) {
-        return 'Escribe un número entero entre 1 y 100.';
-    }
-
-    game.attempts++;
-
-    if (guess === game.secret) {
-
-        estado.juegos.delete(String(threadId));
-
-        addPoints(uid, 15);
-
-        return (
-            `¡Correcto! El número era ${game.secret}.\n` +
-            'Has ganado 15 puntos.'
-        );
-    }
-
-    if (game.attempts >= 7) {
-
-        estado.juegos.delete(String(threadId));
-
-        return `Terminó la partida. El número era ${game.secret}.`;
-    }
-
-    return (
-        `${guess < game.secret ? 'El número es mayor.' : 'El número es menor.'}\n` +
-        `Intentos restantes: ${7 - game.attempts}.`
-    );
-}
-
-// ============================================================================
-// PERFIL Y DESEOS
-// ============================================================================
-
-function getUserDisplayProfile(uid) {
-
-    const wishes = getWishState(uid);
-
-    return (
-        `Tus estadísticas recreativas:\n\n` +
-        `Deseos simulados de 5 estrellas: ${wishes.fiveStars}\n` +
-        `Deseos simulados de 4 estrellas: ${wishes.fourStars}\n` +
-        `Contador actual de 5 estrellas: ${wishes.pity5}\n` +
-        `Contador actual de 4 estrellas: ${wishes.pity4}\n` +
-        `Garantizado en la próxima de 5 estrellas: ${wishes.guaranteed ? 'Sí' : 'No'}\n` +
-        `Puntos de Katherine: ${estado.puntos.get(uid) || 0}`
-    );
-}
-
-// ============================================================================
-// COMANDOS DE GENSHIN
-// ============================================================================
-
-async function commandCharacter(threadId, args, source, replyId) {
-
-    if (!args.length) {
-
-        await sendMessage(
-            threadId,
-            'Uso: !personaje nombre\nEjemplo: !personaje Cyno\nTambién puedes utilizar !build, !materiales y !equipos.',
-            source,
-            replyId
-        );
-
-        return;
-    }
-
-    const name = args.join(' ');
-
-    await sendMessage(
-        threadId,
-        `Estoy consultando los registros de Teyvat para ${name}...`,
-        source
-    );
-
-    try {
-
-        const report = await fullCharacterReport(name);
-
-        await sendLongMessage(
-            threadId,
-            report,
-            source
-        );
-
-    } catch (err) {
-
-        console.error(
-            '[CHARACTER ERROR]',
-            err
-        );
-
-        await sendMessage(
-            threadId,
-            'No pude consultar la ficha. La base de datos o el repositorio de builds no está disponible en este momento.',
-            source
-        );
-    }
-}
-
-async function commandBuild(threadId, args, source, replyId) {
-
-    if (!args.length) {
-
-        await sendMessage(
-            threadId,
-            'Uso: !build nombre del personaje\nEjemplo: !build Cyno\nPara ver una build alternativa: !build Cyno 2.',
-            source,
-            replyId
-        );
-
-        return;
-    }
-
-    let buildIndex = 0;
-
-    const possibleIndex = Number(args[args.length - 1]);
-
-    if (
-        Number.isInteger(possibleIndex) &&
-        possibleIndex >= 1
-    ) {
-
-        buildIndex = possibleIndex - 1;
-        args.pop();
-    }
-
-    const name = args.join(' ');
-
-    try {
-
-        const guide = await getCharacterGuide(name);
-
-        if (!guide) {
-            await sendMessage(
-                threadId,
-                `No encontré una ficha para ${name}.`,
-                source,
-                replyId
+            break;
+
+        case 'room.leave':
+            console.log(`[ROOM LEAVE] ${nickname} salió de ${thread}.`);
+
+            if (isBot) {
+                await closeLocalCall(thread);
+            } else {
+                await sendMessage(
+                    thread,
+                    'Buen viaje, el Gremio de Aventureros espera tu regreso',
+                    'community'
+                );
+            }
+            break;
+
+        case 'room.speaker':
+            console.log(
+                `[ROOM SPEAKER] ${nickname}: ${event.speaker ? 'puede hablar' : 'está escuchando'}.`
             );
+            break;
 
-            return;
-        }
-
-        const text = [
-            characterSummary(guide),
-            '',
-            characterBuildText(guide, buildIndex)
-        ].join('\n');
-
-        await sendLongMessage(
-            threadId,
-            text,
-            source,
-            replyId
-        );
-
-    } catch (err) {
-
-        console.error('[BUILD ERROR]', err);
-
-        await sendMessage(
-            threadId,
-            'No pude acceder a los datos de builds. Inténtalo nuevamente más tarde.',
-            source
-        );
-    }
-}
-
-async function commandMaterials(threadId, args, source, replyId) {
-
-    if (!args.length) {
-
-        await sendMessage(
-            threadId,
-            'Uso: !materiales nombre del personaje\nEjemplo: !materiales Nahida.',
-            source,
-            replyId
-        );
-
-        return;
-    }
-
-    const name = args.join(' ');
-
-    try {
-
-        const result = await gameSearch(
-            'characters',
-            name
-        );
-
-        if (!result.result) {
-
-            await sendMessage(
-                threadId,
-                `No encontré los materiales de ${name}.`,
-                source,
-                replyId
-            );
-
-            return;
-        }
-
-        const materialText = formatMaterials(
-            result.result
-        );
-
-        await sendLongMessage(
-            threadId,
-
-            `MATERIALES DE ${result.result.name || name}\n\n${materialText}`,
-
-            source,
-            replyId
-        );
-
-    } catch (err) {
-
-        console.error('[MATERIALS ERROR]', err);
-
-        await sendMessage(
-            threadId,
-            'No pude consultar la base de materiales.',
-            source
-        );
-    }
-}
-
-async function commandTeams(threadId, args, source, replyId) {
-
-    if (!args.length) {
-
-        await sendMessage(
-            threadId,
-            'Uso: !equipos nombre del personaje\nEjemplo: !equipos Cyno.',
-            source,
-            replyId
-        );
-
-        return;
-    }
-
-    const name = args.join(' ');
-
-    try {
-
-        const result = await gameSearch(
-            'characters',
-            name
-        );
-
-        const canonicalName =
-            result.result?.name || name;
-
-        await sendMessage(
-            threadId,
-            `${canonicalName}\n\n${getRecommendedTeams(canonicalName)}`,
-            source,
-            replyId
-        );
-
-    } catch (err) {
-
-        console.error('[TEAMS ERROR]', err);
-
-        await sendMessage(
-            threadId,
-            'No pude obtener la ficha del personaje.',
-            source
-        );
-    }
-}
-
-async function commandGameItem(threadId, folder, args, source, replyId) {
-
-    if (!args.length) {
-
-        await sendMessage(
-            threadId,
-            folder === 'weapons'
-                ? 'Uso: !arma nombre del arma.'
-                : 'Uso: !artefacto nombre del set.',
-            source,
-            replyId
-        );
-
-        return;
-    }
-
-    const query = args.join(' ');
-
-    try {
-
-        const result = await gameSearch(
-            folder,
-            query
-        );
-
-        const item = result.result;
-
-        if (!item) {
-
-            await sendMessage(
-                threadId,
-                `No encontré ${query}.`,
-                source,
-                replyId
-            );
-
-            return;
-        }
-
-        const description =
-            item.description ||
-            item.effect ||
-            item.lore ||
-            'No hay descripción disponible.';
-
-        const parts = [
-            item.name || query,
-            `Rareza: ${item.rarity || 'No especificada'}`
-        ];
-
-        if (item.weaponType) {
-            parts.push(`Tipo de arma: ${item.weaponType}`);
-        }
-
-        if (item.baseAttack) {
-            parts.push(`ATQ base: ${item.baseAttack}`);
-        }
-
-        if (item.subStatText) {
-            parts.push(`Estadística secundaria: ${item.subStatText}`);
-        }
-
-        if (item['2pc']) {
-            parts.push(`Efecto de 2 piezas: ${item['2pc']}`);
-        }
-
-        if (item['4pc']) {
-            parts.push(`Efecto de 4 piezas: ${item['4pc']}`);
-        }
-
-        parts.push('', `Descripción: ${description}`);
-
-        await sendLongMessage(
-            threadId,
-            parts.join('\n'),
-            source,
-            replyId
-        );
-
-    } catch (err) {
-
-        console.error('[ITEM ERROR]', err);
-
-        await sendMessage(
-            threadId,
-            'No pude consultar ese objeto.',
-            source
-        );
+        case 'room.end':
+            console.log(`[ROOM END] ${thread}`);
+            await closeLocalCall(thread);
+            break;
     }
 }
 
 // ============================================================================
-// COMANDOS PRINCIPALES
+// PROCESADOR PRINCIPAL DE COMANDOS
 // ============================================================================
 
 async function processCommand(event, source) {
-
-    const threadId = String(event.threadId || '');
+    const thread = String(event.threadId || '');
 
     const message = event.message || {};
-
     const author = message.author || {};
 
     const nickname = author.nickname || 'Viajero';
-
-    const uid = getUserId(author);
-
-    const content = String(
-        message.content || ''
-    ).trim();
-
+    const uid = uidOf(author);
     const messageId = message.messageId || null;
+    const content = String(message.content || '').trim();
 
-    if (!threadId || !content) return;
+    if (!thread || !content) return;
 
-    // Evitar que el bot responda a sí mismo.
-
+    // No responder a los mensajes del propio bot.
     if (
         author.uid &&
-        (
-            String(author.uid) === String(estado.developerBotUid) ||
-            String(author.uid) === String(estado.communityBotUid)
-        )
+        [state.developerUid, state.communityUid]
+            .filter(Boolean)
+            .map(String)
+            .includes(String(author.uid))
     ) {
         return;
     }
 
-    // Evitar duplicados.
-
     if (messageId) {
+        const key = `${source}:${messageId}`;
 
-        const id = String(messageId);
+        if (processedMessages.has(key)) return;
 
-        if (processedMessages.has(id)) {
-            return;
-        }
-
-        processedMessages.add(id);
+        processedMessages.add(key);
 
         if (processedMessages.size > 5000) {
-
             processedMessages.delete(
                 processedMessages.values().next().value
             );
@@ -3354,218 +2589,220 @@ async function processCommand(event, source) {
 
     const parts = content.split(/\s+/);
 
-    const command = parts[0].toLowerCase();
+    const command = parts[0]
+        .toLowerCase()
+        .replace(/^-/, '!');
 
     const args = parts.slice(1);
 
     console.log(
-        `[KATHERINE COMMAND] ${command} | ${nickname} | ${threadId} | ${source}`
+        `[COMANDO] ${command} | ${nickname} | ${thread} | ${source}`
     );
+
+    // Acciones sociales.
+    if (socialActions[command.slice(1)]) {
+        await socialCommand(
+            thread,
+            command.slice(1),
+            args,
+            event,
+            source,
+            messageId
+        );
+        return;
+    }
 
     let response = null;
 
-    // ========================================================================
-    // AYUDA
-    // ========================================================================
-
     switch (command) {
-
         case '!ayuda':
         case '!comandos':
-        case '-ayuda':
-
             response =
-                'KATHERINE — CENTRO DE COMANDOS\n\n' +
-
+                'KATHERINE — COMANDOS\n\n' +
                 'GENSHIN IMPACT\n' +
-                '!personaje [nombre] — Ficha, build y materiales.\n' +
-                '!build [nombre] — Armas, artefactos y talentos.\n' +
-                '!materiales [nombre] — Materiales de progresión.\n' +
-                '!equipos [nombre] — Equipos recomendados.\n' +
-                '!curiosidad — Dato aleatorio sin repeticiones.\n' +
-                '!artefacto [nombre] — Consultar un set.\n' +
-                '!arma [nombre] — Consultar un arma.\n' +
-                '!reaccion pyro hydro — Reacción elemental.\n' +
-                '!equipo — Cuatro personajes aleatorios.\n' +
-                '!jefe — Elegir un jefe.\n' +
-                '!comision — Encargo de aventura.\n' +
-                '!expedicion — Generar una expedición.\n' +
-                '!deseo — Simular una invocación.\n' +
-                '!pity — Consultar contador simulado.\n' +
-                '!resetpity — Reiniciar simulación.\n\n' +
-
+                '!personaje nombre — Ficha, build, materiales y equipos.\n' +
+                '!build nombre [número] — Build detallada.\n' +
+                '!materiales nombre — Materiales de progresión.\n' +
+                '!equipos nombre — Equipos recomendados.\n' +
+                '!arma nombre / !artefacto nombre.\n' +
+                '!dominio nombre / !enemigo nombre.\n' +
+                '!comida nombre / !material nombre / !logro nombre.\n' +
+                '!talento nombre / !constelacion nombre.\n' +
+                '!reaccion electro dendro — Reacción elemental.\n' +
+                '!curiosidad — Dato sin repetición hasta agotar el ciclo.\n' +
+                '!diagnosticogenshin nombre — Diagnóstico de fuentes.\n' +
+                '!deseo / !pity / !resetpity — Gachapón simulado.\n' +
+                '!equipo / !jefe / !comision / !expedicion / !mora.\n\n' +
+                'INTERACCIONES\n' +
+                '!abrazo @usuario / !beso @usuario / !patada @usuario / !golpe @usuario.\n' +
+                '!cachetada / !acariciar / !mimar / !morder / !consolar.\n' +
+                '!felicitar / !saludar / !proteger / !bailar / !cosquillas.\n' +
+                '!chocar / !ayudar / !regalar / !acompañar / !asustar.\n' +
+                '!curar / !cargar / !empujar / !regañar / !admirar / !apoyar.\n\n' +
                 'ENTRETENIMIENTO\n' +
-                '!encuesta pregunta | opción 1 | opción 2 — Crear votación.\n' +
-                '!trivia — Pregunta de conocimientos.\n' +
-                '!responder número — Responder trivia.\n' +
-                '!ranking — Tabla de puntos.\n' +
-                '!puntos — Consultar tus puntos.\n' +
-                '!adivina — Juego de números.\n' +
-                '!intento número — Intentar adivinar.\n' +
-                '!elige A | B | C — Elegir al azar.\n' +
-                '!duelo persona | persona — Duelo ficticio.\n' +
-                '!ship persona | persona — Compatibilidad ficticia.\n' +
-                '!8ball pregunta — Bola mágica.\n' +
-                '!dado [caras] — Lanzar dado.\n' +
-                '!moneda — Cara o sello.\n' +
-                '!chiste — Contar un chiste.\n' +
-                '!frase — Frase aleatoria.\n' +
-                '!reto — Desafío aleatorio.\n' +
-                '!suerte — Consultar tu fortuna.\n\n' +
-
+                '!trivia / !responder número.\n' +
+                '!adivina / !intento número.\n' +
+                '!encuesta pregunta | A | B / !votar número.\n' +
+                '!elige A | B | C / !duelo A | B / !ship A | B.\n' +
+                '!dado [caras] / !moneda / !8ball pregunta.\n' +
+                '!chiste / !frase / !reto / !suerte / !puntos / !ranking.\n\n' +
                 'UTILIDADES\n' +
-                '!ping — Comprobar conexión.\n' +
-                '!uptime — Tiempo activa.\n' +
-                '!estadochat — Estado del bot.\n' +
                 '!fecha — Fecha personal.\n' +
-                '!zona America/Santiago — Configurar zona horaria.\n\n' +
-
+                '!zona America/Santiago — Configurar zona horaria.\n' +
+                '!ping / !uptime / !estadochat.\n\n' +
                 'LLAMADAS\n' +
-                '!salas — Consultar salas activas.\n' +
-                '!llamada! — Entrar a la llamada.\n' +
-                '!salirllamada! — Salir de la llamada.';
-
+                '!salas / !llamada! / !salirllamada!';
             break;
 
-        // ====================================================================
-        // PERSONAJES Y BUILDS
-        // ====================================================================
-
         case '!personaje':
-
-            await commandCharacter(
-                threadId,
-                args,
-                source,
-                messageId
-            );
-
+            await characterCommand(thread, args, source, messageId);
             return;
 
         case '!build':
-
-            await commandBuild(
-                threadId,
-                args,
-                source,
-                messageId
-            );
-
+            await buildCommand(thread, args, source, messageId);
             return;
 
         case '!materiales':
-
-            await commandMaterials(
-                threadId,
-                args,
-                source,
-                messageId
-            );
-
+            await materialsCommand(thread, args, source, messageId);
             return;
 
         case '!equipos':
-
-            await commandTeams(
-                threadId,
-                args,
-                source,
-                messageId
-            );
-
+            await teamsCommand(thread, args, source, messageId);
             return;
 
         case '!arma':
-
-            await commandGameItem(
-                threadId,
-                'weapons',
-                args,
-                source,
-                messageId
-            );
-
+            await objectCommand(thread, 'weapons', args, source, messageId);
             return;
 
         case '!artefacto':
-
-            await commandGameItem(
-                threadId,
-                'artifacts',
-                args,
-                source,
-                messageId
-            );
-
+            await objectCommand(thread, 'artifacts', args, source, messageId);
             return;
 
-        // ====================================================================
-        // CURIOSIDADES
-        // ====================================================================
+        case '!dominio':
+            await objectCommand(thread, 'domains', args, source, messageId);
+            return;
 
-        case '!curiosidad':
+        case '!enemigo':
+            await objectCommand(thread, 'enemies', args, source, messageId);
+            return;
 
-            response =
-                `¿Sabías que...?\n\n${nextCuriosity()}`;
+        case '!comida':
+            await objectCommand(thread, 'foods', args, source, messageId);
+            return;
 
+        case '!material':
+            await objectCommand(thread, 'materials', args, source, messageId);
+            return;
+
+        case '!logro':
+            await objectCommand(thread, 'achievements', args, source, messageId);
+            return;
+
+        case '!talento':
+            await talentCommand(thread, args, source, messageId);
+            return;
+
+        case '!constelacion':
+            await constellationCommand(thread, args, source, messageId);
+            return;
+
+        case '!diagnosticogenshin':
+            await genshinDiagnostic(thread, args, source, messageId);
+            return;
+
+        case '!zona': {
+            const zone = args.join(' ').trim();
+
+            if (!zone) {
+                response = state.zones.has(uid)
+                    ? `Tu zona horaria es ${state.zones.get(uid)}.`
+                    : 'Configura tu zona horaria con !zona America/Santiago. Ejemplos: America/Bogota, America/Lima, America/Mexico_City, Europe/Madrid.';
+            } else if (normalize(zone) === 'borrar') {
+                state.zones.delete(uid);
+                response = 'Tu zona horaria fue eliminada.';
+            } else if (!validZone(zone)) {
+                response = 'Zona horaria inválida. Usa un identificador IANA, por ejemplo America/Santiago.';
+            } else {
+                state.zones.set(uid, zone);
+                response = `Zona horaria guardada: ${zone}.`;
+            }
             break;
+        }
 
-        // ====================================================================
-        // EQUIPO ALEATORIO
-        // ====================================================================
+        case '!fecha': {
+            const zone = state.zones.get(uid);
 
-        case '!equipo': {
-
-            const characters = [
-                'Cyno',
-                'Nahida',
-                'Dehya',
-                'Alhaitham',
-                'Tighnari',
-                'Nilou',
-                'Kaeya',
-                'Fischl',
-                'Diluc',
-                'Venti',
-                'Zhongli',
-                'Hu Tao',
-                'Xiao',
-                'Ganyu',
-                'Raiden Shogun',
-                'Kazuha',
-                'Ayaka',
-                'Furina',
-                'Neuvillette',
-                'Navia',
-                'Arlecchino',
-                'Mavuika',
-                'Kinich',
-                'Xianyun',
-                'Yelan'
-            ];
-
-            response =
-                'EQUIPO ALEATORIO\n\n' +
-                shuffle(characters)
-                    .slice(0, 4)
-                    .map((name, index) => `${index + 1}. ${name}`)
-                    .join('\n') +
-                '\n\nComposición recreativa.';
+            response = zone
+                ? `La fecha local de ${nickname} es ${dateForZone(zone)}.`
+                : `${nickname}, primero configura tu zona horaria con !zona America/Santiago.`;
 
             break;
         }
 
-        // ====================================================================
-        // REACCIONES ELEMENTALES
-        // ====================================================================
+        case '!curiosidad':
+            response = `¿Sabías que...?\n\n${nextCuriosity()}`;
+            break;
+
+        case '!equipo': {
+            const roster = [
+                'Cyno', 'Nahida', 'Dehya', 'Alhaitham', 'Tighnari',
+                'Nilou', 'Kaeya', 'Fischl', 'Diluc', 'Venti',
+                'Zhongli', 'Hu Tao', 'Xiao', 'Ganyu', 'Raiden Shogun',
+                'Kazuha', 'Kamisato Ayaka', 'Furina', 'Neuvillette',
+                'Navia', 'Arlecchino', 'Mavuika', 'Kinich', 'Xianyun', 'Yelan'
+            ];
+
+            response =
+                'EQUIPO ALEATORIO\n\n' +
+                shuffle(roster)
+                    .slice(0, 4)
+                    .map((x, i) => `${i + 1}. ${x}`)
+                    .join('\n') +
+                '\n\nEquipo recreativo, no es una recomendación de meta.';
+
+            break;
+        }
+
+        case '!jefe':
+            response =
+                `Tu próximo desafío será enfrentarte a ${random([
+                    'Dvalin', 'Andrius', 'Azhdaha', 'Tartaglia',
+                    'La Signora', 'Shouki no Kami', 'Narval Devorador',
+                    'Hipostasis Electro', 'Hipostasis Pyro',
+                    'Hipostasis Cryo', 'Dragarto de las Profundidades'
+                ])}.`;
+            break;
+
+        case '!comision':
+            response =
+                'ENCARGO DEL GREMIO\n\n' +
+                random([
+                    'Investiga unas huellas misteriosas cerca de una ruina.',
+                    'Ayuda a un comerciante que perdió su mercancía.',
+                    'Derrota a los Hilichurls que bloquean una ruta.',
+                    'Busca un cofre oculto cerca de un dominio.',
+                    'Explora una región desconocida.',
+                    'Recoge ingredientes para una receta tradicional.',
+                    'Investiga un extraño fenómeno elemental.'
+                ]);
+            break;
+
+        case '!expedicion':
+            response =
+                `NUEVA EXPEDICIÓN\n\nDestino: ${random([
+                    'Mondstadt', 'Liyue', 'Inazuma',
+                    'Sumeru', 'Fontaine', 'Natlan'
+                ])}.\nObjetivo: explorar una zona desconocida y registrar tus hallazgos.\n\n¡Que los Siete guíen tu camino!`;
+            break;
+
+        case '!mora':
+            response =
+                `El Gremio te ha otorgado ${(Math.floor(Math.random() * 100) + 1) * 100} Mora ficticia.`;
+            break;
 
         case '!reaccion': {
-
             if (args.length < 2) {
-
-                response =
-                    'Uso: !reaccion pyro hydro\nElementos disponibles: Pyro, Hydro, Cryo, Electro, Dendro, Anemo y Geo.';
-
+                response = 'Uso: !reaccion electro dendro. Elementos: Pyro, Hydro, Cryo, Electro, Dendro, Anemo y Geo.';
                 break;
             }
 
@@ -3579,11 +2816,27 @@ async function processCommand(event, source) {
                 tierra: 'Geo'
             };
 
-            let a = aliases[normalize(args[0])] || args[0];
-            let b = aliases[normalize(args[1])] || args[1];
+            const convert = x =>
+                aliases[normalize(x)] ||
+                x.charAt(0).toUpperCase() + x.slice(1).toLowerCase();
 
-            a = a.charAt(0).toUpperCase() + a.slice(1).toLowerCase();
-            b = b.charAt(0).toUpperCase() + b.slice(1).toLowerCase();
+            const a = convert(args[0]);
+            const b = convert(args[1]);
+
+            const valid = [
+                'Pyro', 'Hydro', 'Cryo',
+                'Electro', 'Dendro', 'Anemo', 'Geo'
+            ];
+
+            if (!valid.includes(a) || !valid.includes(b)) {
+                response = 'Elemento no reconocido.';
+                break;
+            }
+
+            if (a === b) {
+                response = 'No hay reacción entre elementos iguales.';
+                break;
+            }
 
             const reactions = {
                 'Hydro|Pyro': 'Vaporizado',
@@ -3597,825 +2850,361 @@ async function processCommand(event, source) {
                 'Dendro|Pyro': 'Quemadura'
             };
 
-            if (!elements.includes(a) || !elements.includes(b)) {
-                response = 'Uno de los elementos no es válido.';
-                break;
-            }
-
-            if (a === b) {
-                response = 'No se produce una reacción entre elementos iguales.';
-                break;
-            }
-
-            const key = [a, b].sort().join('|');
-
             if (a === 'Anemo' || b === 'Anemo') {
-
-                const other = a === 'Anemo' ? b : a;
-
-                response = ['Pyro', 'Hydro', 'Cryo', 'Electro'].includes(other)
+                response = ['Pyro', 'Hydro', 'Cryo', 'Electro'].includes(
+                    a === 'Anemo' ? b : a
+                )
                     ? 'Reacción: Torbellino.'
-                    : 'No hay una reacción clásica directa de Torbellino.';
-                
-                break;
-            }
-
-            if (a === 'Geo' || b === 'Geo') {
-
-                const other = a === 'Geo' ? b : a;
-
-                response = ['Pyro', 'Hydro', 'Cryo', 'Electro'].includes(other)
+                    : 'No se produce Torbellino con ese elemento.';
+            } else if (a === 'Geo' || b === 'Geo') {
+                response = ['Pyro', 'Hydro', 'Cryo', 'Electro'].includes(
+                    a === 'Geo' ? b : a
+                )
                     ? 'Reacción: Cristalización.'
                     : 'No se produce Cristalización con ese elemento.';
-
-                break;
+            } else {
+                response =
+                    `Reacción entre ${a} y ${b}: ${reactions[[a, b].sort().join('|')] || 'No existe reacción directa clásica.'}`;
             }
 
-            response =
-                `Reacción entre ${a} y ${b}: ${reactions[key] || 'No existe una reacción clásica directa.'}`;
-
             break;
         }
-
-        // ====================================================================
-        // JEFES
-        // ====================================================================
-
-        case '!jefe':
-        case '!boss': {
-
-            const bosses = [
-                'Andrius',
-                'Dvalin',
-                'Azhdaha',
-                'Tartaglia',
-                'La Signora',
-                'Shouki no Kami',
-                'Narval Devorador',
-                'Aparejador',
-                'Hipostasis Electro',
-                'Hipostasis Cryo',
-                'Hipostasis Pyro',
-                'Dragarto de las Profundidades'
-            ];
-
-            response =
-                `JEFE SELECCIONADO\n\nTu próximo desafío será: ${randomItem(bosses)}.`;
-
-            break;
-        }
-
-        // ====================================================================
-        // COMISIONES Y EXPEDICIONES
-        // ====================================================================
-
-        case '!comision': {
-
-            const missions = [
-                'Investiga unas huellas misteriosas cerca de una ruina.',
-                'Ayuda a un comerciante que perdió su mercancía.',
-                'Derrota a los Hilichurls que bloquean una ruta.',
-                'Busca un cofre oculto cerca de un dominio.',
-                'Explora una región desconocida.',
-                'Recoge ingredientes para una receta tradicional.',
-                'Acompaña a un aventurero durante una expedición.',
-                'Investiga un extraño fenómeno elemental.'
-            ];
-
-            response =
-                `ENCARGO DEL GREMIO DE AVENTUREROS\n\n${randomItem(missions)}`;
-
-            break;
-        }
-
-        case '!expedicion': {
-
-            const destinations = [
-                'Mondstadt',
-                'Liyue',
-                'Inazuma',
-                'Sumeru',
-                'Fontaine',
-                'Natlan',
-                'Nod-Krai'
-            ];
-
-            response =
-                'NUEVA EXPEDICIÓN\n\n' +
-                `Destino: ${randomItem(destinations)}.\n` +
-                'Objetivo: investigar una zona desconocida y registrar los hallazgos.\n\n' +
-                '¡Que los Siete guíen tu camino!';
-
-            break;
-        }
-
-        // ====================================================================
-        // WISH SIMULATOR
-        // ====================================================================
 
         case '!deseo': {
-
-            const result = simulateWish(uid);
+            const wish = simulateWish(uid);
 
             response =
-                `RESULTADO DE LA INVOCACIÓN\n\n` +
-                `${'⭐'.repeat(result.stars)}\n` +
-                `${result.name}\n\n` +
-                `Deseos desde el último 5 estrellas: ${getWishState(uid).pity5}\n` +
-                'Simulación recreativa; no afecta tu cuenta del juego.';
+                `RESULTADO DE DESEO SIMULADO\n\n` +
+                `${'⭐'.repeat(wish.stars)}\n` +
+                `${wish.name}\n\n` +
+                `Pity actual: ${state.wishes.get(uid).pity5}\n` +
+                'No afecta tu cuenta de Genshin.';
 
             break;
         }
 
-        case '!pity':
+        case '!pity': {
+            const wish = wishState(uid);
 
             response =
-                'CONTADOR DE DESEOS SIMULADOS\n\n' +
-                getUserDisplayProfile(uid);
+                `DESEOS SIMULADOS\n\n` +
+                `5 estrellas: ${wish.pity5}\n` +
+                `4 estrellas: ${wish.pity4}\n` +
+                `Garantizado: ${wish.guaranteed ? 'Sí' : 'No'}`;
 
             break;
+        }
 
         case '!resetpity':
-
-            estado.deseos.set(uid, {
+            state.wishes.set(uid, {
                 pity5: 0,
                 pity4: 0,
-                guaranteed: false,
-                fiveStars: 0,
-                fourStars: 0
+                guaranteed: false
             });
-
-            response =
-                'Tu contador de deseos de Katherine fue reiniciado. Esto no modifica tu cuenta de Genshin Impact.';
-
+            response = 'El contador simulado fue reiniciado. No modifica tu cuenta.';
             break;
-
-        // ====================================================================
-        // FECHA PERSONAL (NO EXISTE COMANDO DE HORA)
-        // ====================================================================
-
-        case '!zona': {
-
-            const value = args.join(' ').trim();
-
-            if (!value) {
-
-                const current = estado.zonas.get(uid);
-
-                response = current
-                    ? `Tu zona horaria registrada es ${current}.`
-                    : 'Configura tu zona horaria con !zona America/Santiago. Ejemplos: America/Bogota, America/Lima, America/Mexico_City o Europe/Madrid.';
-
-            } else if (normalize(value) === 'borrar') {
-
-                estado.zonas.delete(uid);
-
-                response = 'Tu zona horaria fue eliminada.';
-
-            } else if (!validTimezone(value)) {
-
-                response = 'La zona horaria no es válida. Utiliza un identificador IANA.';
-
-            } else {
-
-                estado.zonas.set(uid, value);
-
-                response =
-                    `Listo, ${nickname}. Registré tu zona horaria: ${value}.`;
-            }
-
-            break;
-        }
-
-        case '!fecha': {
-
-            const zone = estado.zonas.get(uid);
-
-            response = zone
-                ? `La fecha de ${nickname} es ${localDate(zone)}.`
-                : `${nickname}, primero configura tu zona horaria con !zona America/Santiago.`;
-
-            break;
-        }
-
-        // ====================================================================
-        // PING Y ESTADO
-        // ====================================================================
 
         case '!ping': {
-
             const start = Date.now();
-
-            const result = await anarchyAPI(
-                '/me',
-                'GET',
-                null,
-                source
-            );
-
-            const latency = Date.now() - start;
+            const result = await anarchy('/me', 'GET', null, source);
 
             response = result.ok
-                ? `PONG, ${nickname}.\nKatherine está en línea.\nLatencia API: ${latency} ms.`
-                : `El servidor está en línea, pero Anarchy respondió HTTP ${result.status}.`;
+                ? `PONG, ${nickname}.\nKatherine está en línea.\nLatencia API: ${Date.now() - start} ms.`
+                : `Servidor activo, pero Anarchy respondió HTTP ${result.status}.`;
 
             break;
         }
 
         case '!uptime':
-
-            response =
-                `Katherine lleva activa ${getUptime()}.`;
-
+            response = `Katherine lleva activa ${uptime()}.`;
             break;
 
         case '!estadochat':
-
             response =
-                'KATHERINE — ESTADO\n\n' +
+                `KATHERINE — ESTADO\n\n` +
                 `Servidor: EN LÍNEA\n` +
-                `Llamadas conectadas: ${estado.salas.size}/3\n` +
-                `Credencial de desarrollador: CONFIGURADA\n` +
-                `Credencial de comunidad: ${COMMUNITY_BOT_TOKEN ? 'CONFIGURADA' : 'NO CONFIGURADA'}\n` +
-                `Tiempo activa: ${getUptime()}`;
-
+                `Bot desarrollador: CONFIGURADO\n` +
+                `Bot comunidad: ${COMMUNITY_BOT_TOKEN ? 'CONFIGURADO' : 'NO CONFIGURADO'}\n` +
+                `Llamadas: ${state.calls.size}/3\n` +
+                `Genshin-DB: ACTIVADO\n` +
+                `Tiempo activa: ${uptime()}`;
             break;
 
-        // ====================================================================
-        // DADO
-        // ====================================================================
-
-        case '!dado': {
-
-            const faces = args.length
-                ? Number(args[0])
-                : 6;
-
-            if (
-                !Number.isInteger(faces) ||
-                faces < 2 ||
-                faces > 100
-            ) {
-
-                response =
-                    'El dado debe tener entre 2 y 100 caras.';
-
-            } else {
-
-                const value = Math.floor(
-                    Math.random() * faces
-                ) + 1;
-
-                response =
-                    `🎲 ${nickname}, tu resultado es ${value}/${faces}.`;
-            }
-
-            break;
-        }
-
-        // ====================================================================
-        // MONEDA
-        // ====================================================================
-
-        case '!moneda':
-
-            response =
-                `🪙 La moneda cayó en ${Math.random() < 0.5 ? 'CARA' : 'SELLO'}.`;
-
+        case '!trivia':
+            response = startTrivia(thread);
             break;
 
-        // ====================================================================
-        // ELIGE
-        // ====================================================================
+        case '!responder':
+            response = answerTrivia(thread, uid, args[0]);
+            break;
 
-        case '!elige': {
+        case '!adivina':
+            response = startNumberGame(thread);
+            break;
 
-            const options = args
-                .join(' ')
-                .split('|')
-                .map(x => x.trim())
-                .filter(Boolean);
+        case '!intento':
+            response = tryNumber(thread, uid, args[0]);
+            break;
 
-            if (options.length < 2) {
+        case '!puntos':
+            response = `${nickname}, tienes ${state.points.get(uid) || 0} puntos.`;
+            break;
 
-                response =
-                    'Uso: !elige opción 1 | opción 2 | opción 3.';
+        case '!ranking': {
+            const rows = [...state.points.entries()]
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 10);
 
-            } else {
-
-                response =
-                    `Katherine ha elegido: ${randomItem(options)}.`;
-            }
+            response = rows.length
+                ? 'RANKING KATHERINE\n\n' +
+                  rows.map(([user, points], i) =>
+                      `${i + 1}. ${user} — ${points} puntos`
+                  ).join('\n')
+                : 'Todavía no hay puntos registrados.';
 
             break;
         }
-
-        // ====================================================================
-        // BOLA MÁGICA
-        // ====================================================================
-
-        case '!8ball': {
-
-            if (!args.length) {
-
-                response =
-                    'Haz una pregunta después del comando.';
-
-            } else {
-
-                response = randomItem([
-                    'Sí, definitivamente.',
-                    'Todo apunta a que sí.',
-                    'Es muy probable.',
-                    'Las señales son favorables.',
-                    'No puedo asegurarlo.',
-                    'Vuelve a preguntarme después.',
-                    'No parece probable.',
-                    'Mi respuesta es no.',
-                    'El destino todavía no está decidido.'
-                ]);
-            }
-
-            break;
-        }
-
-        // ====================================================================
-        // SHIP
-        // ====================================================================
-
-        case '!ship': {
-
-            const names = args
-                .join(' ')
-                .split('|')
-                .map(x => x.trim())
-                .filter(Boolean);
-
-            if (names.length !== 2) {
-
-                response =
-                    'Uso: !ship personaje 1 | personaje 2.';
-
-            } else {
-
-                const seed = crypto
-                    .createHash('sha256')
-                    .update(`${names[0]}|${names[1]}`)
-                    .digest();
-
-                const percentage =
-                    seed.readUInt32BE(0) % 101;
-
-                response =
-                    `COMPATIBILIDAD\n\n` +
-                    `${names[0]} + ${names[1]}\n` +
-                    `${percentage}% de compatibilidad.\n\n` +
-                    (percentage >= 80
-                        ? 'Una pareja destinada a encontrarse.'
-                        : percentage >= 50
-                            ? 'Podría funcionar con algo de esfuerzo.'
-                            : 'Las estrellas no parecen estar alineadas.') +
-                    '\n\nResultado ficticio, solo por entretenimiento.';
-            }
-
-            break;
-        }
-
-        // ====================================================================
-        // DUELO
-        // ====================================================================
-
-        case '!duelo': {
-
-            const fighters = args
-                .join(' ')
-                .split('|')
-                .map(x => x.trim())
-                .filter(Boolean);
-
-            if (fighters.length !== 2) {
-
-                response =
-                    'Uso: !duelo participante 1 | participante 2.';
-
-            } else {
-
-                response =
-                    `DUELO\n\n${fighters[0]} VS ${fighters[1]}\n\n` +
-                    `🏆 Ganador: ${randomItem(fighters)}.\n\n` +
-                    'El resultado fue elegido aleatoriamente.';
-            }
-
-            break;
-        }
-
-        // ====================================================================
-        // ENCUESTA
-        // ====================================================================
 
         case '!encuesta': {
-
-            const pieces = args
-                .join(' ')
+            const pieces = args.join(' ')
                 .split('|')
                 .map(x => x.trim())
                 .filter(Boolean);
 
             if (pieces.length < 3 || pieces.length > 6) {
+                response = 'Uso: !encuesta ¿Qué prefieres? | Opción A | Opción B. Máximo cinco opciones.';
+            } else {
+                state.polls.set(thread, {
+                    question: pieces[0],
+                    options: pieces.slice(1),
+                    votes: new Map(),
+                    expires: Date.now() + 30 * 60 * 1000
+                });
 
                 response =
-                    'Uso: !encuesta ¿Qué prefieres? | Opción A | Opción B\nPuedes agregar hasta cinco opciones.';
+                    `ENCUESTA CREADA\n\n${pieces[0]}\n\n` +
+                    pieces.slice(1).map((x, i) => `${i + 1}. ${x}`).join('\n') +
+                    '\n\nVota con !votar número. Dura 30 minutos.';
+            }
 
+            break;
+        }
+
+        case '!votar': {
+            const poll = state.polls.get(thread);
+
+            if (!poll) {
+                response = 'No hay encuesta activa.';
+            } else if (Date.now() > poll.expires) {
+                state.polls.delete(thread);
+                response = 'La encuesta expiró.';
             } else {
+                const n = Number(args[0]);
 
-                const question = pieces[0];
+                if (!Number.isInteger(n) || n < 1 || n > poll.options.length) {
+                    response = `Elige un número del 1 al ${poll.options.length}.`;
+                } else {
+                    poll.votes.set(uid, n - 1);
 
-                const options = pieces.slice(1);
-
-                const buttons = createPoll(
-                    threadId,
-                    question,
-                    options
-                );
-
-                const result = await sendMessage(
-                    threadId,
-                    `ENCUESTA\n\n${question}\n\nVota utilizando uno de los botones.`,
-                    source,
-                    messageId,
-                    buttons
-                );
-
-                if (!result.ok) {
+                    const counts = poll.options.map((option, i) =>
+                        `${i + 1}. ${option}: ${[...poll.votes.values()].filter(v => v === i).length} voto(s)`
+                    );
 
                     response =
-                        'No pude publicar la encuesta.';
-
-                } else {
-
-                    console.log(
-                        `[POLL] Encuesta creada en ${threadId}.`
-                    );
+                        `Voto registrado.\n\n${counts.join('\n')}\nTotal: ${poll.votes.size}.`;
                 }
             }
 
             break;
         }
 
-        // ====================================================================
-        // TRIVIA
-        // ====================================================================
+        case '!elige': {
+            const choices = args.join(' ')
+                .split('|')
+                .map(x => x.trim())
+                .filter(Boolean);
 
-        case '!trivia':
-
-            response = startTrivia(threadId);
-
-            break;
-
-        case '!responder':
-
-            response = answerTrivia(
-                threadId,
-                uid,
-                args[0]
-            );
+            response = choices.length >= 2
+                ? `Katherine elige: ${random(choices)}.`
+                : 'Uso: !elige A | B | C.';
 
             break;
+        }
 
-        case '!puntos':
+        case '!duelo': {
+            const choices = args.join(' ')
+                .split('|')
+                .map(x => x.trim())
+                .filter(Boolean);
 
-            response =
-                `${nickname}, tienes ${estado.puntos.get(uid) || 0} puntos.`;
+            response = choices.length === 2
+                ? `DUELO\n\n${choices[0]} VS ${choices[1]}\n\nGanador: ${random(choices)}.\nResultado aleatorio.`
+                : 'Uso: !duelo A | B.';
 
             break;
+        }
 
-        case '!ranking': {
+        case '!ship': {
+            const names = args.join(' ')
+                .split('|')
+                .map(x => x.trim())
+                .filter(Boolean);
 
-            const ranking = [...estado.puntos.entries()]
-                .sort((a, b) => b[1] - a[1])
-                .slice(0, 10);
-
-            if (!ranking.length) {
-
-                response = 'Todavía no hay puntos registrados.';
-
+            if (names.length !== 2) {
+                response = 'Uso: !ship A | B.';
             } else {
+                const hash = crypto.createHash('sha256')
+                    .update(`${names[0]}|${names[1]}`)
+                    .digest();
+
+                const score = hash.readUInt32BE(0) % 101;
 
                 response =
-                    'RANKING DE KATHERINE\n\n' +
-                    ranking.map(
-                        ([id, points], index) =>
-                            `${index + 1}. ${id} — ${points} puntos`
-                    ).join('\n');
+                    `COMPATIBILIDAD\n\n${names[0]} + ${names[1]}\n${score}%\n\n` +
+                    `${score >= 80 ? 'Las estrellas están alineadas.' : score >= 50 ? 'Podría funcionar.' : 'Una relación complicada.'}\n` +
+                    'Resultado ficticio.';
             }
 
             break;
         }
 
-        // ====================================================================
-        // ADIVINAR NÚMERO
-        // ====================================================================
+        case '!dado': {
+            const faces = args.length ? Number(args[0]) : 6;
 
-        case '!adivina':
-
-            response = startGuessGame(threadId);
-
-            break;
-
-        case '!intento':
-
-            response = guessNumber(
-                threadId,
-                uid,
-                args[0]
-            );
+            response = Number.isInteger(faces) && faces >= 2 && faces <= 1000
+                ? `🎲 ${nickname}: ${Math.floor(Math.random() * faces) + 1}/${faces}.`
+                : 'El dado debe tener entre 2 y 1000 caras.';
 
             break;
+        }
 
-        // ====================================================================
-        // SUERTE
-        // ====================================================================
-
-        case '!suerte':
-
-            response =
-                `${nickname}, tu fortuna de hoy: ${randomItem([
-                    'Las oportunidades están cerca.',
-                    'Hoy es un buen día para comenzar algo nuevo.',
-                    'Una sorpresa podría aparecer en tu camino.',
-                    'La paciencia será tu mejor aliada.',
-                    'Los pequeños avances también cuentan.',
-                    'Tu próxima aventura podría ser la mejor.',
-                    'No subestimes una buena oportunidad.'
-                ])}`;
-
+        case '!moneda':
+            response = `🪙 La moneda cayó en ${Math.random() < 0.5 ? 'CARA' : 'SELLO'}.`;
             break;
 
-        // ====================================================================
-        // CHISTES
-        // ====================================================================
+        case '!8ball':
+            response = args.length
+                ? random([
+                    'Sí, definitivamente.',
+                    'Todo apunta a que sí.',
+                    'Es muy probable.',
+                    'No puedo asegurarlo.',
+                    'Vuelve a preguntarme después.',
+                    'No parece probable.',
+                    'Mi respuesta es no.',
+                    'El destino todavía no está decidido.'
+                ])
+                : 'Escribe una pregunta después de !8ball.';
+            break;
 
         case '!chiste':
-
-            response = randomItem(jokes);
-
+            response = random(jokes);
             break;
-
-        // ====================================================================
-        // FRASES
-        // ====================================================================
 
         case '!frase':
-
-            response = randomItem(phrases);
-
+            response = random([
+                'No necesitas recorrer todo Teyvat en un día.',
+                'Incluso el viajero más fuerte necesita descansar.',
+                'Los caminos difíciles también conducen a grandes destinos.',
+                'Cada aventura deja un recuerdo.',
+                'Los pequeños avances también son victorias.',
+                'Que tu próximo destino sea mejor que el anterior.'
+            ]);
             break;
-
-        // ====================================================================
-        // RETOS
-        // ====================================================================
 
         case '!reto':
-
-            response =
-                `RETO PARA ${nickname.toUpperCase()}\n\n${randomItem(challenges)}`;
-
+            response = `RETO PARA ${nickname.toUpperCase()}\n\n${random(challenges)}`;
             break;
 
-        // ====================================================================
-        // LLAMADAS
-        // ====================================================================
-
-        case '!llamada!': {
-
-            const result = await joinCall(threadId);
-
-            response = result.message;
-
+        case '!suerte':
+            response = random(fortunes);
             break;
-        }
-
-        case '!salirllamada!': {
-
-            const result = await leaveCall(threadId);
-
-            response = result.message;
-
-            break;
-        }
 
         case '!salas': {
+            const listing = await getLiveRooms(true);
 
-            const result = await getLiveRooms();
-
-            if (!result.ok) {
-
+            if (!listing.ok) {
+                response = `No pude consultar las salas: ${listing.error}`;
+            } else if (!listing.rooms.length) {
+                response = 'No hay llamadas activas.';
+            } else {
                 response =
-                    `No pude consultar las salas: ${result.error}`;
-
-                break;
+                    'SALAS ACTIVAS\n\n' +
+                    listing.rooms.slice(0, 15).map((room, i) =>
+                        `${i + 1}. ${room.title || 'Sala sin título'}\n` +
+                        `ID: ${room.threadId}\n` +
+                        `Tipo: ${room.channelType}\n` +
+                        `Participantes: ${room.participantCount ?? 0}\n` +
+                        `Katherine: ${room.joined ? 'Dentro' : 'Fuera'}`
+                    ).join('\n\n');
             }
-
-            if (!result.rooms.length) {
-
-                response =
-                    'No hay llamadas activas en este momento.';
-
-                break;
-            }
-
-            response =
-                'LLAMADAS ACTIVAS\n\n' +
-                result.rooms.slice(0, 15).map(
-                    (room, index) => {
-
-                        const type =
-                            room.channelType === 'video'
-                                ? 'VIDEO'
-                                : 'VOZ';
-
-                        return (
-                            `${index + 1}. ${room.title || 'Sala sin título'}\n` +
-                            `ID: ${room.threadId}\n` +
-                            `Tipo: ${type}\n` +
-                            `Participantes: ${room.participantCount ?? 0}\n` +
-                            `Katherine: ${room.joined ? 'Dentro' : 'Fuera'}`
-                        );
-                    }
-                ).join('\n\n');
 
             break;
         }
+
+        case '!llamada!':
+            response = (await joinCall(thread)).message;
+            break;
+
+        case '!salirllamada!':
+            response = (await leaveCall(thread)).message;
+            break;
 
         default:
             return;
     }
 
-    // Publicar respuesta.
-    // Las respuestas largas se dividen automáticamente.
-
     if (response) {
-
-        await sendLongMessage(
-            threadId,
-            response,
-            source,
-            messageId
-        );
+        await sendLong(thread, response, source, messageId);
     }
 }
 
 // ============================================================================
-// EVENTOS DE LA SALA
-// ============================================================================
-
-async function processRoomEvent(event) {
-
-    const threadId = String(event.threadId || '');
-
-    if (!threadId) return;
-
-    const user = event.user || {};
-
-    const uid = String(user.uid || '');
-
-    const nickname = user.nickname || 'Aventurero';
-
-    const isCommunityBot =
-        (
-            uid &&
-            estado.communityBotUid &&
-            uid === String(estado.communityBotUid)
-        ) ||
-        [...estado.salas.values()].some(
-            call => call.identity === uid
-        );
-
-    switch (event.type) {
-
-        case 'room.join':
-
-            console.log(
-                `[ROOM JOIN] ${nickname} entró a ${threadId}.`
-            );
-
-            if (!isCommunityBot) {
-
-                await sendMessage(
-                    threadId,
-                    '¡Ad Astra Abbysosque! Bienvenido al chat.',
-                    'community'
-                );
-            }
-
-            break;
-
-        case 'room.leave':
-
-            console.log(
-                `[ROOM LEAVE] ${nickname} salió de ${threadId}.`
-            );
-
-            if (isCommunityBot) {
-
-                await closeCall(threadId, false);
-
-            } else {
-
-                await sendMessage(
-                    threadId,
-                    'Buen viaje, el Gremio de Aventureros espera tu regreso',
-                    'community'
-                );
-            }
-
-            break;
-
-        case 'room.speaker':
-
-            console.log(
-                `[ROOM SPEAKER] ${nickname}: ${event.speaker ? 'Puede hablar' : 'Está escuchando'}.`
-            );
-
-            break;
-
-        case 'room.end':
-
-            console.log(
-                `[ROOM END] Llamada finalizada: ${threadId}.`
-            );
-
-            await closeCall(threadId, false);
-
-            break;
-    }
-}
-
-// ============================================================================
-// WEBHOOK — VALIDACIÓN DE DOS SECRETOS
+// VALIDACIÓN HMAC — DOS SECRETOS
 // ============================================================================
 
 function validateWebhook(req) {
+    const timestamp = req.headers['x-anarchy-bot-timestamp'];
+    const header = req.headers['x-anarchy-bot-signature'];
 
-    const timestamp =
-        req.headers['x-anarchy-bot-timestamp'];
-
-    const signatureHeader =
-        req.headers['x-anarchy-bot-signature'];
-
-    if (
-        !timestamp ||
-        !signatureHeader ||
-        typeof req.rawBody !== 'string'
-    ) {
+    if (!timestamp || !header || typeof req.rawBody !== 'string') {
         return {
             ok: false,
-            error: 'Faltan los encabezados de autenticación.'
+            error: 'Faltan encabezados o cuerpo original.'
         };
     }
 
-    const timestampNumber = Number(timestamp);
+    const seconds = Number(timestamp);
 
     if (
-        !Number.isFinite(timestampNumber) ||
-        Math.abs(Date.now() / 1000 - timestampNumber) > 300
+        !Number.isFinite(seconds) ||
+        Math.abs(Date.now() / 1000 - seconds) > 300
     ) {
         return {
             ok: false,
-            error: 'El timestamp está vencido o es inválido.'
+            error: 'Timestamp inválido o vencido.'
         };
     }
 
-    const signature = String(signatureHeader).startsWith('v1=')
-        ? String(signatureHeader).slice(3)
-        : String(signatureHeader);
+    const signature = String(header).startsWith('v1=')
+        ? String(header).slice(3)
+        : String(header);
 
     if (!/^[a-f0-9]{64}$/i.test(signature)) {
-
         return {
             ok: false,
             error: 'Formato de firma incorrecto.'
         };
     }
 
-    const secrets = [
-        {
-            name: 'developer',
-            secret: WEBHOOK_SECRET
-        },
-        {
-            name: 'community',
-            secret: COMMUNITY_WEBHOOK_SECRET
-        }
-    ].filter(item => item.secret);
+    const received = Buffer.from(signature, 'hex');
 
-    const received = Buffer.from(
-        signature,
-        'hex'
-    );
+    const secrets = [
+        { source: 'developer', secret: WEBHOOK_SECRET },
+        { source: 'community', secret: COMMUNITY_WEBHOOK_SECRET }
+    ].filter(x => x.secret);
 
     for (const item of secrets) {
-
         const expected = crypto
             .createHmac('sha256', item.secret)
             .update(`${timestamp}.${req.rawBody}`)
@@ -4425,10 +3214,9 @@ function validateWebhook(req) {
             received.length === expected.length &&
             crypto.timingSafeEqual(received, expected)
         ) {
-
             return {
                 ok: true,
-                source: item.name
+                source: item.source
             };
         }
     }
@@ -4444,80 +3232,55 @@ function validateWebhook(req) {
 // ============================================================================
 
 app.post('/', (req, res) => {
-
     console.log('[WEBHOOK] Evento recibido.');
 
     const validation = validateWebhook(req);
 
     if (!validation.ok) {
-
-        console.warn(
-            '[WEBHOOK RECHAZADO]',
-            validation.error
-        );
-
+        console.warn('[WEBHOOK RECHAZADO]', validation.error);
         return res.status(401).send('Unauthorized');
     }
 
-    console.log(
-        `[WEBHOOK] Firma válida. Origen: ${validation.source}`
-    );
+    console.log(`[WEBHOOK] Firma válida: ${validation.source}.`);
 
-    // Responder a Anarchy inmediatamente.
+    // Confirmar la recepción antes de procesar el evento.
     res.status(200).send('OK');
 
     const event = req.body || {};
 
-    // Mantener el orden de eventos.
     const task = eventQueue.then(async () => {
-
         if (event.type === 'message') {
-
-            await processCommand(
-                event,
-                validation.source
-            );
-
+            await processCommand(event, validation.source);
         } else if (event.type === 'interaction') {
-
-            await processInteraction(
-                event,
-                validation.source
+            console.log(
+                '[INTERACTION]',
+                event.buttonId,
+                event.user?.nickname
             );
-
-        } else if (
-            event.type === 'room.join' ||
-            event.type === 'room.leave' ||
-            event.type === 'room.speaker' ||
-            event.type === 'room.end'
-        ) {
-
+        } else if ([
+            'room.join',
+            'room.leave',
+            'room.speaker',
+            'room.end'
+        ].includes(event.type)) {
             if (validation.source !== 'community') {
-
                 console.warn(
-                    '[WEBHOOK] Evento de sala recibido con secreto de desarrollador.'
+                    '[WEBHOOK] Evento de sala firmado con secreto de desarrollador; ignorado.'
                 );
-
                 return;
             }
 
             await processRoomEvent(event);
-
         } else {
-
             console.log(
-                '[WEBHOOK] Evento no procesado:',
+                '[WEBHOOK] Evento no manejado:',
                 event.type
             );
         }
     });
 
-    eventQueue = task.catch(err => {
-
-        console.error(
-            '[EVENT QUEUE ERROR]',
-            err
-        );
+    eventQueue = task.catch(error => {
+        console.error('[EVENT QUEUE]', error);
     });
 });
 
@@ -4526,69 +3289,47 @@ app.post('/', (req, res) => {
 // ============================================================================
 
 app.get('/', (req, res) => {
-
     res.status(200).json({
-
         bot: 'Katherine',
-
         status: 'online',
-
         uptimeSeconds: Math.floor(
-            (Date.now() - startTime) / 1000
+            (Date.now() - START_TIME) / 1000
         ),
-
-        activeCalls: estado.salas.size,
-
-        communityEnabled: Boolean(
-            COMMUNITY_BOT_TOKEN &&
-            COMMUNITY_WEBHOOK_SECRET
-        ),
-
-        characterBuildDatabase: 'Genshin Builds',
-
-        characterData: 'Genshin-DB',
-
+        activeCalls: state.calls.size,
+        developerToken: Boolean(BOT_TOKEN),
+        communityToken: Boolean(COMMUNITY_BOT_TOKEN),
+        developerWebhook: Boolean(WEBHOOK_SECRET),
+        communityWebhook: Boolean(COMMUNITY_WEBHOOK_SECRET),
+        genshinDb: true,
         timestamp: new Date().toISOString()
     });
 });
 
 // ============================================================================
-// CIERRE ORDENADO
+// APAGADO ORDENADO
 // ============================================================================
 
 let shuttingDown = false;
 
 async function shutdown(signal) {
-
     if (shuttingDown) return;
 
     shuttingDown = true;
 
-    console.log(
-        `[KATHERINE] Apagando por ${signal}.`
-    );
+    console.log(`[KATHERINE] Apagado: ${signal}.`);
 
-    const rooms = [...estado.salas.keys()];
-
-    for (const threadId of rooms) {
-
+    for (const thread of [...state.calls.keys()]) {
         try {
-
-            await anarchyAPI(
-                `/live-rooms/${encodeURIComponent(threadId)}/leave`,
+            await anarchy(
+                `/live-rooms/${encodeURIComponent(thread)}/leave`,
                 'POST',
                 null,
                 'community'
             );
 
-            await closeCall(threadId, false);
-
-        } catch (err) {
-
-            console.error(
-                `[KATHERINE] Error cerrando ${threadId}:`,
-                err.message
-            );
+            await closeLocalCall(thread);
+        } catch (error) {
+            console.error(`[SHUTDOWN] ${thread}:`, error.message);
         }
     }
 
@@ -4603,42 +3344,25 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 // ============================================================================
 
 app.listen(PORT, '0.0.0.0', () => {
-
     console.log('');
     console.log('=======================================================');
-    console.log('        KATHERINE — GENSHIN COMMUNITY BOT');
+    console.log('       KATHERINE — GENSHIN COMMUNITY BOT');
     console.log('=======================================================');
-
     console.log(`[SERVER] Puerto: ${PORT}`);
-
     console.log('[WEBHOOK] POST /');
-
     console.log('[HEALTH] GET /');
-
-    console.log('[DEVELOPER TOKEN]', BOT_TOKEN ? 'CONFIGURADO' : 'AUSENTE');
-
-    console.log('[COMMUNITY TOKEN]', COMMUNITY_BOT_TOKEN ? 'CONFIGURADO' : 'AUSENTE');
-
-    console.log('[DEVELOPER SECRET]', WEBHOOK_SECRET ? 'CONFIGURADO' : 'AUSENTE');
-
-    console.log('[COMMUNITY SECRET]', COMMUNITY_WEBHOOK_SECRET ? 'CONFIGURADO' : 'AUSENTE');
-
-    console.log('[GENSHIN BUILDS] API DINÁMICA');
-
-    console.log('[GENSHIN DB] API DINÁMICA');
-
-    console.log('[LIVEKIT] LISTO');
-
-    console.log('[CURIOSIDADES] ROTACIÓN SIN REPETICIONES');
-
+    console.log(`[DEVELOPER TOKEN] ${BOT_TOKEN ? 'CONFIGURADO' : 'AUSENTE'}`);
+    console.log(`[COMMUNITY TOKEN] ${COMMUNITY_BOT_TOKEN ? 'CONFIGURADO' : 'AUSENTE'}`);
+    console.log(`[DEVELOPER SECRET] ${WEBHOOK_SECRET ? 'CONFIGURADO' : 'AUSENTE'}`);
+    console.log(`[COMMUNITY SECRET] ${COMMUNITY_WEBHOOK_SECRET ? 'CONFIGURADO' : 'AUSENTE'}`);
+    console.log('[GENSHIN DB] ACTIVADO');
+    console.log('[GENSHIN BUILDS] GITHUB');
+    console.log('[LIVEKIT] ' + (COMMUNITY_BOT_TOKEN ? 'ACTIVADO' : 'DESACTIVADO'));
+    console.log('[SOCIAL ACTIONS] ACTIVADAS');
     console.log('=======================================================');
     console.log('');
 
-    loadBotProfiles().catch(err => {
-
-        console.error(
-            '[BOT PROFILE ERROR]',
-            err
-        );
+    loadProfiles().catch(error => {
+        console.error('[PROFILE ERROR]', error);
     });
 });
