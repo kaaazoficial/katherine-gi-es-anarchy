@@ -4,23 +4,15 @@
 const express = require('express');
 const crypto = require('crypto');
 
-const app = express();
-
 // ============================================================================
 // CONFIGURACIÓN
 // ============================================================================
 
+const app = express();
 const API_BASE = 'https://api.anarchyapps.org/bot-api/v1';
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || process.env.WEB_TOKEN;
-
-// Token y secreto generados por el Agente en ACM.
-// Son opcionales para mantener funcionando el bot de chat sin ACM.
-
-const ACM_BOT_TOKEN = process.env.ACM_BOT_TOKEN;
-const ACM_WEBHOOK_SECRET = process.env.ACM_WEBHOOK_SECRET;
-
 const PORT = Number(process.env.PORT) || 3000;
 
 const startTime = Date.now();
@@ -33,44 +25,23 @@ if (!WEBHOOK_SECRET) {
     throw new Error('[FATAL] Falta WEBHOOK_SECRET.');
 }
 
-if (ACM_BOT_TOKEN && !ACM_WEBHOOK_SECRET) {
-    console.warn('[CONFIG] Falta ACM_WEBHOOK_SECRET.');
-}
-
-if (!ACM_BOT_TOKEN && ACM_WEBHOOK_SECRET) {
-    console.warn('[CONFIG] Falta ACM_BOT_TOKEN.');
-}
-
 // ============================================================================
-// MANEJO DE ERRORES
-// ============================================================================
-
-process.on('uncaughtException', (err) => {
-    console.error('💥 [EXCEPCIÓN NO CAPTURADA]:', err);
-});
-
-process.on('unhandledRejection', (reason) => {
-    console.error('💥 [PROMESA RECHAZADA]:', reason);
-});
-
-// ============================================================================
-// ESTADO GLOBAL
+// ESTADO DEL BOT
 // ============================================================================
 
 const estadoBot = {
     lectura: false,
-    conectado: false,
     volumen: 30,
     reproduciendo: false,
     cancionActual: null
 };
 
-const salasActivas = new Map();
-
+// Las zonas horarias se guardan por usuario durante la ejecución.
+const zonasHorarias = new Map();
 const mensajesProcesados = new Set();
 
 // ============================================================================
-// MIDDLEWARE EXPRESS
+// MIDDLEWARE
 // ============================================================================
 
 app.use(express.json({
@@ -102,16 +73,16 @@ function limpiarMensaje(texto) {
 }
 
 function tiempoActivo() {
-    let segundos = Math.floor((Date.now() - startTime) / 1000);
+    let total = Math.floor((Date.now() - startTime) / 1000);
 
-    const dias = Math.floor(segundos / 86400);
-    segundos %= 86400;
+    const dias = Math.floor(total / 86400);
+    total %= 86400;
 
-    const horas = Math.floor(segundos / 3600);
-    segundos %= 3600;
+    const horas = Math.floor(total / 3600);
+    total %= 3600;
 
-    const minutos = Math.floor(segundos / 60);
-    segundos %= 60;
+    const minutos = Math.floor(total / 60);
+    const segundos = total % 60;
 
     const partes = [];
 
@@ -124,19 +95,71 @@ function tiempoActivo() {
     return partes.join(', ');
 }
 
-function obtenerHoraChile() {
+function elegirAleatorio(lista) {
+    return lista[Math.floor(Math.random() * lista.length)];
+}
+
+function mezclar(lista) {
+    const copia = [...lista];
+
+    for (let i = copia.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [copia[i], copia[j]] = [copia[j], copia[i]];
+    }
+
+    return copia;
+}
+
+function claveUsuario(autor) {
+    return String(
+        autor?.uid ||
+        autor?.nickname ||
+        'usuario-anonimo'
+    );
+}
+
+function normalizarTexto(texto) {
+    return String(texto || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .trim();
+}
+
+// ============================================================================
+// SISTEMA DE ZONAS HORARIAS PERSONALES
+// ============================================================================
+
+function validarZonaHoraria(zona) {
+    try {
+        new Intl.DateTimeFormat('es-CL', {
+            timeZone: zona
+        }).format(new Date());
+
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function obtenerZonaUsuario(autor) {
+    return zonasHorarias.get(claveUsuario(autor));
+}
+
+function horaUsuario(zona) {
     return new Intl.DateTimeFormat('es-CL', {
-        timeZone: 'America/Santiago',
+        timeZone: zona,
         hour: '2-digit',
         minute: '2-digit',
         second: '2-digit',
-        hour12: false
+        hour12: false,
+        timeZoneName: 'short'
     }).format(new Date());
 }
 
-function obtenerFechaChile() {
+function fechaUsuario(zona) {
     return new Intl.DateTimeFormat('es-CL', {
-        timeZone: 'America/Santiago',
+        timeZone: zona,
         weekday: 'long',
         year: 'numeric',
         month: 'long',
@@ -144,441 +167,1158 @@ function obtenerFechaChile() {
     }).format(new Date());
 }
 
-function elegirAleatorio(lista) {
-    return lista[Math.floor(Math.random() * lista.length)];
-}
-
 // ============================================================================
-// CURIOSIDADES
+// GENSHIN IMPACT — CURIOSIDADES
 // ============================================================================
 
-const curiosidades = [
-    'Los pulpos tienen tres corazones y su sangre contiene hemocianina, que le da un tono azulado.',
-    'En Venus, un día sideral dura más que su año.',
-    'Los tiburones existen desde antes que los árboles.',
-    'La miel puede conservarse durante muchísimo tiempo si permanece bien sellada y sin humedad.',
-    'Los wombats producen heces con forma de cubo.',
-    'La Luna se aleja de la Tierra unos 3,8 centímetros por año.',
-    'Un rayo puede calentar el aire a temperaturas superiores a las de la superficie del Sol.',
-    'Los cuervos pueden reconocer rostros humanos.',
-    'Los flamencos obtienen gran parte de su color rosado de su alimentación.',
-    'La Antártida es el desierto más grande del planeta.',
-    'Los koalas tienen huellas dactilares muy parecidas a las humanas.',
-    'El corazón de una ballena azul puede pesar cientos de kilos.',
-    'Saturno tiene una densidad media inferior a la del agua.',
-    'Las mariposas prueban sustancias mediante receptores en sus patas.',
-    'El sonido no puede propagarse en el vacío.',
-    'Los caballitos de mar machos llevan los embriones en una bolsa incubadora.',
-    'Las nutrias marinas suelen sujetarse entre sí mientras descansan.',
-    'La luz del Sol tarda aproximadamente ocho minutos y veinte segundos en llegar a la Tierra.',
-    'Los tardígrados pueden sobrevivir a condiciones extremas mediante criptobiosis.',
-    'La cordillera de los Andes es la cordillera continental más larga del mundo.',
-    'El planeta Urano gira prácticamente de lado respecto al plano de su órbita.',
-    'Las abejas pueden comunicar la ubicación de alimento mediante una danza.',
-    'El agua puede existir como sólido, líquido y gas simultáneamente en el punto triple.',
-    'Los delfines utilizan silbidos característicos para identificarse.',
-    'La Torre Eiffel puede crecer varios centímetros durante los días calurosos.',
-    'Los cuervos pueden recordar a personas que representan una amenaza.',
-    'La superficie de Marte tiene el volcán más grande conocido del sistema solar.',
-    'Las estrellas de mar no tienen cerebro central.',
-    'El bambú puede crecer a velocidades extraordinarias dependiendo de la especie.',
-    'Los flamencos descansan frecuentemente sobre una sola pata.'
+const curiosidadesGenshin = [
+
+    'Teyvat está organizado alrededor de siete naciones, cada una vinculada a un elemento y a una figura Arconte.',
+
+    'Mondstadt está asociada con Anemo y el ideal de la libertad.',
+
+    'Liyue está asociada con Geo y sus historias giran alrededor de los contratos.',
+
+    'Inazuma está asociada con Electro y su ideal central es la eternidad.',
+
+    'Sumeru está asociada con Dendro y el conocimiento.',
+
+    'Fontaine está asociada con Hydro y la justicia.',
+
+    'Natlan está asociada con Pyro y la guerra.',
+
+    'Cyno es el General Mahamatra y supervisa las normas de la Akademiya.',
+
+    'Nahida también es conocida como la Pequeña Señorita Kusanali y es la Arconte Dendro.',
+
+    'Dehya es una mercenaria Eremita de Sumeru conocida como la Melena Llameante.',
+
+    'Kaeya está vinculado al linaje Alberich y a los secretos de Khaenri’ah.',
+
+    'Dainsleif es conocido por el título de Guardarramas.',
+
+    'La catástrofe de Khaenri’ah ocurrió aproximadamente quinientos años antes de los acontecimientos principales.',
+
+    'La Espiral del Abismo es un desafío independiente de la exploración normal.',
+
+    'Las Visiones permiten a ciertos personajes canalizar poderes elementales.',
+
+    'La Invocación de los Siete es el juego de cartas coleccionables que existe dentro de Teyvat.',
+
+    'Los Fatui tienen once Heraldos, cada uno identificado por un título.',
+
+    'Los Adeptus de Liyue son seres extraordinarios vinculados a la protección de la región.',
+
+    'La Orden del Abismo y los Fatui son organizaciones diferentes.',
+
+    'El Viajero puede resonar con distintos elementos al interactuar con las Estatuas de los Siete.'
 ];
 
-let ultimaCuriosidad = -1;
+// ============================================================================
+// GENSHIN IMPACT — ELEMENTOS Y ARMAS
+// ============================================================================
 
-function obtenerCuriosidad() {
-    let indice;
+const elementos = [
+    'Anemo',
+    'Geo',
+    'Electro',
+    'Dendro',
+    'Hydro',
+    'Pyro',
+    'Cryo'
+];
 
-    do {
-        indice = Math.floor(Math.random() * curiosidades.length);
-    } while (
-        curiosidades.length > 1 &&
-        indice === ultimaCuriosidad
+const tiposArma = [
+    'Espada ligera',
+    'Mandoble',
+    'Lanza',
+    'Arco',
+    'Catalizador'
+];
+
+const naciones = [
+    'Mondstadt',
+    'Liyue',
+    'Inazuma',
+    'Sumeru',
+    'Fontaine',
+    'Natlan',
+    'Snezhnaya'
+];
+
+// ============================================================================
+// GENSHIN IMPACT — PERSONAJES
+// ============================================================================
+
+const personajes = [
+
+    { nombre: 'Cyno', elemento: 'Electro', arma: 'Lanza', nacion: 'Sumeru', titulo: 'General Mahamatra' },
+
+    { nombre: 'Nahida', elemento: 'Dendro', arma: 'Catalizador', nacion: 'Sumeru', titulo: 'Pequeña Señorita Kusanali' },
+
+    { nombre: 'Dehya', elemento: 'Pyro', arma: 'Mandoble', nacion: 'Sumeru', titulo: 'Melena Llameante' },
+
+    { nombre: 'Alhaitham', elemento: 'Dendro', arma: 'Espada ligera', nacion: 'Sumeru', titulo: 'Escriba de la Akademiya' },
+
+    { nombre: 'Tighnari', elemento: 'Dendro', arma: 'Arco', nacion: 'Sumeru', titulo: 'Guardabosques' },
+
+    { nombre: 'Nilou', elemento: 'Hydro', arma: 'Espada ligera', nacion: 'Sumeru', titulo: 'Bailarina del Teatro Zubayr' },
+
+    { nombre: 'Kaeya', elemento: 'Cryo', arma: 'Espada ligera', nacion: 'Mondstadt', titulo: 'Capitán de Caballería' },
+
+    { nombre: 'Fischl', elemento: 'Electro', arma: 'Arco', nacion: 'Mondstadt', titulo: 'Princesa de la Condenación' },
+
+    { nombre: 'Diluc', elemento: 'Pyro', arma: 'Mandoble', nacion: 'Mondstadt', titulo: 'Héroe de la Noche Oscura' },
+
+    { nombre: 'Venti', elemento: 'Anemo', arma: 'Arco', nacion: 'Mondstadt', titulo: 'Bardo de Mondstadt' },
+
+    { nombre: 'Zhongli', elemento: 'Geo', arma: 'Lanza', nacion: 'Liyue', titulo: 'Consultor de la Funeraria Wangsheng' },
+
+    { nombre: 'Hu Tao', elemento: 'Pyro', arma: 'Lanza', nacion: 'Liyue', titulo: 'Directora de la Funeraria Wangsheng' },
+
+    { nombre: 'Xiao', elemento: 'Anemo', arma: 'Lanza', nacion: 'Liyue', titulo: 'Conquistador de Demonios' },
+
+    { nombre: 'Ganyu', elemento: 'Cryo', arma: 'Arco', nacion: 'Liyue', titulo: 'Secretaria del Pabellón Yuehai' },
+
+    { nombre: 'Raiden Shogun', elemento: 'Electro', arma: 'Lanza', nacion: 'Inazuma', titulo: 'Arconte Electro' },
+
+    { nombre: 'Kaedehara Kazuha', elemento: 'Anemo', arma: 'Espada ligera', nacion: 'Inazuma', titulo: 'Ronin errante' },
+
+    { nombre: 'Kamisato Ayaka', elemento: 'Cryo', arma: 'Espada ligera', nacion: 'Inazuma', titulo: 'Princesa Garza' },
+
+    { nombre: 'Furina', elemento: 'Hydro', arma: 'Espada ligera', nacion: 'Fontaine', titulo: 'Figura teatral de Fontaine' },
+
+    { nombre: 'Neuvillette', elemento: 'Hydro', arma: 'Catalizador', nacion: 'Fontaine', titulo: 'Juez Supremo de Fontaine' },
+
+    { nombre: 'Navia', elemento: 'Geo', arma: 'Mandoble', nacion: 'Fontaine', titulo: 'Presidenta de Spina di Rosula' },
+
+    { nombre: 'Arlecchino', elemento: 'Pyro', arma: 'Lanza', nacion: 'Fontaine', titulo: 'La Sota de los Once Heraldos' },
+
+    { nombre: 'Mavuika', elemento: 'Pyro', arma: 'Mandoble', nacion: 'Natlan', titulo: 'Arconte Pyro' },
+
+    { nombre: 'Kinich', elemento: 'Dendro', arma: 'Mandoble', nacion: 'Natlan', titulo: 'Guerrero de Natlan' },
+
+    { nombre: 'Xianyun', elemento: 'Anemo', arma: 'Catalizador', nacion: 'Liyue', titulo: 'Retenedora de Nubes' },
+
+    { nombre: 'Yelan', elemento: 'Hydro', arma: 'Arco', nacion: 'Liyue', titulo: 'Agente de inteligencia' }
+
+];
+
+function obtenerPersonaje(nombre) {
+    const buscado = normalizarTexto(nombre);
+
+    return personajes.find(
+        p => normalizarTexto(p.nombre) === buscado
     );
+}
 
-    ultimaCuriosidad = indice;
-
-    return curiosidades[indice];
+function fichaPersonaje(p) {
+    return (
+        `${p.nombre}\n` +
+        `Elemento: ${p.elemento}\n` +
+        `Arma: ${p.arma}\n` +
+        `Nación: ${p.nacion}\n` +
+        `Título: ${p.titulo}`
+    );
 }
 
 // ============================================================================
-// RESPUESTAS DE LA BOLA MÁGICA
+// GENSHIN IMPACT — REACCIONES ELEMENTALES
 // ============================================================================
 
-const respuestas8Ball = [
-    'Sí, definitivamente.',
-    'Todo apunta a que sí.',
-    'Es muy probable.',
-    'Las señales son favorables.',
-    'No puedo asegurarlo todavía.',
-    'Pregúntame de nuevo más tarde.',
-    'No parece probable.',
-    'Mi respuesta es no.',
-    'Las posibilidades son bajas.',
-    'El destino todavía no está decidido.',
-    'Confía en tu intuición.',
-    'No cuentes con ello.'
-];
+function obtenerReaccion(elemento1, elemento2) {
 
-// ============================================================================
-// CLIENTE ANARCHY API
-// ============================================================================
+    const alias = {
+        pyro: 'Pyro',
+        fuego: 'Pyro',
 
-async function anarchyAPI(
-    endpoint,
-    method = 'GET',
-    body = null,
-    token = BOT_TOKEN
-) {
-    if (!token) {
+        hydro: 'Hydro',
+        agua: 'Hydro',
+
+        electro: 'Electro',
+        rayo: 'Electro',
+
+        cryo: 'Cryo',
+        hielo: 'Cryo',
+
+        dendro: 'Dendro',
+        naturaleza: 'Dendro',
+
+        anemo: 'Anemo',
+        viento: 'Anemo',
+
+        geo: 'Geo',
+        tierra: 'Geo'
+    };
+
+    const a = alias[normalizarTexto(elemento1)];
+    const b = alias[normalizarTexto(elemento2)];
+
+    if (!a || !b) return null;
+
+    if (a === b) {
         return {
-            ok: false,
-            status: 500,
-            data: {
-                error: 'No se configuró el token necesario.'
-            }
+            a,
+            b,
+            nombre: 'No se produce una reacción entre elementos iguales.'
         };
     }
 
+    const clave = [a, b].sort().join('|');
+
+    const reacciones = {
+
+        'Hydro|Pyro': 'Vaporizado',
+
+        'Cryo|Pyro': 'Derretido',
+
+        'Cryo|Hydro': 'Congelado',
+
+        'Electro|Hydro': 'Electrocargado',
+
+        'Electro|Pyro': 'Sobrecargado',
+
+        'Cryo|Electro': 'Superconductor',
+
+        'Dendro|Electro': 'Aceleración (Quicken)',
+
+        'Dendro|Hydro': 'Florecimiento',
+
+        'Dendro|Pyro': 'Quemadura',
+
+        'Anemo|Cryo': 'Torbellino',
+
+        'Anemo|Electro': 'Torbellino',
+
+        'Anemo|Hydro': 'Torbellino',
+
+        'Anemo|Pyro': 'Torbellino',
+
+        'Cryo|Geo': 'Cristalización',
+
+        'Electro|Geo': 'Cristalización',
+
+        'Geo|Hydro': 'Cristalización',
+
+        'Geo|Pyro': 'Cristalización'
+    };
+
+    return {
+        a,
+        b,
+        nombre: reacciones[clave] ||
+            'No existe una reacción elemental clásica directa entre estos elementos.'
+    };
+}
+
+// ============================================================================
+// GENSHIN IMPACT — ARTEFACTOS Y MISIONES
+// ============================================================================
+
+const artefactos = [
+    'Bruja Carmesí en Llamas',
+    'Sombra Verde Esmeralda',
+    'Emblema del Destino',
+    'Recuerdos del Bosque',
+    'Sueños Áureos',
+    'Ritual Antiguo de la Nobleza',
+    'Nómada del Invierno',
+    'Furia del Trueno',
+    'Final del Gladiador',
+    'Orquesta del Errante'
+];
+
+const encargosAventura = [
+    'Investiga unas huellas extrañas cerca de una antigua ruina.',
+    'Ayuda a un comerciante que perdió su mercancía en el camino.',
+    'Derrota a un grupo de Hilichurls que bloquea una ruta comercial.',
+    'Recoge ingredientes para preparar una receta de Teyvat.',
+    'Explora una zona desconocida y registra cualquier hallazgo.',
+    'Busca un cofre oculto en las cercanías de un dominio.',
+    'Acompaña a un aventurero durante una expedición peligrosa.'
+];
+
+// ============================================================================
+// CLIENTE HTTP ANARCHY
+// ============================================================================
+
+async function anarchyAPI(endpoint, method = 'GET', body = null) {
+
     try {
-        const url = `${API_BASE}${endpoint}`;
 
-        console.log(`[API REQUEST] ${method} -> ${url}`);
+        const response = await fetch(
+            `${API_BASE}${endpoint}`,
+            {
+                method,
 
-        const options = {
-            method,
-            headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-                'Authorization': `Bot ${token}`
-            },
-            signal: AbortSignal.timeout(15000)
-        };
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'Authorization': `Bot ${BOT_TOKEN}`
+                },
 
-        if (body !== null) {
-            options.body = JSON.stringify(body);
-        }
+                body: body === null
+                    ? undefined
+                    : JSON.stringify(body),
 
-        const response = await fetch(url, options);
+                signal: AbortSignal.timeout(12000)
+            }
+        );
 
-        const responseText = await response.text();
+        const raw = await response.text();
 
         let data = {};
 
         try {
-            data = responseText
-                ? JSON.parse(responseText)
-                : {};
+            data = raw ? JSON.parse(raw) : {};
         } catch {
-            data = {
-                raw: responseText
-            };
+            data = { raw };
         }
 
         console.log(
-            `[API RESPONSE] ${response.status}:`,
-            JSON.stringify(data)
+            `[API] ${method} ${endpoint} -> ${response.status}`,
+            data
         );
 
         return {
             ok: response.ok,
             status: response.status,
-            data,
-            retryAfter: response.headers.get('retry-after')
+            data
         };
 
     } catch (err) {
-        console.error(
-            '❌ [ERROR FETCH ANARCHY]:',
-            err.message
-        );
+
+        console.error('[API ERROR]', err.message);
 
         return {
             ok: false,
             status: 500,
-            data: {
-                error: err.message
-            }
+            data: { error: err.message }
         };
     }
 }
 
 // ============================================================================
-// DIAGNÓSTICO DEL BOT
+// DIAGNÓSTICO
 // ============================================================================
 
 async function consultarBotMe() {
-    console.log('\n========== DIAGNÓSTICO ANARCHY ==========');
 
-    const resultado = await anarchyAPI(
-        '/me',
-        'GET',
-        null,
-        BOT_TOKEN
-    );
+    const resultado = await anarchyAPI('/me');
 
     if (resultado.ok) {
+
         console.log(
-            '✅ DATOS DEL BOT:',
+            '[BOT ME]',
             JSON.stringify(resultado.data, null, 2)
         );
 
         const threads = resultado.data?.threadIds || [];
 
         console.log(
-            '📌 Chats donde está agregado:',
-            threads.length
-                ? threads.join(', ')
-                : 'Ninguno'
+            '[CHATS REGISTRADOS]',
+            threads.length ? threads : 'Ninguno'
         );
 
     } else {
+
         console.error(
-            '❌ Error consultando el bot:',
+            '[BOT ME ERROR]',
             resultado.status,
             resultado.data
         );
     }
-
-    console.log(
-        '[ACM] Token:',
-        ACM_BOT_TOKEN ? 'CONFIGURADO' : 'NO CONFIGURADO'
-    );
-
-    console.log('=========================================\n');
 }
 
 // ============================================================================
-// COLA DE MENSAJES Y LÍMITES DE ANARCHY
+// COLA DE MENSAJES Y LÍMITES
 // ============================================================================
 
 let colaEnvios = Promise.resolve();
 
 let ultimoEnvioGlobal = 0;
 
-const ultimoEnvioPorChat = new Map();
+const ultimoEnvioChat = new Map();
 
-const enviosGlobales = [];
+const historialGlobal = [];
 
-const enviosPorChat = new Map();
+const historialChats = new Map();
 
-function podarMarcas(marcas, antiguedad) {
-    const limite = Date.now() - antiguedad;
+function limpiarHistorial(lista, ventanaMs) {
 
-    while (
-        marcas.length &&
-        marcas[0] < limite
-    ) {
-        marcas.shift();
+    const limite = Date.now() - ventanaMs;
+
+    while (lista.length && lista[0] < limite) {
+        lista.shift();
     }
 }
 
-function agregarACola(threadId, tarea) {
-    const siguiente = colaEnvios.then(async () => {
+function enviarMensaje(threadId, texto, replyMessageId = null) {
+
+    const id = String(threadId || '');
+
+    const content = limpiarMensaje(texto);
+
+    if (!id || !content) {
+        return Promise.resolve({
+            ok: false,
+            status: 400,
+            data: { error: 'Falta threadId o contenido.' }
+        });
+    }
+
+    const tarea = colaEnvios.then(async () => {
 
         const ahora = Date.now();
 
         const esperaGlobal = Math.max(
             0,
-            1050 - (ahora - ultimoEnvioGlobal)
+            1000 - (ahora - ultimoEnvioGlobal)
         );
 
-        const ultimoChat =
-            ultimoEnvioPorChat.get(threadId) || 0;
+        const anteriorChat = ultimoEnvioChat.get(id) || 0;
 
         const esperaChat = Math.max(
             0,
-            2050 - (ahora - ultimoChat)
+            2000 - (ahora - anteriorChat)
         );
 
         await dormir(
             Math.max(esperaGlobal, esperaChat)
         );
 
-        podarMarcas(
-            enviosGlobales,
+        limpiarHistorial(
+            historialGlobal,
             60 * 60 * 1000
         );
 
-        const marcasChat =
-            enviosPorChat.get(threadId) || [];
+        const historialChat =
+            historialChats.get(id) || [];
 
-        podarMarcas(
-            marcasChat,
+        limpiarHistorial(
+            historialChat,
             10 * 60 * 1000
         );
 
-        enviosPorChat.set(threadId, marcasChat);
+        historialChats.set(id, historialChat);
 
-        if (enviosGlobales.length >= 300) {
+        if (historialGlobal.length >= 300) {
             return {
                 ok: false,
                 status: 429,
-                data: {
-                    error: 'Límite horario de mensajes alcanzado.'
-                }
+                data: { error: 'Límite horario del bot alcanzado.' }
             };
         }
 
-        if (marcasChat.length >= 60) {
+        if (historialChat.length >= 60) {
             return {
                 ok: false,
                 status: 429,
-                data: {
-                    error: 'Límite de mensajes de este chat alcanzado.'
-                }
+                data: { error: 'Límite de mensajes de este chat alcanzado.' }
             };
         }
 
-        const resultado = await tarea();
+        const payload = { content };
 
-        ultimoEnvioGlobal = Date.now();
+        if (replyMessageId) {
+            payload.replyMessageId = String(replyMessageId);
+        }
 
-        ultimoEnvioPorChat.set(
-            threadId,
-            ultimoEnvioGlobal
+        const resultado = await anarchyAPI(
+            `/threads/${encodeURIComponent(id)}/messages`,
+            'POST',
+            payload
         );
 
         if (resultado.ok) {
-            enviosGlobales.push(Date.now());
-            marcasChat.push(Date.now());
+
+            ultimoEnvioGlobal = Date.now();
+
+            ultimoEnvioChat.set(
+                id,
+                ultimoEnvioGlobal
+            );
+
+            historialGlobal.push(ultimoEnvioGlobal);
+
+            historialChat.push(ultimoEnvioGlobal);
         }
 
         return resultado;
     });
 
-    colaEnvios = siguiente.catch(err => {
-        console.error(
-            '❌ Error en cola de mensajes:',
-            err
-        );
+    colaEnvios = tarea.catch(err => {
+        console.error('[COLA ERROR]', err);
     });
 
-    return siguiente;
+    return tarea;
 }
 
 // ============================================================================
-// ENVIAR MENSAJES AL CHAT
+// PROCESADOR DE COMANDOS
 // ============================================================================
 
-async function enviarRespuestaChat(
-    threadId,
-    texto,
-    replyMessageId = null,
-    token = BOT_TOKEN
-) {
-    if (!threadId || !texto) {
-        return {
-            ok: false,
-            status: 400,
-            data: {
-                error: 'Falta threadId o contenido.'
-            }
-        };
-    }
+async function procesarMensaje(evento) {
 
-    const contenido = limpiarMensaje(texto);
+    const threadId = String(evento.threadId || '');
 
-    if (!contenido) {
-        return {
-            ok: false,
-            status: 400,
-            data: {
-                error: 'El mensaje quedó vacío.'
-            }
-        };
-    }
+    const mensaje = evento.message || {};
 
-    return agregarACola(
-        String(threadId),
-        async () => {
+    const texto =
+        typeof mensaje.content === 'string'
+            ? mensaje.content.trim()
+            : '';
 
-            const payload = {
-                content: contenido
-            };
+    const messageId = mensaje.messageId || null;
 
-            if (replyMessageId) {
-                payload.replyMessageId = String(replyMessageId);
-            }
+    const autor = mensaje.author || {};
 
-            console.log(
-                `[ENVIANDO MENSAJE] Thread: ${threadId}`
-            );
+    const nickname = autor.nickname || 'Viajero';
 
-            console.log(
-                '[CONTENIDO]:',
-                contenido
-            );
+    if (!threadId || !texto) return;
 
-            const resultado = await anarchyAPI(
-                `/threads/${encodeURIComponent(threadId)}/messages`,
-                'POST',
-                payload,
-                token
-            );
+    // Evitar eventos duplicados.
 
-            if (resultado.ok) {
-                console.log(
-                    '✅ [MENSAJE PUBLICADO]'
-                );
-            } else {
-                console.error(
-                    '❌ [ERROR PUBLICANDO MENSAJE]',
-                    resultado.status,
-                    JSON.stringify(resultado.data)
-                );
-            }
+    if (messageId) {
 
-            return resultado;
+        const idMensaje = String(messageId);
+
+        if (mensajesProcesados.has(idMensaje)) {
+            return;
         }
+
+        mensajesProcesados.add(idMensaje);
+
+        if (mensajesProcesados.size > 5000) {
+            mensajesProcesados.delete(
+                mensajesProcesados.values().next().value
+            );
+        }
+    }
+
+    if (
+        !texto.startsWith('!') &&
+        !texto.startsWith('-')
+    ) {
+        return;
+    }
+
+    const partes = texto.split(/\s+/);
+
+    const comando = partes[0].toLowerCase();
+
+    const argumentos = partes.slice(1);
+
+    let respuesta = null;
+
+    console.log(
+        `[COMANDO] ${comando} | ${nickname} | ${threadId}`
     );
+
+    switch (comando) {
+
+        // ================================================================
+        // AYUDA
+        // ================================================================
+
+        case '!ayuda':
+        case '-ayuda':
+        case '!comandos':
+        case '-comandos':
+
+            respuesta =
+                'KATHERINE — COMANDOS\n\n' +
+
+                'GENSHIN IMPACT\n' +
+                '!curiosidad — Curiosidad de Genshin.\n' +
+                '!personaje [nombre] — Personaje aleatorio o ficha.\n' +
+                '!equipo — Equipo aleatorio de cuatro personajes.\n' +
+                '!elemento — Elemento aleatorio.\n' +
+                '!vision — Visión aleatoria.\n' +
+                '!arma — Tipo de arma aleatorio.\n' +
+                '!nacion — Nación aleatoria.\n' +
+                '!reaccion elemento elemento — Consultar reacción.\n' +
+                '!artefacto — Set de artefactos aleatorio.\n' +
+                '!comision — Encargo de aventura.\n' +
+                '!expedicion — Proponer una expedición.\n' +
+                '!lore — Dato del lore.\n\n' +
+
+                'HORA Y FECHA\n' +
+                '!zona America/Santiago — Guardar tu zona horaria.\n' +
+                '!hora — Tu hora local.\n' +
+                '!fecha — Tu fecha local.\n\n' +
+
+                'JUEGOS Y UTILIDADES\n' +
+                '!ping — Estado de conexión.\n' +
+                '!uptime — Tiempo activo.\n' +
+                '!dado — Lanzar un dado.\n' +
+                '!moneda — Lanzar una moneda.\n' +
+                '!8ball pregunta — Consultar la bola mágica.\n' +
+                '!estadochat — Estado del bot.\n\n' +
+
+                'LLAMADAS Y CHAT\n' +
+                '!llamada! — Consultar acceso a llamadas.\n' +
+                '!salas — Consultar disponibilidad de llamadas.\n' +
+                '!leerchat / !noleerchat — Cambiar estado interno.\n' +
+                '!play canción — Registrar solicitud musical.\n' +
+                '!volumen 0-100 — Ajustar volumen interno.';
+
+            break;
+
+        // ================================================================
+        // ZONA HORARIA
+        // ================================================================
+
+        case '!zona':
+        case '-zona': {
+
+            const key = claveUsuario(autor);
+
+            const valor = argumentos.join(' ').trim();
+
+            if (!valor) {
+
+                const actual = zonasHorarias.get(key);
+
+                respuesta = actual
+                    ? `Tu zona horaria guardada es ${actual}. Puedes cambiarla con !zona America/Santiago o eliminarla con !zona borrar.`
+                    : 'Todavía no configuraste tu zona horaria. Escríbela así: !zona America/Santiago. Ejemplos: America/Bogota, America/Lima, America/Mexico_City, Europe/Madrid.';
+
+            } else if (normalizarTexto(valor) === 'borrar') {
+
+                zonasHorarias.delete(key);
+
+                respuesta =
+                    'Tu zona horaria fue eliminada. Configúrala nuevamente con !zona America/Santiago.';
+
+            } else if (!validarZonaHoraria(valor)) {
+
+                respuesta =
+                    'No reconozco esa zona horaria. Usa un identificador IANA, por ejemplo America/Santiago o Europe/Madrid.';
+
+            } else {
+
+                zonasHorarias.set(key, valor);
+
+                respuesta =
+                    `Listo, ${nickname}. Guardé tu zona horaria: ${valor}. Ahora !hora y !fecha mostrarán tu hora y fecha locales.`;
+            }
+
+            break;
+        }
+
+        // ================================================================
+        // HORA LOCAL DEL USUARIO
+        // ================================================================
+
+        case '!hora':
+        case '-hora': {
+
+            const zona = obtenerZonaUsuario(autor);
+
+            respuesta = zona
+                ? `La hora local de ${nickname} es ${horaUsuario(zona)}. Zona horaria: ${zona}.`
+                : `${nickname}, primero configura tu zona horaria con !zona America/Santiago. Anarchy no me entrega automáticamente la zona horaria de cada usuario.`;
+
+            break;
+        }
+
+        // ================================================================
+        // FECHA LOCAL DEL USUARIO
+        // ================================================================
+
+        case '!fecha':
+        case '-fecha': {
+
+            const zona = obtenerZonaUsuario(autor);
+
+            respuesta = zona
+                ? `La fecha local de ${nickname} es ${fechaUsuario(zona)}. Zona horaria: ${zona}.`
+                : `${nickname}, primero configura tu zona horaria con !zona America/Santiago. Así podré mostrar tu fecha local correctamente.`;
+
+            break;
+        }
+
+        // ================================================================
+        // CURIOSIDADES GENSHIN
+        // ================================================================
+
+        case '!curiosidad':
+        case '-curiosidad':
+
+            respuesta =
+                `¿Sabías que...?\n\n${elegirAleatorio(curiosidadesGenshin)}`;
+
+            break;
+
+        case '!lore':
+        case '-lore':
+
+            respuesta =
+                `REGISTROS DE TEYVAT\n\n${elegirAleatorio(curiosidadesGenshin)}`;
+
+            break;
+
+        // ================================================================
+        // PERSONAJES
+        // ================================================================
+
+        case '!personaje':
+        case '-personaje': {
+
+            if (argumentos.length) {
+
+                const p = obtenerPersonaje(
+                    argumentos.join(' ')
+                );
+
+                respuesta = p
+                    ? fichaPersonaje(p)
+                    : `No tengo una ficha para ${argumentos.join(' ')} en mi lista actual. Prueba con !personaje para elegir uno al azar.`;
+
+            } else {
+
+                respuesta =
+                    `PERSONAJE ALEATORIO\n\n${fichaPersonaje(elegirAleatorio(personajes))}`;
+            }
+
+            break;
+        }
+
+        // ================================================================
+        // EQUIPO ALEATORIO
+        // ================================================================
+
+        case '!equipo':
+        case '-equipo': {
+
+            const equipo = mezclar(personajes).slice(0, 4);
+
+            respuesta =
+                'EQUIPO ALEATORIO\n\n' +
+                equipo.map((p, i) =>
+                    `${i + 1}. ${p.nombre} — ${p.elemento} — ${p.arma}`
+                ).join('\n') +
+                '\n\nEquipo generado al azar; no representa una recomendación de meta.';
+
+            break;
+        }
+
+        // ================================================================
+        // ELEMENTO Y VISIÓN
+        // ================================================================
+
+        case '!elemento':
+        case '-elemento':
+        case '!vision':
+        case '-vision':
+
+            respuesta =
+                `Tu elemento/Visión aleatoria es ${elegirAleatorio(elementos)}.`;
+
+            break;
+
+        // ================================================================
+        // ARMAS
+        // ================================================================
+
+        case '!arma':
+        case '-arma':
+
+            respuesta =
+                `Tu tipo de arma aleatorio es: ${elegirAleatorio(tiposArma)}.`;
+
+            break;
+
+        // ================================================================
+        // NACIONES
+        // ================================================================
+
+        case '!nacion':
+        case '-nacion':
+        case '!region':
+        case '-region':
+
+            respuesta =
+                `Tu destino en Teyvat será: ${elegirAleatorio(naciones)}.`;
+
+            break;
+
+        // ================================================================
+        // REACCIONES ELEMENTALES
+        // ================================================================
+
+        case '!reaccion':
+        case '-reaccion': {
+
+            if (argumentos.length < 2) {
+
+                respuesta =
+                    'Indica dos elementos. Ejemplo: !reaccion pyro hydro. También puedes usar fuego, agua, rayo, hielo, viento o tierra.';
+
+                break;
+            }
+
+            const reaccion = obtenerReaccion(
+                argumentos[0],
+                argumentos[1]
+            );
+
+            respuesta = reaccion
+                ? `Reacción entre ${reaccion.a} y ${reaccion.b}: ${reaccion.nombre}.`
+                : 'No reconocí esos elementos. Usa Anemo, Geo, Electro, Dendro, Hydro, Pyro o Cryo.';
+
+            break;
+        }
+
+        // ================================================================
+        // ARTEFACTOS
+        // ================================================================
+
+        case '!artefacto':
+        case '-artefacto':
+
+            respuesta =
+                `Set de artefactos elegido para tu próxima expedición: ${elegirAleatorio(artefactos)}.`;
+
+            break;
+
+        // ================================================================
+        // COMISIONES
+        // ================================================================
+
+        case '!comision':
+        case '-comision':
+
+            respuesta =
+                'NUEVO ENCARGO DEL GREMIO\n\n' +
+                elegirAleatorio(encargosAventura) +
+                '\n\nEste es un encargo ficticio para diversión y roleplay.';
+
+            break;
+
+        // ================================================================
+        // EXPEDICIONES
+        // ================================================================
+
+        case '!expedicion':
+        case '-expedicion':
+
+            respuesta =
+                'EXPEDICIÓN ASIGNADA\n\n' +
+                `Destino: ${elegirAleatorio(naciones)}.\n` +
+                `Objetivo: ${elegirAleatorio(encargosAventura)}\n\n` +
+                '¡Que los Siete guíen tu camino!';
+
+            break;
+
+        // ================================================================
+        // PING
+        // ================================================================
+
+        case '!ping':
+        case '-ping': {
+
+            const inicio = Date.now();
+
+            const comprobacion = await anarchyAPI('/me');
+
+            const latencia = Date.now() - inicio;
+
+            respuesta = comprobacion.ok
+                ? `PONG, ${nickname}. Katherine está en línea.\nLatencia de API: ${latencia} ms.\nTiempo activa: ${tiempoActivo()}.`
+                : `Katherine está activa, pero la API respondió con HTTP ${comprobacion.status}.`;
+
+            break;
+        }
+
+        // ================================================================
+        // UPTIME
+        // ================================================================
+
+        case '!uptime':
+        case '-uptime':
+
+            respuesta =
+                `Katherine lleva activa ${tiempoActivo()}.`;
+
+            break;
+
+        // ================================================================
+        // DADO
+        // ================================================================
+
+        case '!dado':
+        case '-dado':
+
+            respuesta =
+                `🎲 ${nickname}, el dado cayó en ${Math.floor(Math.random() * 20) + 1} (d20).`;
+
+            break;
+
+        // ================================================================
+        // MONEDA
+        // ================================================================
+
+        case '!moneda':
+        case '-moneda':
+
+            respuesta =
+                `🪙 La moneda cayó en ${Math.random() < 0.5 ? 'cara' : 'sello'}.`;
+
+            break;
+
+        // ================================================================
+        // BOLA MÁGICA
+        // ================================================================
+
+        case '!8ball':
+        case '-8ball': {
+
+            if (!argumentos.length) {
+
+                respuesta =
+                    'Hazme una pregunta. Ejemplo: !8ball ¿Conseguiré un personaje de cinco estrellas?';
+
+            } else {
+
+                const respuestas = [
+                    'Los presagios son favorables.',
+                    'El destino apunta a que sí.',
+                    'No parece probable.',
+                    'La respuesta aún no está escrita.',
+                    'Consulta nuevamente después de tu próxima aventura.',
+                    'Los Siete no han revelado esa respuesta.'
+                ];
+
+                respuesta =
+                    `La bola mágica responde: ${elegirAleatorio(respuestas)}`;
+            }
+
+            break;
+        }
+
+        // ================================================================
+        // ESTADO
+        // ================================================================
+
+        case '!estadochat':
+        case '-estadochat':
+
+            respuesta =
+                'KATHERINE — ESTADO DEL SISTEMA\n\n' +
+                `Lectura interna: ${estadoBot.lectura ? 'Activada' : 'Desactivada'}\n` +
+                `Reproducción registrada: ${estadoBot.reproduciendo ? 'Sí' : 'No'}\n` +
+                `Canción: ${estadoBot.cancionActual || 'Ninguna'}\n` +
+                `Volumen interno: ${estadoBot.volumen}/100\n` +
+                `Tiempo activa: ${tiempoActivo()}`;
+
+            break;
+
+        // ================================================================
+        // LECTURA
+        // ================================================================
+
+        case '!leerchat':
+        case '-leerchat':
+
+            estadoBot.lectura = true;
+
+            respuesta =
+                'Indicador interno de lectura activado. La recepción de todos los mensajes depende del permiso correspondiente en Anarchy.';
+
+            break;
+
+        case '!noleerchat':
+        case '-noleerchat':
+
+            estadoBot.lectura = false;
+
+            respuesta =
+                'Indicador interno de lectura desactivado.';
+
+            break;
+
+        // ================================================================
+        // MÚSICA
+        // ================================================================
+
+        case '!play':
+        case '-play': {
+
+            const cancion = argumentos.join(' ');
+
+            if (!cancion) {
+
+                respuesta =
+                    'Indica una canción. Ejemplo: !play canción.';
+
+            } else {
+
+                estadoBot.reproduciendo = true;
+                estadoBot.cancionActual = cancion;
+
+                respuesta =
+                    `Solicitud musical registrada: ${cancion}. La reproducción real requiere integrar un reproductor de audio.`;
+            }
+
+            break;
+        }
+
+        // ================================================================
+        // VOLUMEN
+        // ================================================================
+
+        case '!volumen':
+        case '-volumen': {
+
+            const valor = Number(argumentos[0]);
+
+            if (
+                !Number.isInteger(valor) ||
+                valor < 0 ||
+                valor > 100
+            ) {
+
+                respuesta =
+                    `Volumen interno actual: ${estadoBot.volumen}/100. Usa !volumen 0-100.`;
+
+            } else {
+
+                estadoBot.volumen = valor;
+
+                respuesta =
+                    `Volumen interno ajustado a ${valor}/100. Esto no controla un reproductor de audio todavía.`;
+            }
+
+            break;
+        }
+
+        // ================================================================
+        // LLAMADAS
+        // ================================================================
+
+        case '!llamada!':
+
+            respuesta =
+                'Para entrar a una llamada, Anarchy exige el token del Bot de la comunidad creado en ACM. El BOT_TOKEN de Desarrolladores no autoriza las rutas live-rooms. No intentaré conectarme con una credencial incorrecta.';
+
+            break;
+
+        case '!salas':
+        case '-salas':
+
+            respuesta =
+                'La consulta de salas activas requiere el token del Bot de la comunidad de ACM. Con el token normal de Desarrolladores no está disponible.';
+
+            break;
+
+        case '!salirllamada!':
+
+            respuesta =
+                'La salida de una llamada también requiere el token del Bot de la comunidad de ACM.';
+
+            break;
+
+        default:
+            return;
+    }
+
+    // PUBLICAR RESPUESTA
+
+    if (respuesta) {
+
+        const resultado = await enviarMensaje(
+            threadId,
+            respuesta,
+            messageId
+        );
+
+        if (!resultado.ok) {
+
+            console.error(
+                '[ERROR RESPUESTA]',
+                resultado.status,
+                resultado.data
+            );
+        }
+    }
 }
 
 // ============================================================================
-// IDENTIFICAR EL TOKEN DEL WEBHOOK
+// EVENTOS DE SALAS
 // ============================================================================
 
-function tokenParaEvento(origenWebhook) {
-    if (
-        origenWebhook === 'acm' &&
-        ACM_BOT_TOKEN
-    ) {
-        return ACM_BOT_TOKEN;
+async function procesarEventoSala(evento) {
+
+    const threadId = String(evento.threadId || '');
+
+    if (!threadId) return;
+
+    if (evento.type === 'room.join') {
+
+        console.log(
+            `[SALA] Entró ${evento.user?.nickname || 'un usuario'} a la sala ${threadId}.`
+        );
+
+        await enviarMensaje(
+            threadId,
+            '¡Ad Astra Abbysosque! Bienvenido al chat.'
+        );
+
+        return;
     }
 
-    return BOT_TOKEN;
+    if (evento.type === 'room.leave') {
+
+        console.log(
+            `[SALA] Salió ${evento.user?.nickname || 'un usuario'} de la sala ${threadId}.`
+        );
+
+        await enviarMensaje(
+            threadId,
+            'Buen viaje, el Gremio de Aventureros espera tu regreso'
+        );
+
+        return;
+    }
+
+    if (evento.type === 'room.end') {
+
+        console.log(
+            `[SALA] La llamada del chat ${threadId} terminó.`
+        );
+    }
 }
 
 // ============================================================================
 // VALIDACIÓN HMAC
 // ============================================================================
 
-function validarFirmaWebhook(req) {
+function validarWebhook(req) {
+
     const timestamp =
         req.headers['x-anarchy-bot-timestamp'];
 
     const signatureHeader =
         req.headers['x-anarchy-bot-signature'];
 
-    const rawBody = req.rawBody;
-
     if (
         !timestamp ||
         !signatureHeader ||
-        typeof rawBody !== 'string'
+        typeof req.rawBody !== 'string'
     ) {
         return {
             ok: false,
-            error: 'Faltan encabezados de firma o cuerpo original.'
+            error: 'Faltan encabezados o cuerpo original.'
         };
     }
 
-    const timestampNumber = Number(timestamp);
+    const segundos = Number(timestamp);
 
     if (
-        !Number.isFinite(timestampNumber) ||
-        Math.abs(Date.now() / 1000 - timestampNumber) > 300
+        !Number.isFinite(segundos) ||
+        Math.abs(Date.now() / 1000 - segundos) > 300
     ) {
         return {
             ok: false,
@@ -593,1017 +1333,28 @@ function validarFirmaWebhook(req) {
     if (!/^[a-f0-9]{64}$/i.test(signature)) {
         return {
             ok: false,
-            error: 'Formato de firma incorrecto.'
+            error: 'Formato de firma inválido.'
         };
     }
 
-    const secretos = [
-        {
-            secret: WEBHOOK_SECRET,
-            source: 'chat'
-        },
-        {
-            secret: ACM_WEBHOOK_SECRET,
-            source: 'acm'
-        }
-    ].filter(item => item.secret);
+    const expected = crypto
+        .createHmac('sha256', WEBHOOK_SECRET)
+        .update(`${timestamp}.${req.rawBody}`)
+        .digest();
 
-    const recibida = Buffer.from(signature, 'hex');
-
-    for (const item of secretos) {
-
-        const esperada = crypto
-            .createHmac('sha256', item.secret)
-            .update(`${timestamp}.${rawBody}`)
-            .digest();
-
-        if (
-            recibida.length === esperada.length &&
-            crypto.timingSafeEqual(
-                recibida,
-                esperada
-            )
-        ) {
-            return {
-                ok: true,
-                source: item.source
-            };
-        }
-    }
-
-    return {
-        ok: false,
-        error: 'La firma HMAC no coincide.'
-    };
-}
-
-// ============================================================================
-// SISTEMA DE LLAMADAS LIVEKIT
-// ============================================================================
-
-let ultimaConsultaSalas = 0;
-
-let cacheSalas = [];
-
-let cacheSalasHasta = 0;
-
-// ---------------------------------------------------------------------------
-// CONSULTAR SALAS ACTIVAS
-// ---------------------------------------------------------------------------
-
-async function obtenerSalasEnVivo(forzar = false) {
-
-    if (!ACM_BOT_TOKEN) {
-        return {
-            ok: false,
-            error: 'Falta el token generado en ACM para habilitar las llamadas.'
-        };
-    }
+    const received = Buffer.from(signature, 'hex');
 
     if (
-        !forzar &&
-        Date.now() < cacheSalasHasta
+        received.length !== expected.length ||
+        !crypto.timingSafeEqual(received, expected)
     ) {
         return {
-            ok: true,
-            salas: cacheSalas
-        };
-    }
-
-    const espera = Math.max(
-        0,
-        3000 - (Date.now() - ultimaConsultaSalas)
-    );
-
-    if (espera) {
-        await dormir(espera);
-    }
-
-    ultimaConsultaSalas = Date.now();
-
-    const resultado = await anarchyAPI(
-        '/live-rooms',
-        'GET',
-        null,
-        ACM_BOT_TOKEN
-    );
-
-    if (!resultado.ok) {
-        return {
             ok: false,
-            error: `Anarchy respondió HTTP ${resultado.status}: ${JSON.stringify(resultado.data)}`
+            error: 'La firma HMAC no coincide.'
         };
     }
 
-    const salas = Array.isArray(
-        resultado.data?.roomList
-    )
-        ? resultado.data.roomList
-        : [];
-
-    cacheSalas = salas;
-
-    cacheSalasHasta = Date.now() + 2000;
-
-    return {
-        ok: true,
-        salas
-    };
-}
-
-// ---------------------------------------------------------------------------
-// PUBLICAR AUDIO SILENCIOSO
-// ---------------------------------------------------------------------------
-
-async function publicarSilencioEnSala(estado, sdk) {
-
-    const sampleRate = 16000;
-    const channels = 1;
-    const samplesPerFrame = 320;
-
-    const silencio = new Int16Array(
-        samplesPerFrame
-    );
-
-    const source = new sdk.AudioSource(
-        sampleRate,
-        channels
-    );
-
-    const track = sdk.LocalAudioTrack.createAudioTrack(
-        'katherine-microphone',
-        source
-    );
-
-    const options = new sdk.TrackPublishOptions();
-
-    options.source = sdk.TrackSource.SOURCE_MICROPHONE;
-
-    estado.source = source;
-    estado.track = track;
-
-    let publicada = false;
-
-    while (
-        !estado.stopping &&
-        !publicada
-    ) {
-        try {
-            await estado.room.localParticipant.publishTrack(
-                track,
-                options
-            );
-
-            publicada = true;
-
-            console.log(
-                `✅ [LIVEKIT] Micrófono silencioso publicado en ${estado.threadId}.`
-            );
-
-        } catch (err) {
-
-            console.warn(
-                '[LIVEKIT] Esperando permiso de micrófono:',
-                err.message
-            );
-
-            await dormir(1500);
-        }
-    }
-
-    if (!publicada) {
-        return;
-    }
-
-    while (!estado.stopping) {
-
-        try {
-            const frame = new sdk.AudioFrame(
-                silencio,
-                sampleRate,
-                channels,
-                samplesPerFrame
-            );
-
-            await source.captureFrame(frame);
-
-        } catch (err) {
-
-            if (!estado.stopping) {
-                console.error(
-                    '[LIVEKIT] Error publicando silencio:',
-                    err.message
-                );
-            }
-
-            break;
-        }
-
-        await dormir(20);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ENTRAR A UNA LLAMADA
-// ---------------------------------------------------------------------------
-
-async function entrarLlamada(threadId) {
-
-    if (!ACM_BOT_TOKEN) {
-        return {
-            ok: false,
-            mensaje: 'No puedo entrar todavía. Falta el token generado desde ACM para el bot de comunidad.'
-        };
-    }
-
-    const id = String(threadId);
-
-    if (salasActivas.has(id)) {
-        return {
-            ok: true,
-            mensaje: 'Katherine ya está conectada a la llamada de este chat.'
-        };
-    }
-
-    if (salasActivas.size >= 3) {
-        return {
-            ok: false,
-            mensaje: 'Ya estoy conectada al máximo de tres salas simultáneas.'
-        };
-    }
-
-    const listado = await obtenerSalasEnVivo(true);
-
-    if (!listado.ok) {
-        return {
-            ok: false,
-            mensaje: `No pude consultar las llamadas. ${listado.error}`
-        };
-    }
-
-    const sala = listado.salas.find(
-        item => String(item.threadId) === id
-    );
-
-    if (!sala) {
-        return {
-            ok: false,
-            mensaje: 'No encuentro una llamada activa en este chat. Inicia una llamada y vuelve a usar !llamada!.'
-        };
-    }
-
-    if (sala.joined) {
-        return {
-            ok: false,
-            mensaje: 'Anarchy indica que Katherine ya figura dentro de esta sala.'
-        };
-    }
-
-    let room = null;
-
-    let sdk = null;
-
-    try {
-
-        const joinResult = await anarchyAPI(
-            `/live-rooms/${encodeURIComponent(id)}/join`,
-            'POST',
-            null,
-            ACM_BOT_TOKEN
-        );
-
-        if (!joinResult.ok) {
-            return {
-                ok: false,
-                mensaje: `Anarchy rechazó la entrada a la llamada. HTTP ${joinResult.status}: ${JSON.stringify(joinResult.data)}`
-            };
-        }
-
-        const credentials = joinResult.data || {};
-
-        if (
-            !credentials.url ||
-            !credentials.token
-        ) {
-            return {
-                ok: false,
-                mensaje: 'Anarchy no devolvió las credenciales necesarias de LiveKit.'
-            };
-        }
-
-        sdk = await import('@livekit/rtc-node');
-
-        room = new sdk.Room();
-
-        const estado = {
-            threadId: id,
-            room,
-            sdk,
-            identity: credentials.identity || 'Katherine',
-            stopping: false,
-            source: null,
-            track: null,
-            audioTask: null
-        };
-
-        room.on(
-            sdk.RoomEvent.Disconnected,
-            () => {
-
-                console.warn(
-                    `[LIVEKIT] Katherine se desconectó de ${id}.`
-                );
-
-                estado.stopping = true;
-
-                salasActivas.delete(id);
-
-                if (estado.track) {
-                    estado.track.close().catch(err => {
-                        console.warn(
-                            '[LIVEKIT] Error cerrando pista:',
-                            err.message
-                        );
-                    });
-                }
-            }
-        );
-
-        await room.connect(
-            credentials.url,
-            credentials.token,
-            {
-                autoSubscribe: false,
-                dynacast: true
-            }
-        );
-
-        salasActivas.set(id, estado);
-
-        estado.audioTask = publicarSilencioEnSala(
-            estado,
-            sdk
-        ).catch(err => {
-            console.error(
-                '[LIVEKIT] Error manteniendo el micrófono:',
-                err
-            );
-        });
-
-        console.log(
-            `✅ [LIVEKIT] Katherine conectada a ${id}. Identidad: ${estado.identity}`
-        );
-
-        return {
-            ok: true,
-            mensaje: 'Katherine está entrando a la llamada. Me conectaré como participante silenciosa.'
-        };
-
-    } catch (err) {
-
-        console.error(
-            '[LIVEKIT] Error de conexión:',
-            err
-        );
-
-        if (room) {
-            try {
-                await room.disconnect();
-            } catch (_) {}
-        }
-
-        await anarchyAPI(
-            `/live-rooms/${encodeURIComponent(id)}/leave`,
-            'POST',
-            null,
-            ACM_BOT_TOKEN
-        );
-
-        return {
-            ok: false,
-            mensaje: `No pude completar la conexión con LiveKit: ${err.message}`
-        };
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SALIR DE UNA LLAMADA
-// ---------------------------------------------------------------------------
-
-async function salirDeLlamada(threadId) {
-
-    if (!ACM_BOT_TOKEN) {
-        return {
-            ok: false,
-            mensaje: 'Falta el token de ACM para controlar las llamadas.'
-        };
-    }
-
-    const id = String(threadId);
-
-    const estado = salasActivas.get(id);
-
-    const resultado = await anarchyAPI(
-        `/live-rooms/${encodeURIComponent(id)}/leave`,
-        'POST',
-        null,
-        ACM_BOT_TOKEN
-    );
-
-    if (estado) {
-
-        estado.stopping = true;
-
-        salasActivas.delete(id);
-
-        try {
-            if (estado.track) {
-                await estado.track.close();
-            }
-        } catch (err) {
-            console.warn(
-                '[LIVEKIT] Error cerrando pista:',
-                err.message
-            );
-        }
-
-        try {
-            await estado.room.disconnect();
-        } catch (err) {
-            console.warn(
-                '[LIVEKIT] Error desconectando:',
-                err.message
-            );
-        }
-    }
-
-    if (!resultado.ok && !estado) {
-        return {
-            ok: false,
-            mensaje: `No pude confirmar la salida: ${JSON.stringify(resultado.data)}`
-        };
-    }
-
-    return {
-        ok: true,
-        mensaje: 'Katherine ha salido de la llamada de este chat.'
-    };
-}
-
-// ---------------------------------------------------------------------------
-// CERRAR UNA SALA AL RECIBIR EVENTO
-// ---------------------------------------------------------------------------
-
-async function cerrarSalaPorEvento(threadId) {
-
-    const id = String(threadId);
-
-    const estado = salasActivas.get(id);
-
-    if (!estado) return;
-
-    estado.stopping = true;
-
-    salasActivas.delete(id);
-
-    try {
-        if (estado.track) {
-            await estado.track.close();
-        }
-    } catch (_) {}
-
-    try {
-        await estado.room.disconnect();
-    } catch (_) {}
-
-    console.log(
-        `[LIVEKIT] Sesión de la sala ${id} cerrada.`
-    );
-}
-
-// ============================================================================
-// PROCESAMIENTO DE COMANDOS
-// ============================================================================
-
-async function procesarComando(evento, origenWebhook) {
-
-    const threadId = String(evento.threadId || '');
-
-    const mensaje = evento.message || {};
-
-    const contenido =
-        typeof mensaje.content === 'string'
-            ? mensaje.content.trim()
-            : '';
-
-    const messageId = mensaje.messageId || null;
-
-    const autor =
-        mensaje.author?.nickname || 'Anónimo';
-
-    if (!threadId || !contenido) {
-        return;
-    }
-
-    // Evitar eventos duplicados.
-
-    if (messageId) {
-
-        const id = String(messageId);
-
-        if (mensajesProcesados.has(id)) {
-            console.log(
-                `[WEBHOOK] Mensaje duplicado ignorado: ${id}`
-            );
-            return;
-        }
-
-        mensajesProcesados.add(id);
-
-        if (mensajesProcesados.size > 5000) {
-            mensajesProcesados.delete(
-                mensajesProcesados.values().next().value
-            );
-        }
-    }
-
-    // Solo reconocer comandos con prefijo.
-
-    if (
-        !contenido.startsWith('!') &&
-        !contenido.startsWith('-')
-    ) {
-        return;
-    }
-
-    const args = contenido.split(/\s+/);
-
-    const comando = args[0].toLowerCase();
-
-    const tokenRespuesta = tokenParaEvento(origenWebhook);
-
-    console.log(
-        `🎯 [COMANDO] ${comando} | Usuario: ${autor} | Thread: ${threadId}`
-    );
-
-    let respuesta = null;
-
-    switch (comando) {
-
-        // ====================================================================
-        // AYUDA
-        // ====================================================================
-
-        case '!ayuda':
-        case '-ayuda':
-        case '!comandos':
-        case '-comandos':
-
-            respuesta =
-                'KATHERINE — LISTA DE COMANDOS\n\n' +
-
-                'GENERAL\n' +
-                '!ayuda — Mostrar los comandos.\n' +
-                '!ping — Comprobar conexión.\n' +
-                '!uptime — Tiempo activa.\n' +
-                '!estadochat — Estado de Katherine.\n' +
-                '!hora — Hora de Chile.\n' +
-                '!fecha — Fecha de Chile.\n\n' +
-
-                'CURIOSIDADES Y JUEGOS\n' +
-                '!curiosidad — Recibir una curiosidad aleatoria.\n' +
-                '!dado — Lanzar un dado.\n' +
-                '!moneda — Lanzar una moneda.\n' +
-                '!8ball pregunta — Consultar la bola mágica.\n\n' +
-
-                'LLAMADAS\n' +
-                '!salas — Consultar salas activas.\n' +
-                '!llamada! — Entrar a la llamada del chat.\n' +
-                '!salirllamada! — Salir de la llamada.\n\n' +
-
-                'CHAT Y MÚSICA\n' +
-                '!leerchat — Activar indicador interno.\n' +
-                '!noleerchat — Desactivar indicador interno.\n' +
-                '!play canción — Registrar solicitud musical.\n' +
-                '!volumen 0-100 — Ajustar volumen interno.';
-
-            break;
-
-        // ====================================================================
-        // PING
-        // ====================================================================
-
-        case '!ping':
-        case '-ping': {
-
-            const inicio = Date.now();
-
-            const comprobacion = await anarchyAPI(
-                '/me',
-                'GET',
-                null,
-                tokenRespuesta
-            );
-
-            const latencia = Date.now() - inicio;
-
-            if (comprobacion.ok) {
-                respuesta =
-                    'PONG. Katherine está en línea.\n' +
-                    `Latencia de API: ${latencia} ms.\n` +
-                    `Servidor activo: ${tiempoActivo()}.`;
-            } else {
-                respuesta =
-                    `Katherine está activa, pero la API respondió con HTTP ${comprobacion.status}.`;
-            }
-
-            break;
-        }
-
-        // ====================================================================
-        // UPTIME
-        // ====================================================================
-
-        case '!uptime':
-        case '-uptime':
-
-            respuesta =
-                `Katherine lleva activa ${tiempoActivo()}.`;
-
-            break;
-
-        // ====================================================================
-        // HORA
-        // ====================================================================
-
-        case '!hora':
-        case '-hora':
-
-            respuesta =
-                `La hora actual de Chile es ${obtenerHoraChile()}.`;
-
-            break;
-
-        // ====================================================================
-        // FECHA
-        // ====================================================================
-
-        case '!fecha':
-        case '-fecha':
-
-            respuesta =
-                `Hoy es ${obtenerFechaChile()}.`;
-
-            break;
-
-        // ====================================================================
-        // CURIOSIDADES
-        // ====================================================================
-
-        case '!curiosidad':
-        case '-curiosidad':
-
-            respuesta =
-                `¿Sabías que...? \n\n${obtenerCuriosidad()}`;
-
-            break;
-
-        // ====================================================================
-        // DADO
-        // ====================================================================
-
-        case '!dado':
-        case '-dado': {
-
-            const resultado =
-                Math.floor(Math.random() * 6) + 1;
-
-            respuesta =
-                `🎲 ${autor}, el dado cayó en ${resultado}.`;
-
-            break;
-        }
-
-        // ====================================================================
-        // MONEDA
-        // ====================================================================
-
-        case '!moneda':
-        case '-moneda':
-
-            respuesta =
-                `🪙 La moneda cayó en ${Math.random() < 0.5 ? 'cara' : 'sello'}.`;
-
-            break;
-
-        // ====================================================================
-        // BOLA MÁGICA
-        // ====================================================================
-
-        case '!8ball':
-        case '-8ball': {
-
-            const pregunta = args.slice(1).join(' ');
-
-            respuesta = pregunta
-                ? `🎱 ${elegirAleatorio(respuestas8Ball)}`
-                : 'Escribe una pregunta después del comando. Ejemplo: !8ball ¿Tendré suerte hoy?';
-
-            break;
-        }
-
-        // ====================================================================
-        // ESTADO
-        // ====================================================================
-
-        case '!estadochat':
-        case '-estadochat':
-
-            respuesta =
-                'KATHERINE — ESTADO\n\n' +
-                `Lectura interna: ${estadoBot.lectura ? 'ACTIVADA' : 'DESACTIVADA'}\n` +
-                `Llamada en este chat: ${salasActivas.has(threadId) ? 'CONECTADA' : 'DESCONECTADA'}\n` +
-                `Salas conectadas: ${salasActivas.size}/3\n` +
-                `Reproducción registrada: ${estadoBot.reproduciendo ? 'SÍ' : 'NO'}\n` +
-                `Canción: ${estadoBot.cancionActual || 'Ninguna'}\n` +
-                `Volumen interno: ${estadoBot.volumen}/100\n` +
-                `Tiempo activa: ${tiempoActivo()}`;
-
-            break;
-
-        // ====================================================================
-        // ACTIVAR LECTURA
-        // ====================================================================
-
-        case '!leerchat':
-        case '-leerchat':
-
-            estadoBot.lectura = true;
-
-            respuesta =
-                'Lectura interna activada. La recepción de mensajes también depende de los permisos de Anarchy.';
-
-            break;
-
-        // ====================================================================
-        // DESACTIVAR LECTURA
-        // ====================================================================
-
-        case '!noleerchat':
-        case '-noleerchat':
-
-            estadoBot.lectura = false;
-
-            respuesta =
-                'Lectura interna desactivada.';
-
-            break;
-
-        // ====================================================================
-        // VOLUMEN
-        // ====================================================================
-
-        case '!volumen':
-        case '-volumen': {
-
-            if (args.length < 2) {
-
-                respuesta =
-                    `El volumen interno actual es ${estadoBot.volumen}/100. Usa !volumen 0-100.`;
-
-                break;
-            }
-
-            const volumen = Number(args[1]);
-
-            if (
-                !Number.isInteger(volumen) ||
-                volumen < 0 ||
-                volumen > 100
-            ) {
-
-                respuesta =
-                    'Indica un número entero entre 0 y 100. Ejemplo: !volumen 75.';
-
-            } else {
-
-                estadoBot.volumen = volumen;
-
-                respuesta =
-                    `El volumen interno se ajustó a ${volumen}/100. Esto todavía no controla un reproductor de audio.`;
-            }
-
-            break;
-        }
-
-        // ====================================================================
-        // PLAY
-        // ====================================================================
-
-        case '!play':
-        case '-play': {
-
-            const cancion = args.slice(1).join(' ');
-
-            if (!cancion) {
-
-                respuesta =
-                    'Indica una canción. Ejemplo: !play Follow Me.';
-
-            } else {
-
-                estadoBot.reproduciendo = true;
-
-                estadoBot.cancionActual = cancion;
-
-                respuesta =
-                    `Solicitud musical registrada: ${cancion}.\nLa reproducción de música necesita integrar un reproductor de audio.`;
-            }
-
-            break;
-        }
-
-        // ====================================================================
-        // SALAS ACTIVAS
-        // ====================================================================
-
-        case '!salas':
-        case '-salas': {
-
-            const listado = await obtenerSalasEnVivo(true);
-
-            if (!listado.ok) {
-
-                respuesta =
-                    `No pude consultar las salas. ${listado.error}`;
-
-                break;
-            }
-
-            if (!listado.salas.length) {
-
-                respuesta =
-                    'No hay llamadas de voz o video activas en esta comunidad.';
-
-                break;
-            }
-
-            const lineas = listado.salas
-                .slice(0, 20)
-                .map((sala, i) => {
-
-                    const tipo =
-                        sala.channelType === 'video'
-                            ? 'Video'
-                            : 'Voz';
-
-                    return (
-                        `${i + 1}. ${sala.title || 'Sala sin título'} — ${tipo} — ` +
-                        `${sala.participantCount ?? 0} participante(s)` +
-                        `${sala.joined ? ' — Katherine ya figura dentro' : ''}`
-                    );
-                });
-
-            respuesta =
-                `SALAS EN VIVO\n\n${lineas.join('\n')}\n\nUsa !llamada! desde el chat correspondiente para entrar.`;
-
-            break;
-        }
-
-        // ====================================================================
-        // ENTRAR A LLAMADA
-        // ====================================================================
-
-        case '!llamada!': {
-
-            const resultado = await entrarLlamada(threadId);
-
-            respuesta = resultado.mensaje;
-
-            break;
-        }
-
-        // ====================================================================
-        // SALIR DE LLAMADA
-        // ====================================================================
-
-        case '!salirllamada!': {
-
-            const resultado = await salirDeLlamada(threadId);
-
-            respuesta = resultado.mensaje;
-
-            break;
-        }
-
-        // ====================================================================
-        // COMANDO DESCONOCIDO
-        // ====================================================================
-
-        default:
-
-            return;
-    }
-
-    // ========================================================================
-    // PUBLICAR RESPUESTA
-    // ========================================================================
-
-    if (respuesta) {
-
-        const resultado = await enviarRespuestaChat(
-            threadId,
-            respuesta,
-            messageId,
-            tokenRespuesta
-        );
-
-        if (!resultado.ok) {
-
-            console.error(
-                '❌ Katherine no pudo publicar la respuesta:',
-                resultado.status,
-                resultado.data
-            );
-        }
-    }
-}
-
-// ============================================================================
-// PROCESAMIENTO DE EVENTOS
-// ============================================================================
-
-async function procesarEvento(evento, origenWebhook) {
-
-    console.log('\n-------------------------------------------------------');
-
-    console.log(
-        '⚡ [EVENTO ANARCHY]',
-        evento.type,
-        'Thread:',
-        evento.threadId || 'sin thread'
-    );
-
-    if (evento.type === 'message') {
-
-        await procesarComando(
-            evento,
-            origenWebhook
-        );
-
-        return;
-    }
-
-    if (evento.type === 'room.end') {
-
-        await cerrarSalaPorEvento(
-            evento.threadId
-        );
-
-        return;
-    }
-
-    if (evento.type === 'room.join') {
-
-        console.log(
-            `👤 Participante entró a la sala ${evento.threadId}.`
-        );
-
-        return;
-    }
-
-    if (evento.type === 'room.leave') {
-
-        console.log(
-            `👤 Participante salió de la sala ${evento.threadId}.`
-        );
-
-        return;
-    }
-
-    if (evento.type === 'room.speaker') {
-
-        console.log(
-            `🎙️ Cambio de rol de voz en la sala ${evento.threadId}.`
-        );
-
-        return;
-    }
-
-    if (evento.type === 'interaction') {
-
-        console.log(
-            '🔘 Interacción recibida:',
-            evento.buttonId
-        );
-
-        return;
-    }
-
-    console.log(
-        'ℹ️ Evento ignorado:',
-        evento.type
-    );
+    return { ok: true };
 }
 
 // ============================================================================
@@ -1612,43 +1363,62 @@ async function procesarEvento(evento, origenWebhook) {
 
 app.post('/', (req, res) => {
 
-    console.log('\n=======================================================');
+    console.log('\n[WEBHOOK] Petición recibida de Anarchy.');
 
-    console.log(
-        '⚡ [WEBHOOK] Petición recibida de Anarchy'
-    );
-
-    const validacion = validarFirmaWebhook(req);
+    const validacion = validarWebhook(req);
 
     if (!validacion.ok) {
 
         console.warn(
-            '⚠️ Webhook rechazado:',
+            '[WEBHOOK RECHAZADO]',
             validacion.error
         );
 
         return res.status(401).send('Unauthorized');
     }
 
-    console.log(
-        '✅ Firma HMAC validada correctamente.'
-    );
+    console.log('[WEBHOOK] Firma validada.');
 
-    // Respuesta inmediata a Anarchy.
+    // Responder inmediatamente a Anarchy.
 
     res.status(200).send('OK');
 
-    // Procesar evento después de responder.
-
     const evento = req.body || {};
 
-    procesarEvento(
-        evento,
-        validacion.source
-    ).catch(err => {
+    Promise.resolve().then(async () => {
+
+        if (evento.type === 'message') {
+
+            await procesarMensaje(evento);
+
+        } else if (
+            evento.type === 'room.join' ||
+            evento.type === 'room.leave' ||
+            evento.type === 'room.end'
+        ) {
+
+            await procesarEventoSala(evento);
+
+        } else if (evento.type === 'interaction') {
+
+            console.log(
+                '[INTERACTION]',
+                evento.buttonId,
+                evento.user?.nickname
+            );
+
+        } else {
+
+            console.log(
+                '[EVENTO IGNORADO]',
+                evento.type
+            );
+        }
+
+    }).catch(err => {
 
         console.error(
-            '💥 [ERROR PROCESANDO EVENTO]:',
+            '[ERROR PROCESANDO EVENTO]',
             err
         );
     });
@@ -1670,46 +1440,11 @@ app.get('/', (req, res) => {
             (Date.now() - startTime) / 1000
         ),
 
-        communityCallsEnabled: Boolean(
-            ACM_BOT_TOKEN
-        ),
-
-        activeRooms: salasActivas.size,
+        timezoneUsersConfigured: zonasHorarias.size,
 
         timestamp: new Date().toISOString()
     });
 });
-
-// ============================================================================
-// APAGADO ORDENADO
-// ============================================================================
-
-let cerrando = false;
-
-async function apagar(signal) {
-
-    if (cerrando) return;
-
-    cerrando = true;
-
-    console.log(
-        `🛑 [KATHERINE] Apagado solicitado: ${signal}`
-    );
-
-    const ids = [
-        ...salasActivas.keys()
-    ];
-
-    for (const id of ids) {
-        await salirDeLlamada(id);
-    }
-
-    process.exit(0);
-}
-
-process.on('SIGTERM', () => apagar('SIGTERM'));
-
-process.on('SIGINT', () => apagar('SIGINT'));
 
 // ============================================================================
 // INICIO DEL SERVIDOR
@@ -1717,51 +1452,28 @@ process.on('SIGINT', () => apagar('SIGINT'));
 
 app.listen(PORT, '0.0.0.0', () => {
 
-    console.log('\n=======================================================');
+    console.log('=======================================================');
 
-    console.log(
-        '       KATHERINE — ANARCHY BOT SYSTEM'
-    );
+    console.log('KATHERINE — ANARCHY BOT');
+
+    console.log(`Servidor activo en puerto ${PORT}`);
+
+    console.log('Webhook: POST /');
+
+    console.log('Health check: GET /');
+
+    console.log('Autenticación HMAC: activada');
+
+    console.log('Bot token: configurado');
+
+    console.log('Curiosidades: Genshin Impact');
+
+    console.log('Comando de zona horaria: !zona');
 
     console.log('=======================================================');
 
-    console.log(
-        `[SERVER] Activo en puerto ${PORT}`
-    );
-
-    console.log(
-        '[WEBHOOK] POST /'
-    );
-
-    console.log(
-        '[HEALTH] GET /'
-    );
-
-    console.log(
-        '[SECURITY] HMAC activado'
-    );
-
-    console.log(
-        '[CHAT] BOT_TOKEN:',
-        BOT_TOKEN ? 'CONFIGURADO' : 'AUSENTE'
-    );
-
-    console.log(
-        '[ACM] Token:',
-        ACM_BOT_TOKEN ? 'CONFIGURADO' : 'NO CONFIGURADO'
-    );
-
-    console.log(
-        '[COMMANDS] !ayuda | !curiosidad | !llamada! | !salirllamada! | !salas'
-    );
-
-    console.log('=======================================================\n');
-
     consultarBotMe().catch(err => {
-
-        console.error(
-            '❌ Error en diagnóstico inicial:',
-            err
-        );
+        console.error('[DIAGNÓSTICO]', err);
     });
 });
+
