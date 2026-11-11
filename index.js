@@ -1,9 +1,21 @@
-
 'use strict';
 
 const express = require('express');
 const crypto = require('crypto');
-const GDB = require('genshin-db');
+// Genshin-DB es pesado para instancias de 512 MB. Se carga solo si se activa
+// explícitamente; por defecto los mismos comandos usan la API HTTP de respaldo.
+const ENABLE_LOCAL_GDB = process.env.ENABLE_LOCAL_GDB === 'true';
+let GDB = null;
+function searchLocalGameData(folder, query) {
+    if (!ENABLE_LOCAL_GDB) return null;
+    try {
+        if (!GDB) GDB = require('genshin-db');
+        return unwrap(GDB.searchFolder(folder, query, DB_OPTIONS));
+    } catch (error) {
+        console.warn(`[GENSHIN DB LOCAL] ${folder}/${query}: ${error.message}`);
+        return null;
+    }
+}
 
 // ============================================================================
 // KATHERINE — CONFIGURACIÓN
@@ -47,11 +59,6 @@ app.use(express.json({
     }
 }));
 
-app.use(express.urlencoded({
-    extended: true,
-    limit: '2mb'
-}));
-
 // ============================================================================
 // ESTADO GLOBAL
 // ============================================================================
@@ -71,6 +78,48 @@ const state = {
 
 const processedMessages = new Set();
 const cache = new Map();
+const CACHE_MAX_ENTRIES = 100;
+const LAST_SENT_MAX_ENTRIES = 1000;
+
+function cacheGet(key) {
+    const entry = cache.get(key);
+    if (!entry) return null;
+    if (entry.until <= Date.now()) {
+        cache.delete(key);
+        return null;
+    }
+    // LRU: las entradas consultadas recientemente se mantienen.
+    cache.delete(key);
+    cache.set(key, entry);
+    return entry.value;
+}
+
+function cacheSet(key, value, ttl) {
+    if (cache.has(key)) cache.delete(key);
+    cache.set(key, { value, until: Date.now() + ttl });
+    while (cache.size > CACHE_MAX_ENTRIES) {
+        cache.delete(cache.keys().next().value);
+    }
+    return value;
+}
+
+function setLimited(map, key, value, maxEntries) {
+    if (map.has(key)) map.delete(key);
+    map.set(key, value);
+    while (map.size > maxEntries) {
+        map.delete(map.keys().next().value);
+    }
+    return value;
+}
+
+function pruneExpiredState() {
+    const now = Date.now();
+    for (const map of [state.trivia, state.numberGames, state.polls]) {
+        for (const [key, value] of map) {
+            if (value?.expires && value.expires <= now) map.delete(key);
+        }
+    }
+}
 
 let eventQueue = Promise.resolve();
 let sendQueue = Promise.resolve();
@@ -359,7 +408,7 @@ async function loadProfiles() {
 
         console.log(
             '[BOT DESARROLLADOR]',
-            dev.data?.bot,
+            dev.data?.bot?.nickname || dev.data?.bot?.name || 'perfil recibido',
             'Chats:',
             dev.data?.threadIds || []
         );
@@ -384,7 +433,7 @@ async function loadProfiles() {
 
             console.log(
                 '[BOT COMUNIDAD]',
-                community.data?.bot,
+                community.data?.bot?.nickname || community.data?.bot?.name || 'perfil recibido',
                 'Chats:',
                 community.data?.threadIds || []
             );
@@ -466,7 +515,7 @@ function sendMessage(
         }
 
         if (result.ok) {
-            lastSent.set(key, Date.now());
+            setLimited(lastSent, key, Date.now(), LAST_SENT_MAX_ENTRIES);
         } else {
             console.error(
                 '[SEND ERROR]',
@@ -541,31 +590,14 @@ function unwrap(value) {
 async function gameData(folder, query) {
     const key = `game:${folder}:${normalize(query)}`;
 
-    const cached = cache.get(key);
+    const cached = cacheGet(key);
+    if (cached) return cached;
 
-    if (cached && cached.until > Date.now()) {
-        return cached.value;
-    }
-
-    // Primera opción: base de datos local.
-    try {
-        const result = unwrap(
-            GDB.searchFolder(folder, query, DB_OPTIONS)
-        );
-
-        if (result) {
-            cache.set(key, {
-                value: result,
-                until: Date.now() + 12 * 60 * 60 * 1000
-            });
-
-            return result;
-        }
-
-    } catch (error) {
-        console.warn(
-            `[GENSHIN DB LOCAL] ${folder}/${query}: ${error.message}`
-        );
+    // Primera opción opcional: base de datos local (desactivada por defecto
+    // para mantener bajo el consumo de RAM en Render Free).
+    const localResult = searchLocalGameData(folder, query);
+    if (localResult) {
+        return cacheSet(key, localResult, 12 * 60 * 60 * 1000);
     }
 
     // Segunda opción: API HTTP.
@@ -598,12 +630,7 @@ async function gameData(folder, query) {
 
         if (!result) return null;
 
-        cache.set(key, {
-            value: result,
-            until: Date.now() + 6 * 60 * 60 * 1000
-        });
-
-        return result;
+        return cacheSet(key, result, 6 * 60 * 60 * 1000);
 
     } catch (error) {
         console.error(
@@ -659,7 +686,7 @@ async function getBuildTree(force = false) {
         }
 
         treeCache = payload.tree
-            .filter(x => x.type === 'blob')
+            .filter(x => x.type === 'blob' && x.path.startsWith('src/content/'))
             .map(x => x.path);
 
         treeExpires = Date.now() + 60 * 60 * 1000;
@@ -717,11 +744,8 @@ function slugCandidates(query, character) {
 async function fetchBuildFile(file) {
     const key = `build:${file}`;
 
-    const cached = cache.get(key);
-
-    if (cached && cached.until > Date.now()) {
-        return cached.value;
-    }
+    const cached = cacheGet(key);
+    if (cached) return cached;
 
     const url = RAW_URL +
         file.split('/').map(encodeURIComponent).join('/');
@@ -741,12 +765,7 @@ async function fetchBuildFile(file) {
 
         const json = await response.json();
 
-        cache.set(key, {
-            value: json,
-            until: Date.now() + 6 * 60 * 60 * 1000
-        });
-
-        return json;
+        return cacheSet(key, json, 6 * 60 * 60 * 1000);
 
     } catch (error) {
         console.warn(
@@ -1661,13 +1680,12 @@ async function genshinDiagnostic(thread, args, source, replyId) {
     let localError = '';
 
     try {
-        local = unwrap(
-            GDB.searchFolder('characters', query, DB_OPTIONS)
-        );
+        local = searchLocalGameData('characters', query);
     } catch (error) {
         localError = error.message;
     }
 
+    if (!ENABLE_LOCAL_GDB) localError = 'desactivada para ahorrar RAM';
     const character = local || await gameData('characters', query);
 
     let builds = null;
@@ -1944,11 +1962,11 @@ const challenges = [
 
 function wishState(uid) {
     if (!state.wishes.has(uid)) {
-        state.wishes.set(uid, {
+        setLimited(state.wishes, uid, {
             pity5: 0,
             pity4: 0,
             guaranteed: false
-        });
+        }, 3000);
     }
 
     return state.wishes.get(uid);
@@ -2005,11 +2023,11 @@ function simulateWish(uid) {
 function startTrivia(thread) {
     const question = random(triviaQuestions);
 
-    state.trivia.set(String(thread), {
+    setLimited(state.trivia, String(thread), {
         question,
         attempts: 0,
         expires: Date.now() + 120000
-    });
+    }, 500);
 
     return `TRIVIA KATHERINE\n\n${question.q}\n\n${question.a.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\nResponde con !responder 1, 2, 3 o 4.`;
 }
@@ -2034,7 +2052,7 @@ function answerTrivia(thread, uid, number) {
 
     if (answer - 1 === trivia.question.c) {
         state.trivia.delete(String(thread));
-        state.points.set(uid, (state.points.get(uid) || 0) + 10);
+        setLimited(state.points, uid, (state.points.get(uid) || 0) + 10, 3000);
         return '¡Respuesta correcta! Has ganado 10 puntos.';
     }
 
@@ -2047,11 +2065,11 @@ function answerTrivia(thread, uid, number) {
 }
 
 function startNumberGame(thread) {
-    state.numberGames.set(String(thread), {
+    setLimited(state.numberGames, String(thread), {
         number: Math.floor(Math.random() * 100) + 1,
         attempts: 0,
         expires: Date.now() + 300000
-    });
+    }, 500);
 
     return 'He elegido un número entre 1 y 100. Tienes siete intentos. Usa !intento número.';
 }
@@ -2076,7 +2094,7 @@ function tryNumber(thread, uid, value) {
 
     if (number === game.number) {
         state.numberGames.delete(String(thread));
-        state.points.set(uid, (state.points.get(uid) || 0) + 15);
+        setLimited(state.points, uid, (state.points.get(uid) || 0) + 15, 3000);
         return `¡Correcto! El número era ${number}. Ganaste 15 puntos.`;
     }
 
@@ -2554,6 +2572,7 @@ async function processCommand(event, source) {
     const content = String(message.content || '').trim();
 
     if (!thread || !content) return;
+    pruneExpiredState();
 
     // No responder a los mensajes del propio bot.
     if (
@@ -2573,10 +2592,8 @@ async function processCommand(event, source) {
 
         processedMessages.add(key);
 
-        if (processedMessages.size > 5000) {
-            processedMessages.delete(
-                processedMessages.values().next().value
-            );
+        if (processedMessages.size > 3000) {
+            processedMessages.delete(processedMessages.values().next().value);
         }
     }
 
@@ -2723,7 +2740,7 @@ async function processCommand(event, source) {
             } else if (!validZone(zone)) {
                 response = 'Zona horaria inválida. Usa un identificador IANA, por ejemplo America/Santiago.';
             } else {
-                state.zones.set(uid, zone);
+                setLimited(state.zones, uid, zone, 1000);
                 response = `Zona horaria guardada: ${zone}.`;
             }
             break;
@@ -2896,11 +2913,11 @@ async function processCommand(event, source) {
         }
 
         case '!resetpity':
-            state.wishes.set(uid, {
+            setLimited(state.wishes, uid, {
                 pity5: 0,
                 pity4: 0,
                 guaranteed: false
-            });
+            }, 3000);
             response = 'El contador simulado fue reiniciado. No modifica tu cuenta.';
             break;
 
@@ -2974,12 +2991,12 @@ async function processCommand(event, source) {
             if (pieces.length < 3 || pieces.length > 6) {
                 response = 'Uso: !encuesta ¿Qué prefieres? | Opción A | Opción B. Máximo cinco opciones.';
             } else {
-                state.polls.set(thread, {
+                setLimited(state.polls, thread, {
                     question: pieces[0],
                     options: pieces.slice(1),
                     votes: new Map(),
                     expires: Date.now() + 30 * 60 * 1000
-                });
+                }, 500);
 
                 response =
                     `ENCUESTA CREADA\n\n${pieces[0]}\n\n` +
@@ -3301,6 +3318,7 @@ app.get('/', (req, res) => {
         developerWebhook: Boolean(WEBHOOK_SECRET),
         communityWebhook: Boolean(COMMUNITY_WEBHOOK_SECRET),
         genshinDb: true,
+        genshinDbLocal: ENABLE_LOCAL_GDB,
         timestamp: new Date().toISOString()
     });
 });
@@ -3355,7 +3373,7 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`[COMMUNITY TOKEN] ${COMMUNITY_BOT_TOKEN ? 'CONFIGURADO' : 'AUSENTE'}`);
     console.log(`[DEVELOPER SECRET] ${WEBHOOK_SECRET ? 'CONFIGURADO' : 'AUSENTE'}`);
     console.log(`[COMMUNITY SECRET] ${COMMUNITY_WEBHOOK_SECRET ? 'CONFIGURADO' : 'AUSENTE'}`);
-    console.log('[GENSHIN DB] ACTIVADO');
+    console.log(`[GENSHIN DB] API HTTP + local ${ENABLE_LOCAL_GDB ? 'ACTIVADA' : 'DESACTIVADA (modo RAM baja)'}`);
     console.log('[GENSHIN BUILDS] GITHUB');
     console.log('[LIVEKIT] ' + (COMMUNITY_BOT_TOKEN ? 'ACTIVADO' : 'DESACTIVADO'));
     console.log('[SOCIAL ACTIONS] ACTIVADAS');
