@@ -3365,4 +3365,4 @@ app.listen(PORT, '0.0.0.0', () => {
     loadProfiles().catch(error => {
         console.error('[PROFILE ERROR]', error);
     });
-});
+})
