@@ -15127,8 +15127,9 @@ Uso: !enciclopedia <nombre>""",
                     f"🛡️ Antispam: {'activado' if current['enabled'] else 'desactivado'}\n"
                     f"Límite: {current['max_messages']} mensajes / {current['window_seconds']} s\n"
                     f"Repeticiones: {current['repeat_limit']}\n"
-                    "Usa !antispam on/off, !antispam limite <3-20>, "
-                    "ventana <3-60>, repeticiones <2-10>.",
+                    f"Máximo de enlaces: {current['max_links']} · menciones: {current['max_mentions']}\n"
+                    "Usa !antispam on/off, limite <3-20>, ventana <3-60>, "
+                    "repeticiones <2-10>, enlaces <2-12>, menciones <3-20>.",
                     source, reply
                 )
                 return
@@ -15138,16 +15139,23 @@ Uso: !enciclopedia <nombre>""",
                 set_chat_setting(thread, "antispam_enabled", "1" if enabled else "0")
                 log_admin_action(thread, raw_uid, nickname, "antispam", "activado" if enabled else "desactivado")
                 answer = f"Antispam {'activado' if enabled else 'desactivado'}."
-            elif sub in ("limite", "ventana", "repeticiones") and len(args) > 1:
+            elif sub in ("limite", "ventana", "repeticiones", "enlaces", "menciones") and len(args) > 1:
                 try:
                     number = int(args[1])
-                    low, high = (3, 20) if sub == "limite" else ((3, 60) if sub == "ventana" else (2, 10))
+                    bounds = {
+                        "limite": (3, 20), "ventana": (3, 60),
+                        "repeticiones": (2, 10), "enlaces": (2, 12),
+                        "menciones": (3, 20)
+                    }
+                    low, high = bounds[sub]
                     if not low <= number <= high:
                         raise ValueError("rango")
                     key = {
                         "limite": "antispam_max_messages",
                         "ventana": "antispam_window_seconds",
-                        "repeticiones": "antispam_repeat_limit"
+                        "repeticiones": "antispam_repeat_limit",
+                        "enlaces": "antispam_max_links",
+                        "menciones": "antispam_max_mentions"
                     }[sub]
                     set_chat_setting(thread, key, str(number))
                     log_admin_action(thread, raw_uid, nickname, "antispam_config", f"{sub}={number}")
@@ -15155,7 +15163,7 @@ Uso: !enciclopedia <nombre>""",
                 except ValueError:
                     answer = "Valor fuera de rango."
             else:
-                answer = "Uso: !antispam on/off, limite <3-20>, ventana <3-60>, repeticiones <2-10>."
+                answer = "Uso: !antispam on/off, limite <3-20>, ventana <3-60>, repeticiones <2-10>, enlaces <2-12>, menciones <3-20>."
             await send_message(thread, answer, source, reply)
             return
 
