@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import hashlib
+import secrets
 import os
 import re
 import time
@@ -250,6 +251,7 @@ class KatherineAI:
         self.analyst_ttl = max(60, min(900, int(analyst_ttl)))
         self.analyst_limit = max(10, min(60, int(analyst_limit)))
         self._memory: dict[str, dict[str, Any]] = {}
+        self._analyst_salt = secrets.token_bytes(16)
         self._analyst_enabled: set[str] = set()
         self._analyst: dict[str, deque] = {}
         self._last_call: dict[str, float] = {}
@@ -385,7 +387,7 @@ class KatherineAI:
         buffer = self._analyst.setdefault(key, deque(maxlen=self.analyst_limit))
         # Keep only an ephemeral participant label, not a platform nickname.
         participant = str(nickname or "Usuario")[:60]
-        author_label = hashlib.sha256(participant.casefold().encode("utf-8")).hexdigest()[:8]
+        author_label = hashlib.sha256(self._analyst_salt + participant.casefold().encode("utf-8")).hexdigest()[:8]
         buffer.append({
             "at": now,
             "author": f"Participante-{author_label}",
