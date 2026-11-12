@@ -253,6 +253,7 @@ class KatherineAI:
         self._memory: dict[str, dict[str, Any]] = {}
         self._analyst_salt = secrets.token_bytes(16)
         self._analyst_enabled: set[str] = set()
+        self._analyst_enabled_at: dict[str, float] = {}
         self._analyst: dict[str, deque] = {}
         self._last_call: dict[str, float] = {}
         self._semaphore: asyncio.Semaphore | None = None
@@ -368,9 +369,11 @@ class KatherineAI:
         key = str(thread_id)
         if enabled:
             self._analyst_enabled.add(key)
+            self._analyst_enabled_at[key] = time.time()
             self._analyst.setdefault(key, deque(maxlen=self.analyst_limit))
         else:
             self._analyst_enabled.discard(key)
+            self._analyst_enabled_at.pop(key, None)
             self._analyst.pop(key, None)
 
     def record_chat_message(
@@ -419,6 +422,11 @@ class KatherineAI:
         for key, item in list(self._memory.items()):
             if float(item.get("expires", 0)) <= current:
                 self._memory.pop(key, None)
+        for key, enabled_at in list(self._analyst_enabled_at.items()):
+            if current - float(enabled_at) >= self.analyst_ttl:
+                self._analyst_enabled.discard(key)
+                self._analyst_enabled_at.pop(key, None)
+                self._analyst.pop(key, None)
         for key, buffer in list(self._analyst.items()):
             cutoff = current - self.analyst_ttl
             while buffer and float(buffer[0].get("at", 0)) < cutoff:
