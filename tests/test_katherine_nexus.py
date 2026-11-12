@@ -111,3 +111,15 @@ def test_format_source_health_summarizes_success_and_failures():
     assert "example.org" in answer
     assert "4/5 correctas" in answer
     assert "126 ms" in answer
+
+def test_natural_language_requires_explicit_katherine_invocation():
+    assert interpret_natural_request("hola, ¿cómo estás?") is None
+    assert interpret_natural_request("pon música para estudiar") is None
+    assert interpret_natural_request("Katherine") == "ayuda"
+    assert interpret_natural_request("Oye Katherine, haz algo inesperado") == (
+        "asistente haz algo inesperado"
+    )
+    assert interpret_natural_request("kAtHeRiNe: consulta la enciclopedia de Genshin sobre Cyno") == (
+        "enciclopedia cyno"
+    )
+
