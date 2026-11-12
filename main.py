@@ -13172,7 +13172,7 @@ async def handle_command(event: dict, source: str):
                 "También puedes dirigirte a Katherine: «Katherine, ...». La mención aislada no activa el bot.",
                 f"{PREFIX}ayuda / comandos — muestra este catálogo.",
                 f"{PREFIX}miuid / mi-id / mi_uid — muestra tu UID real de Anarchy Apps.",
-                f"{PREFIX}asistente <consulta> — consulta el núcleo conversacional de Katherine.",
+                f"{PREFIX}asistente <consulta> — consulta el núcleo conversacional y ejecuta hasta tres pasos compatibles en orden.",
             ]),
             ("01 · GENSHIN IMPACT · GUÍAS Y ARCHIVO", [
                 f"{PREFIX}guia <personaje> — guía de build, armas, artefactos, talentos y equipos.",
