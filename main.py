@@ -35,7 +35,6 @@ from fastapi.responses import JSONResponse
 # ---------------------------------------------------------------------------
 API = "https://api.anarchyapps.org/bot-api/v1"
 GAME_API = "https://genshin-db-api.vercel.app/api/v5"
-ENKA_API = "https://enka.network/api"
 PORT = int(os.getenv("PORT", "3000"))
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 COMMUNITY_TOKEN = os.getenv("COMMUNITY_BOT_TOKEN", "").strip()
@@ -340,7 +339,6 @@ send_history_chat = defaultdict(deque)
 cache: dict[str, tuple[float, Any]] = {}
 polls: dict[str, dict] = {}
 poll_button_map: dict[str, str] = {}
-enka_cache: dict[str, tuple[float, Any]] = {}
 
 # Contadores del proceso actual. Se reinician cuando Render reinicia el servicio.
 metrics = defaultdict(int)
@@ -506,7 +504,7 @@ def get_container_memory_usage() -> str:
 def cleanup_expired_state():
     """Elimina cachés, encuestas, partidas y métricas temporales vencidas."""
     now = time.time()
-    for store in (cache, enka_cache):
+    for store in (cache,):
         for key, item in list(store.items()):
             if not isinstance(item, tuple) or len(item) < 2 or item[0] <= now:
                 store.pop(key, None)
@@ -651,7 +649,6 @@ async def build_status_message(source: str, nickname: str) -> str:
         "💾 DATOS",
         f"• SQLite: {db_line}",
         f"• Caché Genshin: {len(cache)} entradas",
-        f"• Caché Enka: {len(enka_cache)} entradas",
         "",
         "🔐 CONFIGURACIÓN",
         f"• Python: {sys.version.split()[0]} | PID: {os.getpid()}",
@@ -1204,50 +1201,6 @@ async def weapon_stats(query: str):
 
 async def get_character(query: str):
     return await game_data("characters", query)
-
-
-# ---------------------------------------------------------------------------
-# ENKA NETWORK
-# ---------------------------------------------------------------------------
-async def get_enka(uid: str, info_only: bool = False):
-    cache_key = f"{uid}:{'info' if info_only else 'full'}"
-    cached = enka_cache.get(cache_key)
-
-    if cached and cached[0] > time.time():
-        return cached[1], None
-
-    url = f"{ENKA_API}/uid/{uid}/" + ("?info" if info_only else "")
-
-    headers = {
-        "User-Agent": "Katherine-AnarchyBot/2.0 (community bot; contact through Anarchy Apps)"
-    }
-
-    try:
-        response = await external_request(
-            "GET", url, headers=headers, timeout=20
-        )
-
-        if response.status_code != 200:
-            return None, response.status_code
-
-        data = response.json()
-        ttl = data.get("ttl", 300) if isinstance(data, dict) else 300
-
-        try:
-            ttl = max(60, min(int(ttl), 3600))
-        except (ValueError, TypeError):
-            ttl = 300
-
-        enka_cache[cache_key] = (time.time() + ttl, data)
-        if len(enka_cache) > 300:
-            cleanup_expired_state()
-            while len(enka_cache) > 300:
-                enka_cache.pop(next(iter(enka_cache)))
-        return data, None
-
-    except Exception as exc:
-        logging.warning("Enka UID %s: %s", uid, exc)
-        return None, 500
 
 
 def format_number(value):
@@ -8019,167 +7972,6 @@ async def handle_command(event: dict, source: str):
         )
         return
 
-    if command == "!genshinuid":
-        if not query:
-            user = get_user(uid)
-
-            await send_message(
-                thread,
-                f"UID vinculado: {user['genshin_uid'] or 'ninguno'}. "
-                "Usa !genshinuid 123456789 para vincularlo o !genshinuid borrar.",
-                source,
-                reply
-            )
-            return
-
-        value = query.strip()
-
-        if value.lower() in ("borrar", "eliminar", "off"):
-            update_user_field(uid, "genshin_uid", "")
-            await send_message(
-                thread,
-                "Tu UID de Genshin fue desvinculado.",
-                source,
-                reply
-            )
-            return
-
-        if not re.fullmatch(r"\d{8,10}", value):
-            await send_message(
-                thread,
-                "El UID debe contener entre 8 y 10 dígitos.",
-                source,
-                reply
-            )
-            return
-
-        update_user_field(uid, "genshin_uid", value)
-
-        await send_message(
-            thread,
-            "UID guardado. Usa !ficha para consultar los datos públicos de tu perfil.",
-            source,
-            reply
-        )
-        return
-
-    # -----------------------------------------------------------------------
-    # FICHA DE JUGADOR EN ENKA
-    # -----------------------------------------------------------------------
-    if command == "!ficha":
-        requested_uid = (
-            query.strip()
-            if query
-            else (get_user(uid) or {}).get("genshin_uid", "")
-        )
-
-        if not re.fullmatch(r"\d{8,10}", requested_uid or ""):
-            await send_message(
-                thread,
-                "Uso: !ficha UID o vincula primero tu cuenta con !genshinuid 123456789.",
-                source,
-                reply
-            )
-            return
-
-        data, status = await get_enka(requested_uid, info_only=True)
-
-        if not data:
-            messages = {
-                400: "El UID no tiene un formato válido.",
-                404: "No se encontró esa cuenta.",
-                424: "Enka está en mantenimiento por una actualización del juego.",
-                429: "Enka limitó temporalmente las consultas. Intenta más tarde."
-            }
-
-            await send_message(
-                thread,
-                messages.get(status, f"No se pudo consultar Enka (HTTP {status})."),
-                source,
-                reply
-            )
-            return
-
-        player = data.get("playerInfo") or {}
-
-        lines = [
-            f"FICHA DE VIAJERO — {player.get('nickname') or 'Jugador'}",
-            f"UID: {requested_uid}"
-        ]
-
-        if player.get("level") is not None:
-            lines.append(f"Rango de aventura: {player.get('level')}")
-
-        if player.get("worldLevel") is not None:
-            lines.append(f"Nivel de mundo: {player.get('worldLevel')}")
-
-        if player.get("finishAchievementNum") is not None:
-            lines.append(f"Logros: {player.get('finishAchievementNum')}")
-
-        if player.get("towerFloorIndex") is not None:
-            lines.append(
-                f"Abismo: piso {player.get('towerFloorIndex')}, "
-                f"sala {player.get('towerLevelIndex', '?')}"
-            )
-
-        if player.get("signature"):
-            lines.append(f"Firma: {str(player['signature'])[:180]}")
-
-        lines.append("Datos públicos obtenidos desde Enka.Network.")
-
-        await send_message(
-            thread,
-            "\n".join(lines),
-            source,
-            reply
-        )
-        return
-
-    if command == "!abismo":
-        requested_uid = (
-            query.strip()
-            if query
-            else (get_user(uid) or {}).get("genshin_uid", "")
-        )
-
-        if not re.fullmatch(r"\d{8,10}", requested_uid or ""):
-            await send_message(
-                thread,
-                "Uso: !abismo UID o vincula tu cuenta con !genshinuid 123456789.",
-                source,
-                reply
-            )
-            return
-
-        data, status = await get_enka(requested_uid, info_only=True)
-
-        if not data:
-            await send_message(
-                thread,
-                f"No pude consultar Enka (HTTP {status}).",
-                source,
-                reply
-            )
-            return
-
-        player = data.get("playerInfo") or {}
-        floor = player.get("towerFloorIndex")
-        chamber = player.get("towerLevelIndex")
-
-        if floor is None:
-            answer = "Enka no devolvió datos del Abismo para ese perfil."
-        else:
-            answer = (
-                "PROGRESO DEL ABISMO\n"
-                f"Piso: {floor}\n"
-                f"Sala: {chamber if chamber is not None else 'No disponible'}\n"
-                f"Logros: {player.get('finishAchievementNum', 'No disponible')}\n\n"
-                "Datos del perfil público de Enka; no incluye equipos ni estrellas por sala."
-            )
-
-        await send_message(thread, answer, source, reply)
-        return
-
     # -----------------------------------------------------------------------
     # AFINIDAD Y REGALOS
     # -----------------------------------------------------------------------
@@ -8664,234 +8456,6 @@ async def handle_command(event: dict, source: str):
             return
 
         await send_message(thread, answer, source, reply)
-        return
-
-    # -----------------------------------------------------------------------
-    # GENSHIN IMPACT: BUILD REAL DESDE EL ESCAPARATE DE ENKA
-    # -----------------------------------------------------------------------
-    if command == "!build":
-        if not query:
-            await send_message(
-                thread,
-                "Uso: !build personaje. Primero vincula tu UID con "
-                "!genshinuid 123456789; la build se lee del escaparate público de Enka.",
-                source,
-                reply
-            )
-            return
-
-        user = get_user(uid) or {}
-        game_uid = user.get("genshin_uid", "")
-
-        if not game_uid:
-            await send_message(
-                thread,
-                "Primero vincula tu UID con !genshinuid 123456789.",
-                source,
-                reply
-            )
-            return
-
-        character = await get_character(query)
-
-        if not isinstance(character, dict):
-            await send_message(
-                thread,
-                f"No encontré al personaje «{query}» en la base de datos.",
-                source,
-                reply
-            )
-            return
-
-        data, status = await get_enka(game_uid, info_only=False)
-
-        if not data:
-            messages = {
-                404: "No se encontró esa cuenta.",
-                424: "Enka está en mantenimiento por una actualización.",
-                429: "Enka limitó las consultas. Intenta más tarde."
-            }
-
-            await send_message(
-                thread,
-                messages.get(status, f"No pude leer el escaparate (HTTP {status})."),
-                source,
-                reply
-            )
-            return
-
-        avatar_id = character.get("id")
-        avatars = data.get("avatarInfoList") or []
-
-        avatar = next(
-            (
-                x for x in avatars
-                if str(x.get("avatarId") or x.get("avatarID")) == str(avatar_id)
-            ),
-            None
-        )
-
-        if not avatar:
-            await send_message(
-                thread,
-                f"{character.get('name', query)} no aparece en el escaparate "
-                "público de ese UID. Añádelo al escaparate dentro del juego y vuelve a intentar.",
-                source,
-                reply
-            )
-            return
-
-        props = avatar.get("propMap") or {}
-        fight = avatar.get("fightPropMap") or {}
-
-        def stat(*keys):
-            for key in keys:
-                value = fight.get(key)
-                if value is not None:
-                    return value
-            return None
-
-        level = None
-
-        for key in ("4001", "1002", "1"):
-            item = props.get(key)
-
-            if isinstance(item, dict) and item.get("val") is not None:
-                level = item.get("val")
-                break
-
-        equip = avatar.get("equipList") or []
-
-        weapon = next(
-            (
-                x for x in equip
-                if (x.get("flat") or {}).get("itemType") == "ITEM_WEAPON"
-            ),
-            None
-        )
-
-        lines = [
-            f"BUILD DEL ESCAPARATE — {character.get('name', query)}",
-            f"UID: {game_uid}"
-        ]
-
-        if level is not None:
-            lines.append(f"Nivel: {level}")
-
-        stats_to_show = [
-            (("2000",), "Vida"),
-            (("2001",), "ATQ"),
-            (("2002",), "DEF"),
-            (("28",), "Maestría elemental"),
-            (("20",), "Prob. CRIT"),
-            (("22",), "Daño CRIT"),
-            (("23",), "Recarga")
-        ]
-
-        for keys, label in stats_to_show:
-            value = stat(*keys)
-
-            if value is not None:
-                suffix = "%" if label in (
-                    "Prob. CRIT",
-                    "Daño CRIT",
-                    "Recarga"
-                ) else ""
-
-                if suffix and float(value) <= 5:
-                    shown = f"{float(value)*100:.1f}{suffix}"
-                else:
-                    shown = f"{float(value):.1f}{suffix}"
-
-                lines.append(f"{label}: {shown}")
-
-        if weapon:
-            weapon_data = weapon.get("weapon") or {}
-
-            refinement_value = int(
-                next(
-                    iter(
-                        (weapon_data.get("affixMap") or {"1": 0}).values()
-                    )
-                )
-            ) + 1
-
-            weapon_name = (weapon.get("flat") or {}).get("nameText") or "Arma equipada"
-            weapon_rarity = (weapon.get("flat") or {}).get("rankLevel")
-            lines.append(
-                f"Arma: {weapon_name} | nivel {weapon_data.get('level', '?')} "
-                f"| R{refinement_value}"
-                + (f" | {weapon_rarity}★" if weapon_rarity else "")
-            )
-
-        artifact_slots = {
-            "EQUIP_BRACER": "Flor",
-            "EQUIP_NECKLACE": "Pluma",
-            "EQUIP_SHOES": "Reloj",
-            "EQUIP_RING": "Copa",
-            "EQUIP_DRESS": "Corona"
-        }
-
-        for item in equip:
-            flat = item.get("flat") or {}
-
-            if flat.get("itemType") != "ITEM_RELIQUARY":
-                continue
-
-            main = flat.get("reliquaryMainstat") or {}
-
-            prop = str(
-                main.get("mainPropId")
-                or main.get("propType")
-                or "Estadística"
-            )
-
-            val = main.get("statValue", main.get("propValue"))
-            slot = artifact_slots.get(flat.get("equipType"), "Artefacto")
-
-            if val is not None:
-                main_text = (
-                    f"{prop.replace('FIGHT_PROP_', '').replace('_', ' ')} "
-                    f"{float(val):g}"
-                )
-            else:
-                main_text = "Principal no disponible"
-
-            level_info = (item.get("reliquary") or {}).get("level")
-            substats = flat.get("reliquarySubstats") or []
-            sub_text = []
-            for sub in substats[:4]:
-                if not isinstance(sub, dict):
-                    continue
-                sub_name = str(sub.get("appendPropId") or sub.get("propType") or "Substat")
-                sub_value = sub.get("statValue", sub.get("value"))
-                if sub_value is not None:
-                    sub_text.append(
-                        f"{sub_name.replace('FIGHT_PROP_', '').replace('_', ' ')} {float(sub_value):g}"
-                    )
-            set_name = flat.get("setNameText")
-            artifact_line = f"{slot}: {main_text}"
-            if level_info is not None:
-                artifact_line += f" (+{level_info})"
-            if sub_text:
-                artifact_line += " | " + ", ".join(sub_text)
-            if set_name:
-                artifact_line += f" | {set_name}"
-            lines.append(artifact_line)
-
-        lines.append(f"Piezas equipadas detectadas: {len(equip)}")
-        lines.append(f"Escaparate: https://enka.network/u/{game_uid}/")
-        lines.append(
-            "Solo se muestran personajes del escaparate público. "
-            "Enka aplica límites y caché por UID."
-        )
-
-        await send_message(
-            thread,
-            "\n".join(lines),
-            source,
-            reply
-        )
         return
 
     # -----------------------------------------------------------------------
