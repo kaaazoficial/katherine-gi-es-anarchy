@@ -1672,17 +1672,6 @@ async def send_message(
         return None
 
     content = sanitize_chat_text(content)
-    capture = AI_TOOL_OUTPUT_CAPTURE.get()
-    if capture is not None and content:
-        normalized_capture = content.strip()
-        is_progress = (
-            normalized_capture.endswith("…")
-            or normalized_capture.lower().startswith(
-                ("preparando ", "buscando ", "procesando ")
-            )
-        )
-        if normalized_capture and not is_progress and len(capture) < 8:
-            capture.append(normalized_capture[:2000])
     parts = split_message_content(content, 1800)
     if not parts:
         return None
@@ -1790,6 +1779,20 @@ async def send_message(
                         result
                     )
                 return result
+
+    # Solo exponer al contexto de IA los resultados cuya entrega completa
+    # confirmó Anarchy Apps. Los envíos fallidos no deben convertirse en memoria.
+    capture = AI_TOOL_OUTPUT_CAPTURE.get()
+    if capture is not None and content:
+        normalized_capture = content.strip()
+        is_progress = (
+            normalized_capture.endswith("…")
+            or normalized_capture.lower().startswith(
+                ("preparando ", "buscando ", "procesando ")
+            )
+        )
+        if normalized_capture and not is_progress and len(capture) < 8:
+            capture.append(normalized_capture[:2000])
 
     return last_result
 
