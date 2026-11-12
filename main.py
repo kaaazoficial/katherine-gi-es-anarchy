@@ -1381,6 +1381,95 @@ def split_message_content(content: str, limit: int = 2000) -> list[str]:
     return chunks
 
 
+# ---------------------------------------------------------------------------
+# SALIDA SEGURA DE CHAT · SUPRESIÓN GLOBAL DE ENLACES
+# ---------------------------------------------------------------------------
+CHAT_URL_TOKEN_RE = re.compile(
+    r"""(?ix)
+    (?:https?|ftp)://[^\s<>{}\[\]\"']+
+    |(?<![\w@])www\.[^\s<>{}\[\]\"']+
+    """
+)
+CHAT_BARE_DOMAIN_RE = re.compile(
+    r"""(?ix)
+    (?<![\w@])
+    (?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+
+    [a-z]{2,24}
+    (?::\d{2,5})?
+    (?:/[^\s<>{}\[\]\"']*)?
+    """
+)
+CHAT_NON_DOMAIN_SUFFIXES = {
+    "py", "js", "ts", "tsx", "jsx", "json", "yaml", "yml", "toml",
+    "md", "txt", "csv", "xml", "html", "css", "sql", "sh", "bat",
+    "exe", "dll", "so", "zip", "rar", "mp3", "wav", "ogg", "flac",
+    "m4a", "aac", "opus", "png", "jpg", "jpeg", "webp", "gif", "svg",
+    "pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx"
+}
+
+
+def sanitize_chat_text(content: Any) -> str:
+    """Remove clickable links from chat output while keeping their readable labels.
+
+    This is an output-only filter: API endpoints, source URLs, downloads and
+    internal navigation continue to work inside the bot.
+    """
+    text = str(content or "")
+
+    # Keep the human-readable label of Markdown links and images.
+    text = re.sub(
+        r"(?is)!?\\[([^\\]\\n]*)\\]\\(\\s*(?:<[^>]*>|[^)]*)\\s*\\)",
+        r"\\1",
+        text,
+    )
+
+    # Keep anchor text, but discard the HTML link wrapper and destination.
+    text = re.sub(r"(?is)<a\\b[^>]*>(.*?)</a>", r"\\1", text)
+
+    # Remove Markdown reference definitions that would otherwise leave links.
+    text = re.sub(
+        r"(?im)^\\s*\\[[^]\\n]+\\]:\\s*(?:https?://|www\\.)\\S+.*$",
+        "",
+        text,
+    )
+
+    def strip_url_token(match):
+        token = match.group(0)
+        trailing = ""
+        while token and token[-1] in ".,;:!?":
+            trailing = token[-1] + trailing
+            token = token[:-1]
+        while token.endswith((")", "]", "}")):
+            closing = token[-1]
+            opening = {")": "(", "]": "[", "}": "{"}[closing]
+            if token.count(closing) > token.count(opening):
+                trailing = closing + trailing
+                token = token[:-1]
+            else:
+                break
+        return trailing
+
+    # Remove explicit schemes and www links first.
+    text = CHAT_URL_TOKEN_RE.sub(strip_url_token, text)
+
+    # Also catch naked domains, invite links and domains with a path.
+    def strip_bare_domain(match):
+        token = match.group(0)
+        suffix = token.rsplit(".", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+        if suffix in CHAT_NON_DOMAIN_SUFFIXES:
+            return token
+        return strip_url_token(match)
+
+    text = CHAT_BARE_DOMAIN_RE.sub(strip_bare_domain, text)
+
+    # Remove link-only wrappers left after a URL was stripped.
+    text = re.sub(r"\\(\\s*\\)|\\[\\s*\\]", "", text)
+    text = re.sub(r"[ \\t]{2,}", " ", text)
+    text = re.sub(r" *([,.;:!?])", r"\\1", text)
+    text = re.sub(r"\\n[ \\t]*\\n(?:[ \\t]*\\n)+", "\\n\\n", text)
+    return text.strip()
+
+
 async def send_message(
     thread_id: str,
     content: str,
@@ -1393,6 +1482,7 @@ async def send_message(
     if not thread_id:
         return None
 
+    content = sanitize_chat_text(content)
     parts = split_message_content(content, 2000)
     if not parts:
         return None
@@ -1401,7 +1491,7 @@ async def send_message(
         buttons = [
             {
                 "id": str(b["id"])[:32],
-                "label": str(b["label"])[:40]
+                "label": (sanitize_chat_text(b.get("label") or "Opción") or "Opción")[:40]
             }
             for b in buttons[:5]
             if isinstance(b, dict) and b.get("id") is not None
@@ -1527,7 +1617,7 @@ async def update_progress_message(context: dict | None, content: str) -> bool:
         "PATCH",
         f"/threads/{context['thread_id']}/messages/{context['message_id']}",
         context.get("source", "developer"),
-        {"content": str(content)[:2000]},
+        {"content": sanitize_chat_text(content)[:2000]},
     )
     if result.get("ok"):
         metrics["progress_edits"] += 1
