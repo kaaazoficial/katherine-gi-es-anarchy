@@ -7862,6 +7862,498 @@ async def fetch_kqm_teams(character: dict | None, query: str, name: str, key: st
 
 
 
+
+# ---------------------------------------------------------------------------
+# RESPALDO AMPLIADO DE BUILDS: GENSHIN.GG E ICY VEINS
+# ---------------------------------------------------------------------------
+GENSHIN_GG_CHARACTER_BASE = "https://genshin.gg/characters/"
+ICY_VEINS_GUIDE_BASE = "https://www.icy-veins.com/genshin-impact/"
+COMMUNITY_GUIDE_CACHE_TTL = 21600
+
+
+def community_guide_slug_candidates(character, query: str, name: str, key: str):
+    """Genera slugs alternativos para nombres localizados y nombres oficiales."""
+    raw_values = [name, query, key]
+    if isinstance(character, dict):
+        raw_values.extend([
+            character.get("id"),
+            character.get("name"),
+            character.get("fullname")
+        ])
+
+    aliases = {
+        "raiden": ["raiden-shogun", "shogun-raiden"],
+        "raiden-shogun": ["shogun-raiden", "raiden"],
+        "shogun-raiden": ["raiden-shogun", "raiden"],
+        "kazuha": ["kaedehara-kazuha"],
+        "kaedehara-kazuha": ["kazuha"],
+        "ayaka": ["kamisato-ayaka"],
+        "kamisato-ayaka": ["ayaka"],
+        "ayato": ["kamisato-ayato"],
+        "kamisato-ayato": ["ayato"],
+        "kokomi": ["sangonomiya-kokomi"],
+        "sangonomiya-kokomi": ["kokomi"],
+        "childe": ["tartaglia"],
+        "tartaglia": ["childe"],
+        "hutao": ["hu-tao"],
+        "hu-tao": ["hutao"],
+        "itto": ["arataki-itto"],
+        "arataki-itto": ["itto"],
+        "wanderer": ["scaramouche"],
+        "scaramouche": ["wanderer"],
+        "alhacen": ["alhaitham"],
+        "alhaitham": ["alhacen"],
+        "yunjin": ["yun-jin"],
+        "yun-jin": ["yunjin"]
+    }
+
+    candidates = []
+    for value in raw_values:
+        if not value:
+            continue
+        normalized = unicodedata.normalize("NFKD", str(value))
+        normalized = normalized.encode("ascii", "ignore").decode("ascii")
+        slug = re.sub(r"[^a-z0-9]+", "-", normalized.casefold()).strip("-")
+        if slug and slug not in candidates:
+            candidates.append(slug)
+        for alternative in aliases.get(slug, []):
+            if alternative not in candidates:
+                candidates.append(alternative)
+
+    return candidates[:6]
+
+
+class CommunityGuideHTMLParser(HTMLParser):
+    """Extrae secciones de builds desde páginas HTML públicas."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.current_section = None
+        self.heading_tag = None
+        self.heading_parts = []
+        self.anchor_parts = None
+        self.ignored_tag = None
+        self.sections = {
+            "weapons": [],
+            "artifacts": [],
+            "stats": [],
+            "talents": [],
+            "teams": []
+        }
+        self.headings = {
+            "weapons": [],
+            "artifacts": [],
+            "stats": [],
+            "talents": [],
+            "teams": []
+        }
+        self.anchors = {
+            "weapons": [],
+            "artifacts": [],
+            "stats": [],
+            "talents": [],
+            "teams": []
+        }
+
+    @staticmethod
+    def classify_heading(value: str):
+        title = re.sub(r"\s+", " ", str(value or "")).casefold()
+        if "teammate" in title or "team mate" in title:
+            return None
+        if "weapon" in title:
+            return "weapons"
+        if "artifact" in title or "artefact" in title:
+            if any(word in title for word in ("stat", "main", "substat")):
+                return "stats"
+            return "artifacts"
+        if any(word in title for word in (
+            "team", "teambuild", "composition", "compositions"
+        )):
+            return "teams"
+        if "talent" in title and any(word in title for word in (
+            "priority", "talents", "prioridad"
+        )):
+            return "talents"
+        if "stat priority" in title or "best stats" in title:
+            return "stats"
+        return None
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style", "noscript"):
+            self.ignored_tag = tag
+            return
+
+        if re.fullmatch(r"h[1-6]", tag):
+            self.heading_tag = tag
+            self.heading_parts = []
+            return
+
+        if self.ignored_tag:
+            return
+
+        if tag == "a" and self.current_section:
+            self.anchor_parts = []
+
+        if tag == "img" and self.current_section:
+            attributes = dict(attrs)
+            alt = re.sub(r"\s+", " ", str(attributes.get("alt") or "")).strip()
+            if alt and alt.casefold() not in ("image", "icon"):
+                self.sections[self.current_section].append(alt)
+                if self.anchor_parts is not None:
+                    self.anchor_parts.append(alt)
+
+    def handle_data(self, data):
+        if self.ignored_tag:
+            return
+        if self.heading_tag:
+            self.heading_parts.append(data)
+            return
+
+        value = re.sub(r"\s+", " ", str(data or "")).strip()
+        if value and self.current_section:
+            self.sections[self.current_section].append(value)
+            if self.anchor_parts is not None:
+                self.anchor_parts.append(value)
+
+    def handle_endtag(self, tag):
+        if self.ignored_tag:
+            if tag == self.ignored_tag:
+                self.ignored_tag = None
+            return
+
+        if self.heading_tag == tag:
+            title = re.sub(
+                r"\s+", " ", "".join(self.heading_parts)
+            ).strip()
+            section = self.classify_heading(title)
+            if section:
+                self.current_section = section
+            if title and self.current_section:
+                self.headings[self.current_section].append(title)
+            self.heading_tag = None
+            self.heading_parts = []
+            return
+
+        if tag == "a" and self.anchor_parts is not None:
+            label = re.sub(
+                r"\s+", " ", " ".join(self.anchor_parts)
+            ).strip()
+            if label and self.current_section:
+                self.anchors[self.current_section].append(label)
+            self.anchor_parts = None
+
+
+def community_guide_entries(parser: CommunityGuideHTMLParser, section: str,
+                            maximum: int = 7):
+    """Obtiene nombres cortos sin duplicar alt-text y texto visible."""
+    values = (
+        parser.headings.get(section, [])
+        + parser.sections.get(section, [])
+    )
+    result = []
+    seen = set()
+    ignored_exact = {
+        "weapons", "best weapons", "artifacts", "best artifacts",
+        "artifact sets", "best stats", "stats", "teams", "best teams",
+        "talents", "talent priority", "image", "main dps", "sub dps",
+        "support", "main stats", "substats"
+    }
+    ignored_prefixes = (
+        "base atk", "atk:", "hp:", "def:", "crit rate:",
+        "crit dmg:", "physical dmg:", "2-piece set:", "4-piece set:",
+        "2 piece set:", "4 piece set:", "sands:", "goblet:",
+        "circlet:", "substats:", "substats priority:"
+    )
+
+    for raw in values:
+        value = html.unescape(str(raw or ""))
+        value = re.sub(r"^\s*image\s*:\s*", "", value, flags=re.I)
+        value = re.sub(r"^\s*\d+\s*[.)-]?\s*", "", value)
+        value = re.sub(r"\s+", " ", value).strip(" \t\r\n:|•-")
+        folded = value.casefold()
+        if not value or folded in ignored_exact:
+            continue
+        if any(folded.startswith(prefix) for prefix in ignored_prefixes):
+            continue
+        if re.fullmatch(r"[\d\s.,%★☆/+-]+", value):
+            continue
+        if len(value) > 68:
+            continue
+        if folded.startswith(("best ", "recommended ", "image ")):
+            continue
+        if value.count(".") > 1 or value.endswith((".", "!", "?")):
+            continue
+        normalized = re.sub(r"\s*\([^)]*\)\s*", " ", folded)
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(value)
+        if len(result) >= maximum:
+            break
+
+    return result
+
+
+def community_guide_stats(parser: CommunityGuideHTMLParser):
+    values = parser.sections.get("stats", [])
+    if not values:
+        return None
+
+    value = re.sub(r"\s+", " ", " ".join(values)).strip()
+    value = re.sub(r"(?i)\bSands(?: of Eon)?\s*:", "Reloj:", value)
+    value = re.sub(r"(?i)\bGoblet(?: of Eonothem)?\s*:", "Copa:", value)
+    value = re.sub(r"(?i)\bCirclet(?: of Logos)?\s*:", "Corona:", value)
+    value = re.sub(r"(?i)\bSubstats?(?: Priority)?\s*:", "Substats:", value)
+    value = re.sub(r"(?i)\bATK\b", "ATQ", value)
+    value = re.sub(r"(?i)\bCryo DMG\b", "Daño Cryo", value)
+    value = re.sub(r"(?i)\bHydro DMG\b", "Daño Hydro", value)
+    value = re.sub(r"(?i)\bPyro DMG\b", "Daño Pyro", value)
+    value = re.sub(r"(?i)\bDendro DMG\b", "Daño Dendro", value)
+    value = re.sub(r"(?i)\bElectro DMG\b", "Daño Electro", value)
+    value = re.sub(r"(?i)\bAnemo DMG\b", "Daño Anemo", value)
+    value = re.sub(r"(?i)\bGeo DMG\b", "Daño Geo", value)
+    return game_excerpt(value, 650) if value else None
+
+
+def community_guide_team_groups(parser: CommunityGuideHTMLParser,
+                                target_slugs: set[str]):
+    """Agrupa los enlaces consecutivos de personajes en equipos de cuatro."""
+    values = []
+    ignored = {
+        "best teams", "team guide", "teams", "show more", "show less",
+        "read more", "team compositions"
+    }
+    for raw in parser.anchors.get("teams", []):
+        value = re.sub(r"\s+", " ", str(raw or "")).strip()
+        if not value or value.casefold() in ignored or len(value) > 35:
+            continue
+        slug = re.sub(r"[^a-z0-9]+", "-", unicodedata.normalize(
+            "NFKD", value
+        ).encode("ascii", "ignore").decode("ascii").casefold()).strip("-")
+        if slug:
+            values.append((value, slug))
+
+    teams = []
+    seen = set()
+    for index in range(max(0, len(values) - 3)):
+        group = values[index:index + 4]
+        if len(group) != 4:
+            continue
+        if group[0][1] not in target_slugs:
+            continue
+        names = [item[0] for item in group]
+        signature = "|".join(name.casefold() for name in names)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        teams.append(" · ".join(names))
+        if len(teams) >= 6:
+            break
+    return teams
+
+
+def parse_community_guide_page(page_html: str, url: str,
+                               target_slugs: set[str] | None = None):
+    parser = CommunityGuideHTMLParser()
+    try:
+        parser.feed(page_html or "")
+        parser.close()
+    except Exception as exc:
+        logging.debug("No se pudo interpretar una guía externa: %s", exc)
+        return None
+
+    weapons = community_guide_entries(parser, "weapons", 7)
+    artifacts = community_guide_entries(parser, "artifacts", 6)
+    talents_raw = " ".join(parser.sections.get("talents", []))
+    talents_raw = re.sub(r"\s+", " ", talents_raw).strip()
+    talents = game_excerpt(talents_raw, 480) if talents_raw else None
+
+    return {
+        "weapons": weapons,
+        "artifacts": artifacts,
+        "stats": community_guide_stats(parser),
+        "talents": talents,
+        "teams": community_guide_team_groups(
+            parser, target_slugs or set()
+        ),
+        "url": url
+    }
+
+
+async def fetch_community_guide_url(url: str, cache_key: str,
+                                    target_slugs: set[str] | None = None):
+    cached = cache.get(cache_key)
+    if cached and cached[0] > time.time():
+        return cached[1]
+
+    try:
+        response = await external_request(
+            "GET",
+            url,
+            timeout=14,
+            follow_redirects=True,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; Katherine-AnarchyBot/4.0)",
+                "Accept": "text/html,application/xhtml+xml"
+            }
+        )
+        if response.status_code != 200:
+            cache[cache_key] = (time.time() + 1800, None)
+            return None
+
+        parsed = parse_community_guide_page(
+            response.text, str(response.url), target_slugs
+        )
+        if not parsed or not any(
+            parsed.get(field)
+            for field in ("weapons", "artifacts", "stats", "talents", "teams")
+        ):
+            cache[cache_key] = (time.time() + 1800, None)
+            return None
+
+        cache[cache_key] = (
+            time.time() + COMMUNITY_GUIDE_CACHE_TTL, parsed
+        )
+        return parsed
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        logging.debug("Fuente de guía no disponible (%s): %s", url, exc)
+        cache[cache_key] = (time.time() + 900, None)
+        return None
+
+
+async def fetch_first_community_guide(base_urls, candidates, cache_prefix,
+                                      target_slugs=None):
+    for slug in candidates[:4]:
+        for suffix in base_urls:
+            url = suffix.format(slug=slug)
+            result = await fetch_community_guide_url(
+                url,
+                f"{cache_prefix}:{slug}:{suffix}",
+                target_slugs
+            )
+            if result:
+                return result
+    return None
+
+
+async def fetch_community_character_guide(
+    character: dict | None,
+    query: str,
+    name: str,
+    key: str,
+    needs: dict
+):
+    """Completa las recomendaciones locales con varias guías públicas."""
+    candidates = community_guide_slug_candidates(
+        character, query, name, key
+    )
+    if not candidates:
+        return {}
+
+    target_slugs = set(candidates)
+    tasks = []
+
+    needs_build = any(needs.get(field) for field in (
+        "weapons", "artifacts", "stats", "talents"
+    ))
+    if needs_build:
+        tasks.extend([
+            (
+                "genshin_gg",
+                fetch_first_community_guide(
+                    [GENSHIN_GG_CHARACTER_BASE + "{slug}/"],
+                    candidates,
+                    "genshin-gg-guide",
+                    target_slugs
+                )
+            ),
+            (
+                "icy_veins",
+                fetch_first_community_guide(
+                    [ICY_VEINS_GUIDE_BASE + "{slug}-guide-best-builds"],
+                    candidates,
+                    "icy-veins-build",
+                    target_slugs
+                )
+            )
+        ])
+
+    if needs.get("teams"):
+        tasks.append((
+            "icy_veins_teams",
+            fetch_first_community_guide(
+                [ICY_VEINS_GUIDE_BASE + "{slug}-team-guide"],
+                candidates,
+                "icy-veins-teams",
+                target_slugs
+            )
+        ))
+
+    fetched = await asyncio.gather(
+        *(task for _, task in tasks),
+        return_exceptions=True
+    )
+    sources = {}
+    for (source_name, _), result in zip(tasks, fetched):
+        if isinstance(result, dict):
+            sources[source_name] = result
+
+    merged = {
+        "weapons": None,
+        "artifacts": None,
+        "stats": None,
+        "talents": None,
+        "teams": None,
+        "sources": []
+    }
+    field_sources = (
+        ("weapons", "weapons"),
+        ("artifacts", "artifacts"),
+        ("stats", "stats"),
+        ("talents", "talents")
+    )
+
+    for field, source_field in field_sources:
+        if not needs.get(field):
+            continue
+        for source_name in ("genshin_gg", "icy_veins"):
+            data = sources.get(source_name) or {}
+            value = data.get(source_field)
+            if value:
+                if isinstance(value, list):
+                    merged[field] = "\n".join(
+                        f"{index}. {item}"
+                        for index, item in enumerate(value, 1)
+                    )
+                else:
+                    merged[field] = value
+                merged["sources"].append(source_name)
+                merged[field + "_url"] = data.get("url")
+                break
+
+    if needs.get("teams"):
+        data = sources.get("icy_veins_teams") or {}
+        if data.get("teams"):
+            merged["teams"] = "\n".join(
+                f"{index}. {item}"
+                for index, item in enumerate(data["teams"], 1)
+            )
+            merged["teams_url"] = data.get("url")
+            merged["sources"].append("icy_veins_teams")
+
+    source_labels = {
+        "genshin_gg": "Genshin.gg",
+        "icy_veins": "Icy Veins",
+        "icy_veins_teams": "Icy Veins · equipos"
+    }
+    merged["source_labels"] = list(dict.fromkeys(
+        source_labels[source] for source in merged["sources"]
+    ))
+    merged["sources"] = list(dict.fromkeys(merged["sources"]))
+    return merged
+
+
 def normalize_character_guide_key(name: str) -> str:
     key = re.sub(r"\s+", " ", str(name).casefold().strip())
     return CHARACTER_GUIDE_ALIASES.get(key, key)
@@ -8407,6 +8899,29 @@ async def handle_command(event: dict, source: str):
         if not team:
             kqm_data = await fetch_kqm_teams(character, query, name, key)
 
+        needs_community = {
+            "artifacts": not bool(artifact) and not bool(
+                helper_data and helper_data.get("artifacts")
+            ),
+            "weapons": not bool(weapons) and not bool(
+                helper_data and helper_data.get("weapons")
+            ),
+            "stats": not bool(artifact) and not bool(
+                helper_data and helper_data.get("artifacts")
+            ),
+            "talents": not bool(priority) and not bool(
+                helper_data and helper_data.get("talents")
+            ),
+            "teams": not bool(team) and not bool(
+                kqm_data and kqm_data.get("teams")
+            )
+        }
+        community_data = None
+        if any(needs_community.values()):
+            community_data = await fetch_community_character_guide(
+                character, query, name, key, needs_community
+            )
+
         if not isinstance(character, dict) and not helper_data and not kqm_data:
             await send_message(
                 thread,
@@ -8443,12 +8958,21 @@ async def handle_command(event: dict, source: str):
             )
         elif helper_data and helper_data.get("artifacts"):
             sections.append(
-                "ARTEFACTOS RECOMENDADOS · FUENTE SECUNDARIA\n"
+                "ARTEFACTOS RECOMENDADOS · GENSHIN IMPACT HELPER TEAM\n"
                 + helper_data["artifacts"]
             )
+        elif community_data and (
+            community_data.get("artifacts") or community_data.get("stats")
+        ):
+            artifact_lines = ["ARTEFACTOS RECOMENDADOS · FUENTES EXTERNAS"]
+            if community_data.get("artifacts"):
+                artifact_lines.append("Sets:\n" + community_data["artifacts"])
+            if community_data.get("stats"):
+                artifact_lines.append("Estadísticas:\n" + community_data["stats"])
+            sections.append("\n".join(artifact_lines))
         else:
             sections.append(
-                "ARTEFACTOS\nNo encontré una recomendación publicada para este personaje."
+                "ARTEFACTOS\nNo se encontró una recomendación verificable en las fuentes consultadas."
             )
 
         if weapons:
@@ -8459,12 +8983,17 @@ async def handle_command(event: dict, source: str):
             )
         elif helper_data and helper_data.get("weapons"):
             sections.append(
-                "ARMAS RECOMENDADAS · FUENTE SECUNDARIA\n"
+                "ARMAS RECOMENDADAS · GENSHIN IMPACT HELPER TEAM\n"
                 + helper_data["weapons"]
+            )
+        elif community_data and community_data.get("weapons"):
+            sections.append(
+                "ARMAS RECOMENDADAS · FUENTES EXTERNAS\n"
+                + community_data["weapons"]
             )
         else:
             sections.append(
-                "ARMAS\nNo encontré una clasificación publicada para este personaje."
+                "ARMAS\nNo se encontró una clasificación verificable en las fuentes consultadas."
             )
 
         if team:
@@ -8478,9 +9007,14 @@ async def handle_command(event: dict, source: str):
                 )
                 + "\nLas composiciones se muestran como aparecen en la guía original."
             )
+        elif community_data and community_data.get("teams"):
+            sections.append(
+                "EQUIPOS RECOMENDADOS · ICY VEINS\n"
+                + community_data["teams"]
+            )
         else:
             sections.append(
-                "EQUIPOS\nNo encontré una composición publicada para este personaje."
+                "EQUIPOS\nNo se encontró una composición verificable en las fuentes consultadas."
             )
 
         if priority:
@@ -8489,12 +9023,17 @@ async def handle_command(event: dict, source: str):
             )
         elif helper_data and helper_data.get("talents"):
             sections.append(
-                "PRIORIDAD DE TALENTOS · FUENTE SECUNDARIA\n"
+                "PRIORIDAD DE TALENTOS · GENSHIN IMPACT HELPER TEAM\n"
                 + helper_data["talents"]
+            )
+        elif community_data and community_data.get("talents"):
+            sections.append(
+                "PRIORIDAD DE TALENTOS · FUENTE EXTERNA\n"
+                + community_data["talents"]
             )
         else:
             sections.append(
-                "PRIORIDAD DE TALENTOS\nNo encontré una prioridad específica publicada."
+                "PRIORIDAD DE TALENTOS\nNo se encontró una prioridad verificable en las fuentes consultadas."
             )
 
         if isinstance(character, dict):
@@ -8581,6 +9120,20 @@ async def handle_command(event: dict, source: str):
                 + kqm_data["url"]
                 + "\nLa guía original puede estar en inglés."
             )
+
+        if community_data:
+            source_lines = []
+            if community_data.get("source_labels"):
+                source_lines.extend(community_data["source_labels"])
+            for field in ("weapons", "artifacts", "stats", "talents", "teams"):
+                url = community_data.get(field + "_url")
+                if url:
+                    source_lines.append(url)
+            if source_lines:
+                sections.append(
+                    "FUENTES DE RESPALDO CONSULTADAS\n"
+                    + "\n".join(dict.fromkeys(source_lines))
+                )
 
         sections.append(
             "RECOMENDACIÓN FINAL\n"
