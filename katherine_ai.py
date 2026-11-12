@@ -37,10 +37,23 @@ ACTION_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "kind": {"type": "string", "enum": ["answer", "command"]},
+        "kind": {"type": "string", "enum": ["answer", "command", "plan"]},
         "answer": {"type": "string"},
         "command": {"type": "string"},
         "args": {"type": "string"},
+        "steps": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "command": {"type": "string"},
+                    "args": {"type": "string"},
+                },
+                "required": ["command", "args"],
+            },
+            "maxItems": 3,
+        },
     },
     "required": ["kind", "answer", "command", "args"],
 }
@@ -78,9 +91,12 @@ def resolve_community_faq(question: str) -> str | None:
 
 BASE_INSTRUCTIONS = """Eres Katherine, un bot de entretenimiento de la comunidad Genshin Impact ES dentro de Anarchy Apps, no un bot de soporte de Anarchy Apps. Tu función es entretener, conversar y ofrecer funciones de IA, música, juegos y herramientas para la comunidad. No centres automáticamente cada conversación en Genshin, Cyno ni un personaje concreto. Si preguntan qué es Anarchy Apps, la respuesta canónica es: "Anarchy apps es una red social para crear comunidades, unirse a ellas y hablar con la gente". Si preguntan quién es tu creador, responde "Mi creador es Sinner". Si preguntan quién eres, preséntate como bot de entretenimiento de Genshin Impact ES con funciones de IA y más.
 Responde en español natural, claro y con personalidad cordial, sin fingir capacidades.
-Puedes contestar directamente o solicitar una herramienta existente mediante el JSON
-estructurado. Nunca inventes resultados, datos actuales, noticias, estadísticas o
-acciones realizadas. Usa enciclopedia, guías, equipos, rotaciones y materiales de Genshin
+Puedes contestar directamente, solicitar una herramienta existente o devolver kind=plan
+con hasta tres pasos ordenados cuando el usuario pida explícitamente varias acciones.
+Cada paso debe usar una herramienta permitida; no incluyas acciones administrativas ni
+simules resultados. Si una acción depende del resultado anterior, usa el contexto obtenido
+antes de decidir el siguiente paso. Nunca inventes resultados, datos actuales, noticias,
+estadísticas o acciones realizadas. Usa enciclopedia, guías, equipos, rotaciones y materiales de Genshin
 únicamente cuando la pregunta trate claramente de Genshin Impact, Teyvat o una entidad
 reconocible del juego. Una pregunta genérica como "qué es", "quién es" o "háblame de"
 NO implica que sea una consulta de Genshin. Nunca uses herramientas de Teyvat para
@@ -448,8 +464,8 @@ class KatherineAI:
         if self.is_groq and not self.uses_groq_strict_schema:
             prompt_instructions += (
                 "\n\nDevuelve únicamente un objeto JSON válido, sin bloques Markdown, "
-                "con estas cuatro claves: kind (answer o command), answer, command y args. "
-                "Todos los valores deben ser cadenas. Si respondes directamente usa kind=answer "
+                "con estas cuatro claves: kind (answer, command o plan), answer, command, args y opcionalmente steps. "
+                "Todos los valores deben ser cadenas, salvo steps que es una lista de objetos command/args. Si respondes directamente usa kind=answer "
                 "y deja command y args vacíos."
             )
 
@@ -534,7 +550,7 @@ class KatherineAI:
         if not isinstance(result, dict):
             raise RuntimeError("La salida de IA no tiene el formato esperado.")
         kind = str(result.get("kind") or "answer").casefold()
-        if kind not in {"answer", "command"}:
+        if kind not in {"answer", "command", "plan"}:
             raise RuntimeError("La salida de IA contiene un tipo de acción no válido.")
         if any(not isinstance(result.get(field, ""), str) for field in ("answer", "command", "args")):
             raise RuntimeError("La salida JSON de IA contiene campos con tipos no válidos.")
@@ -543,6 +559,7 @@ class KatherineAI:
             "answer": str(result.get("answer") or "")[:4000],
             "command": str(result.get("command") or ""),
             "args": str(result.get("args") or "")[:240],
+            "steps": result.get("steps") if isinstance(result.get("steps"), list) else [],
         }
 
     async def assist(
@@ -605,6 +622,46 @@ class KatherineAI:
             validate_ai_tool_call(result["command"], result["args"])
             if result["kind"] == "command" else None
         )
+        if result["kind"] == "plan":
+            raw_steps = result.get("steps") or []
+            validated_steps = []
+            if not isinstance(raw_steps, list) or not 1 <= len(raw_steps) <= 3:
+                raw_steps = []
+            for step in raw_steps:
+                if not isinstance(step, dict):
+                    validated_steps = []
+                    break
+                invocation_step = validate_ai_tool_call(
+                    step.get("command", ""), step.get("args", "")
+                )
+                if not invocation_step:
+                    validated_steps = []
+                    break
+                validated_steps.append(invocation_step)
+            if validated_steps:
+                if not is_genshin_related_request(text) and any(
+                    item.split(maxsplit=1)[0] in GENSHIN_ONLY_TOOL_COMMANDS
+                    for item in validated_steps
+                ):
+                    validated_steps = []
+                if validated_steps:
+                    self._append_history(key, "user", text[:1200])
+                    return {
+                        "kind": "plan",
+                        "answer": "",
+                        "command": "",
+                        "args": "",
+                        "steps": validated_steps,
+                    }
+            self._append_history(key, "user", text[:1200])
+            return {
+                "kind": "answer",
+                "answer": "No pude validar todos los pasos de esa solicitud. No ejecutaré una secuencia parcial; prueba dividiéndola en peticiones más pequeñas.",
+                "command": "",
+                "args": "",
+                "steps": [],
+                "fallback": True,
+            }
         result_answer = str(result.get("answer") or "").strip()
         result_tool_name = invocation.split(maxsplit=1)[0] if invocation else ""
         unrelated_genshin_output = (
