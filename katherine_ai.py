@@ -9,7 +9,7 @@ import time
 from collections import deque
 from typing import Any, Awaitable, Callable
 
-from katherine_topics import is_genshin_related_request
+from katherine_topics import is_genshin_related_request, normalize_topic_text
 from urllib.parse import urlsplit
 
 RequestFunc = Callable[..., Awaitable[Any]]
@@ -45,7 +45,36 @@ ACTION_SCHEMA = {
     "required": ["kind", "answer", "command", "args"],
 }
 
-BASE_INSTRUCTIONS = """Eres Katherine, la asistente de una comunidad de Anarchy Apps.
+def resolve_community_faq(question: str) -> str | None:
+    """Canonical facts about Katherine and her community."""
+    text = normalize_topic_text(question)
+    text = re.sub(r"^katherine\\s+", "", text).strip()
+
+    creator = (
+        "quien es tu creador", "quien fue tu creador", "quien te creo",
+        "quien creo a katherine", "quien te hizo", "quien te desarrollo",
+        "quien te programo",
+    )
+    if any(x in text for x in creator):
+        return "Mi creador es Sinner."
+
+    if "anarchy apps" in text and any(
+        x in text for x in ("que es", "que significa", "para que sirve", "explica", "define")
+    ):
+        return "Anarchy apps es una red social para crear comunidades, unirse a ellas y hablar con la gente"
+
+    if text in ("quien eres", "quien eres tu", "que eres", "que eres tu",
+                "como te llamas", "presentate", "hablame de ti", "dime quien eres"):
+        return (
+            "Soy Katherine, un bot de entretenimiento de la comunidad Genshin Impact ES "
+            "dentro de Anarchy Apps. Tengo funciones de IA, música, juegos y más para "
+            "entretener y acompañar a la comunidad. No soy un bot de ayuda ni de soporte "
+            "de Anarchy Apps."
+        )
+    return None
+
+
+BASE_INSTRUCTIONS = """Eres Katherine, un bot de entretenimiento de la comunidad Genshin Impact ES dentro de Anarchy Apps, no un bot de soporte de Anarchy Apps. Tu función es entretener, conversar y ofrecer funciones de IA, música, juegos y herramientas para la comunidad. No centres automáticamente cada conversación en Genshin, Cyno ni un personaje concreto. Si preguntan qué es Anarchy Apps, la respuesta canónica es: "Anarchy apps es una red social para crear comunidades, unirse a ellas y hablar con la gente". Si preguntan quién es tu creador, responde "Mi creador es Sinner". Si preguntan quién eres, preséntate como bot de entretenimiento de Genshin Impact ES con funciones de IA y más.
 Responde en español natural, claro y con personalidad cordial, sin fingir capacidades.
 Puedes contestar directamente o solicitar una herramienta existente mediante el JSON
 estructurado. Nunca inventes resultados, datos actuales, noticias, estadísticas o
@@ -516,6 +545,12 @@ class KatherineAI:
         text = re.sub(r"\s+", " ", str(request_text or "")).strip()
         if not text:
             return {"kind": "answer", "answer": "Dime qué necesitas y lo vemos.", "command": "", "args": ""}
+        key = str(session_key)
+        faq_answer = resolve_community_faq(text)
+        if faq_answer:
+            self._append_history(key, "user", text[:1200])
+            self._append_history(key, "assistant", faq_answer[:1800])
+            return {"kind": "answer", "answer": faq_answer, "command": "", "args": ""}
         if not self.is_enabled:
             return {
                 "kind": "answer",
@@ -528,7 +563,6 @@ class KatherineAI:
                 "args": "",
                 "fallback": True,
             }
-        key = str(session_key)
         history = self._history(key)
         messages = [*history, {"role": "user", "content": text[:1200]}]
         try:

@@ -364,3 +364,42 @@ async def test_genshin_question_can_still_use_teyvat_tool(monkeypatch):
     result = await ai.assist("quién es Nahida", "room:user", fake_request)
     assert result["kind"] == "command"
     assert result["command"] == "enciclopedia"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("¿Qué es Anarchy Apps?", "Anarchy apps es una red social para crear comunidades, unirse a ellas y hablar con la gente"),
+        ("Katherine, ¿qué es Anarchy Apps?", "Anarchy apps es una red social para crear comunidades, unirse a ellas y hablar con la gente"),
+        ("¿Quién es tu creador?", "Mi creador es Sinner."),
+        ("Katherine, ¿quién te creó?", "Mi creador es Sinner."),
+        ("¿Quién eres?", "Soy Katherine, un bot de entretenimiento de la comunidad Genshin Impact ES dentro de Anarchy Apps. Tengo funciones de IA, música, juegos y más para entretener y acompañar a la comunidad. No soy un bot de ayuda ni de soporte de Anarchy Apps."),
+        ("Katherine, preséntate", "Soy Katherine, un bot de entretenimiento de la comunidad Genshin Impact ES dentro de Anarchy Apps. Tengo funciones de IA, música, juegos y más para entretener y acompañar a la comunidad. No soy un bot de ayuda ni de soporte de Anarchy Apps."),
+    ],
+)
+async def test_katherine_canonical_identity_facts(monkeypatch, question, expected):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+
+    async def unexpected_request(*args, **kwargs):
+        raise AssertionError("La respuesta canónica no debe depender del proveedor.")
+
+    result = await ai.assist(question, "room:verified-user", unexpected_request)
+    assert result["kind"] == "answer"
+    assert result["answer"] == expected
+    assert result["command"] == ""
+
+
+@pytest.mark.asyncio
+async def test_katherine_identity_faq_works_without_ai_credentials(monkeypatch):
+    monkeypatch.delenv("KATHERINE_AI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    ai = KatherineAI()
+
+    async def unexpected_request(*args, **kwargs):
+        raise AssertionError("La FAQ debe funcionar sin credenciales.")
+
+    result = await ai.assist("¿Quién eres?", "room:verified-user", unexpected_request)
+    assert "bot de entretenimiento" in result["answer"]
+    assert "bot de soporte de Anarchy Apps" in result["answer"]
