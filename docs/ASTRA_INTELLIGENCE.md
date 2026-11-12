@@ -20,7 +20,7 @@ Variables:
 - \`KATHERINE_AI_MODEL\`: identificador del modelo disponible en el endpoint configurado; el modo de salida estructurada depende del proveedor/modelo.
 - \`KATHERINE_AI_API_URL\`: endpoint compatible; default \`https://api.openai.com/v1/responses\`.
 
-Sin clave, la IA informa que no está conectada y los comandos clásicos siguen disponibles. No se inserta una clave ficticia ni se copia una credencial al repositorio. A OpenAI se envía store=false; el endpoint Responses de Groq no admite ese parámetro y Katherine lo omite. Ninguna de las dos opciones sustituye la política de retención del proveedor. Las solicitudes envían \`store: false\`.
+Sin clave, la IA informa que no está conectada y los comandos clásicos siguen disponibles. No se inserta una clave ficticia ni se copia una credencial al repositorio. A OpenAI se envía store=false; el endpoint Responses de Groq no admite ese parámetro y Katherine lo omite. Ninguna de las dos opciones sustituye la política de retención del proveedor.
 
 ## Comandos
 - \`!ia estado\`, \`!ia probar\` (administrador; valida la conexión real con el proveedor configurado), \`!ia ayuda\`, \`!ia olvidar\`.
