@@ -164,7 +164,7 @@ class KatherineAI:
 
     @property
     def model(self) -> str:
-        return (os.getenv("KATHERINE_AI_MODEL") or "gpt-4.1-mini").strip()
+        return (os.getenv("KATHERINE_AI_MODEL") or "gpt-5.4-mini").strip()
 
     @property
     def is_enabled(self) -> bool:
@@ -174,7 +174,8 @@ class KatherineAI:
         configured = self.is_enabled
         lines = [
             "KATHERINE AI · ESTADO",
-            f"Proveedor: {'configurado' if configured else 'pendiente de credenciales'}",
+            f"Credencial API: {'detectada' if configured else 'no detectada'}",
+            "Conexión con OpenAI: no comprobada (usa !ia probar).",
             f"Modelo: {self.model if configured else 'no conectado'}",
             "Memoria contextual: temporal, aislada por usuario y sala (15 min).",
             "Almacenamiento de conversaciones: desactivado en la solicitud al proveedor.",
@@ -440,6 +441,7 @@ class KatherineAI:
         content: str,
         request_func: RequestFunc,
         extra_instructions: str = "",
+        rate_key: str | None = None,
     ) -> str:
         instruction = TASK_INSTRUCTIONS.get(task)
         if not instruction:
@@ -451,41 +453,76 @@ class KatherineAI:
             f"Eres un módulo especializado de Katherine. {instruction}\n{extra_instructions}",
             [{"role": "user", "content": text[:10000]}],
             request_func,
+            rate_key=rate_key,
             max_output_tokens=900,
-            cooldown=0,
+            cooldown=5.0,
         )
         if result["kind"] != "answer" or not result["answer"].strip():
             raise RuntimeError("El proveedor IA no devolvió una respuesta de texto.")
         return result["answer"].strip()[:3500]
 
-    async def summarize_chat(self, thread_id: str, request_func: RequestFunc) -> str:
+    async def test_connection(
+        self, request_func: RequestFunc, rate_key: str | None = None
+    ) -> str:
+        """Make one small, non-stored request to verify real provider connectivity."""
+        result = await self._request_json(
+            "Responde exactamente con OK. No solicites herramientas ni añadas explicaciones.",
+            [{"role": "user", "content": "Prueba técnica de conectividad de Katherine."}],
+            request_func,
+            rate_key=rate_key,
+            cooldown=0,
+            max_output_tokens=120,
+        )
+        if result["kind"] != "answer" or not result["answer"].strip():
+            raise RuntimeError("La prueba no recibió una respuesta válida del proveedor.")
+        return result["answer"].strip()
+
+    async def summarize_chat(
+        self, thread_id: str, request_func: RequestFunc, rate_key: str | None = None
+    ) -> str:
         messages = self.analyst_messages(thread_id)
         if not messages:
             return "No hay mensajes temporales para resumir. Activa primero el analizador de esta sala."
         transcript = "\n".join(
             f"{item['author']}: {item['content']}" for item in messages[-100:]
         )
-        return await self.task_response("chat_summary", transcript, request_func)
+        return await self.task_response(
+            "chat_summary", transcript, request_func, rate_key=rate_key
+        )
 
-    async def review_guardian(self, content: str, request_func: RequestFunc) -> str:
+    async def review_guardian(
+        self, content: str, request_func: RequestFunc, rate_key: str | None = None
+    ) -> str:
         if len(str(content or "")) > 1200:
             raise ValueError("El texto de revisión no puede superar 1200 caracteres.")
-        return await self.task_response("guardian", content, request_func)
+        return await self.task_response(
+            "guardian", content, request_func, rate_key=rate_key
+        )
 
-    async def translate(self, target_language: str, content: str, request_func: RequestFunc) -> str:
+    async def translate(
+        self, target_language: str, content: str, request_func: RequestFunc,
+        rate_key: str | None = None,
+    ) -> str:
         if len(str(content or "")) > 2500:
             raise ValueError("La traducción con IA admite hasta 2500 caracteres por solicitud.")
         return await self.task_response(
             "translation",
             f"Idioma de destino: {str(target_language)[:40]}\nTexto:\n{str(content)[:2500]}",
             request_func,
+            rate_key=rate_key,
         )
 
-    async def optimize_music_query(self, content: str, request_func: RequestFunc) -> str:
-        result = await self.task_response("music", content, request_func)
+    async def optimize_music_query(
+        self, content: str, request_func: RequestFunc, rate_key: str | None = None
+    ) -> str:
+        result = await self.task_response("music", content, request_func, rate_key=rate_key)
         query = re.sub(r"\s+", " ", result).strip().strip("\"'")
         query = re.sub(r"https?://\S+|www\.\S+", "", query, flags=re.I).strip()
         return query[:120] or str(content or "")[:120]
 
-    async def explain_diagnostics(self, diagnostics: str, request_func: RequestFunc) -> str:
-        return await self.task_response("diagnostics", diagnostics, request_func)
+    async def explain_diagnostics(
+        self, diagnostics: str, request_func: RequestFunc, rate_key: str | None = None
+    ) -> str:
+        return await self.task_response(
+            "diagnostics", diagnostics, request_func, rate_key=rate_key
+        )
