@@ -8,6 +8,7 @@ import hmac
 import hashlib
 import html
 import random
+import secrets
 import asyncio
 import logging
 import sqlite3
@@ -20,6 +21,18 @@ try:
     import psutil
 except ImportError:
     psutil = None
+
+try:
+    import av as pyav
+    import numpy as np
+    from livekit import rtc as livekit_rtc
+    DJ_IMPORT_ERROR = ""
+except Exception as exc:
+    pyav = None
+    np = None
+    livekit_rtc = None
+    DJ_IMPORT_ERROR = str(exc)
+
 from contextlib import contextmanager
 from pathlib import Path
 from collections import defaultdict, deque
@@ -132,6 +145,12 @@ def init_db():
             guaranteed INTEGER NOT NULL DEFAULT 0,
             updated_at REAL NOT NULL
         )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS reward_claims (
+            uid TEXT NOT NULL,
+            action TEXT NOT NULL,
+            claimed_at REAL NOT NULL,
+            PRIMARY KEY(uid, action)
+        )""")
         # Retira tablas de funciones personales que ya no forman parte del bot.
         for obsolete_table in (
             "saved_builds",
@@ -232,6 +251,50 @@ def add_points(uid: str, amount: int):
         db.execute("UPDATE users SET points=points+? WHERE uid=?", (int(amount), uid))
 
 
+def claim_reward(uid: str, action: str, cooldown: int, low: int, high: int):
+    """Entrega recompensas con cooldown persistente y transacción atómica."""
+    now = time.time()
+    with db_session() as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute(
+            "SELECT claimed_at FROM reward_claims WHERE uid=? AND action=?",
+            (uid, action)
+        ).fetchone()
+        if row:
+            remaining = cooldown - (now - float(row["claimed_at"]))
+            if remaining > 0:
+                return None, int(remaining) + 1
+
+        db.execute(
+            """INSERT INTO reward_claims(uid,action,claimed_at)
+               VALUES(?,?,?)
+               ON CONFLICT(uid,action) DO UPDATE SET claimed_at=excluded.claimed_at""",
+            (uid, action, now)
+        )
+    return random.randint(low, high), 0
+
+
+def transfer_points(sender_uid: str, target_uid: str, amount: int) -> str:
+    """Transfiere puntos atómicamente y nunca permite un saldo negativo."""
+    if amount <= 0 or sender_uid == target_uid:
+        return "invalid"
+    with db_session() as db:
+        db.execute("BEGIN IMMEDIATE")
+        sender = db.execute(
+            "SELECT points FROM users WHERE uid=?", (sender_uid,)
+        ).fetchone()
+        target = db.execute(
+            "SELECT points FROM users WHERE uid=?", (target_uid,)
+        ).fetchone()
+        if not sender or not target:
+            return "missing"
+        if int(sender["points"]) < amount:
+            return "insufficient"
+        db.execute("UPDATE users SET points=points-? WHERE uid=?", (amount, sender_uid))
+        db.execute("UPDATE users SET points=points+? WHERE uid=?", (amount, target_uid))
+    return "ok"
+
+
 def get_affinity(uid: str, target_uid: str) -> int:
     with db_session() as db:
         row = db.execute(
@@ -315,6 +378,11 @@ EXTERNAL_GLOBAL_LIMIT = asyncio.Semaphore(10)
 EXTERNAL_HOST_LIMITS = {}
 SOURCE_HEALTH = {}
 poll_button_map: dict[str, str] = {}
+BUTTON_ACTIONS: dict[str, dict] = {}
+DJ_ROOMS: dict[str, dict] = {}
+DJ_READY_EVENTS: dict[str, asyncio.Event] = {}
+DJ_MUSIC_DIR = Path(os.getenv("DJ_MUSIC_DIR", "music")).resolve()
+DJ_AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".opus"}
 
 # Contadores del proceso actual. Se reinician cuando Render reinicia el servicio.
 metrics = defaultdict(int)
@@ -340,38 +408,38 @@ last_curiosity = None
 # COMANDOS SOCIALES
 # ---------------------------------------------------------------------------
 SOCIAL = {
-    "abrazo": ["abraza con cariño a"],
-    "abrazar": ["abraza con cariño a"],
-    "beso": ["le da un beso a"],
-    "besar": ["le da un beso a"],
-    "patada": ["le da una patada a"],
-    "golpe": ["golpea a"],
-    "cachetada": ["le da una cachetada a"],
-    "acariciar": ["acaricia a"],
-    "mimar": ["mima a"],
-    "morder": ["muerde a"],
-    "consolar": ["consuela a"],
-    "felicitar": ["felicita a"],
-    "saludar": ["saluda a"],
-    "proteger": ["protege a"],
-    "bailar": ["baila con"],
-    "cosquillas": ["le hace cosquillas a"],
-    "chocar": ["choca los cinco con"],
-    "highfive": ["choca los cinco con"],
-    "ayudar": ["ayuda a"],
-    "regalar": ["le hace un regalo a"],
-    "acompañar": ["acompaña a"],
-    "asustar": ["asusta a"],
-    "curar": ["cura a"],
-    "cargar": ["carga a"],
-    "empujar": ["empuja a"],
-    "regañar": ["regaña a"],
-    "admirar": ["admira a"],
-    "apoyar": ["apoya a"],
-    "dormir": ["duerme junto a"],
-    "ignorar": ["ignora a"],
-    "mirar": ["mira a"],
-    "invitar": ["invita a"]
+    "abrazo": ["abraza con cariño a", "rodea con sus brazos a", "le da un abrazo reconfortante a"],
+    "abrazar": ["abraza con cariño a", "rodea con sus brazos a", "le da un abrazo reconfortante a"],
+    "beso": ["le da un beso a", "deja un beso cariñoso a", "se acerca y besa suavemente a"],
+    "besar": ["le da un beso a", "deja un beso cariñoso a", "se acerca y besa suavemente a"],
+    "patada": ["le da una patada ficticia a", "lanza una patada teatral hacia", "intenta sorprender con una patada a"],
+    "golpe": ["golpea de broma a", "lanza un golpe ficticio hacia", "reta a un combate amistoso a"],
+    "cachetada": ["le da una cachetada de broma a", "finge una cachetada dramática a", "le dedica una cachetada de telenovela a"],
+    "acariciar": ["acaricia suavemente a", "le da unas caricias a", "le acomoda el cabello a"],
+    "mimar": ["mima con cariño a", "consiente un momento a", "llena de atenciones a"],
+    "morder": ["le da una mordida juguetona a", "finge morder a", "intenta darle un mordisquito a"],
+    "consolar": ["consuela a", "acompaña con cariño a", "intenta animar a"],
+    "felicitar": ["felicita con entusiasmo a", "reconoce el esfuerzo de", "celebra los logros de"],
+    "saludar": ["saluda amistosamente a", "le dedica un saludo a", "levanta la mano para saludar a"],
+    "proteger": ["protege a", "se coloca delante de", "promete cuidar a"],
+    "bailar": ["baila con", "invita a bailar a", "improvisa unos pasos junto a"],
+    "cosquillas": ["le hace cosquillas a", "intenta hacer reír con cosquillas a", "ataca con cosquillas a"],
+    "chocar": ["choca los cinco con", "celebra chocando la mano con", "saluda con un high five a"],
+    "highfive": ["choca los cinco con", "celebra chocando la mano con", "saluda con un high five a"],
+    "ayudar": ["ayuda a", "se ofrece para ayudar a", "echa una mano a"],
+    "regalar": ["le hace un regalo simbólico a", "sorprende con un obsequio a", "prepara un pequeño presente para"],
+    "acompañar": ["acompaña a", "se queda un rato junto a", "decide no dejar solo a"],
+    "asustar": ["intenta asustar a", "aparece de repente frente a", "prepara un susto para"],
+    "curar": ["cura a", "atiende las heridas de", "prepara un remedio para"],
+    "cargar": ["carga en brazos a", "ayuda a levantarse a", "lleva con cuidado a"],
+    "empujar": ["empuja suavemente a", "da un empujoncito a", "reta a moverse a"],
+    "regañar": ["regaña con seriedad a", "le llama la atención a", "da un pequeño sermón a"],
+    "admirar": ["admira a", "observa con respeto a", "elogia sinceramente a"],
+    "apoyar": ["apoya a", "anima a", "le recuerda que cuenta con el apoyo de"],
+    "dormir": ["duerme junto a", "se queda descansando cerca de", "acompaña mientras descansa a"],
+    "ignorar": ["ignora por completo a", "finge no escuchar a", "decide hacerse el distraído frente a"],
+    "mirar": ["mira fijamente a", "observa con curiosidad a", "dirige su mirada hacia"],
+    "invitar": ["invita a salir a", "propone un plan a", "extiende una invitación a"]
 }
 
 JOKES = [
@@ -488,6 +556,9 @@ def cleanup_expired_state():
         for key, item in list(store.items()):
             if item.get("expires", now + 1) <= now:
                 store.pop(key, None)
+    for key, action in list(BUTTON_ACTIONS.items()):
+        if action.get("expires", now + 1) <= now:
+            BUTTON_ACTIONS.pop(key, None)
     active_poll_ids = set(polls)
     for button_key, poll_id in list(poll_button_map.items()):
         if poll_id not in active_poll_ids:
@@ -948,6 +1019,389 @@ async def send_message(
                 return result
 
     return last_result
+
+
+# ---------------------------------------------------------------------------
+# MENÚS INTERACTIVOS, BOTONES Y REPRODUCTOR DJ
+# ---------------------------------------------------------------------------
+def register_buttons(
+    source: str,
+    thread_id: str,
+    action_type: str,
+    choices: list[dict],
+    payload: dict | None = None,
+    owner_uid: str | None = None,
+    ttl: int = 900
+) -> list[dict]:
+    """Registra acciones efímeras y genera IDs admitidos por Anarchy Apps."""
+    now = time.time()
+    for key, action in list(BUTTON_ACTIONS.items()):
+        if action.get("expires", now + 1) <= now:
+            BUTTON_ACTIONS.pop(key, None)
+
+    buttons = []
+    nonce = secrets.token_hex(5)
+    base_payload = dict(payload or {})
+    for index, option in enumerate(choices[:5]):
+        button_id = f"k{nonce}_{index}"
+        BUTTON_ACTIONS[button_id] = {
+            "type": action_type,
+            "source": source,
+            "thread": str(thread_id),
+            "owner_uid": owner_uid,
+            "payload": {**base_payload, "value": option.get("value")},
+            "created_at": now,
+            "expires": now + ttl
+        }
+        buttons.append({
+            "id": button_id,
+            "label": str(option.get("label") or "Elegir")[:40]
+        })
+
+    while len(BUTTON_ACTIONS) > 2000:
+        oldest = min(
+            BUTTON_ACTIONS,
+            key=lambda key: BUTTON_ACTIONS[key].get("created_at", 0)
+        )
+        BUTTON_ACTIONS.pop(oldest, None)
+    return buttons
+
+
+async def remove_pressed_buttons(event: dict, source: str, remove=True):
+    thread_id = str(event.get("threadId") or "")
+    message_id = str(event.get("messageId") or "")
+    if not thread_id or not message_id:
+        return
+    button_id = str(event.get("buttonId") or "")
+    body = {"removeButtons": True if remove is True else [button_id]}
+    await api(
+        "PATCH",
+        f"/threads/{thread_id}/messages/{message_id}",
+        source,
+        body
+    )
+
+
+MENU_ROOT_CHOICES = [
+    {"label": "Genshin", "value": "genshin"},
+    {"label": "Social", "value": "social"},
+    {"label": "Juegos", "value": "games"},
+    {"label": "Comunidad", "value": "community"},
+    {"label": "Sistema", "value": "system"}
+]
+
+MENU_SECTIONS = {
+    "genshin": {
+        "title": "GENSHIN IMPACT",
+        "description": (
+            "Consultas rápidas disponibles. Para fichas y builds completas, "
+            "indica el nombre del personaje u objeto en el comando."
+        ),
+        "commands": [("Banners", "banner"), ("Calendario", "calendario")]
+    },
+    "social": {
+        "title": "SOCIAL Y PERFILES",
+        "description": (
+            "Usa !interaccion @usuario para abrir acciones con botones. "
+            "También puedes consultar perfiles, afinidad y actividad."
+        ),
+        "commands": [("Mi perfil", "perfil"), ("Ranking", "ranking"), ("Actividad", "actividad")]
+    },
+    "games": {
+        "title": "JUEGOS",
+        "description": "Elige un juego. Las trivias y encuestas admiten botones.",
+        "commands": [
+            ("Trivia", "trivia"),
+            ("Adivina", "adivina"),
+            ("Dado", "dado"),
+            ("Verdad", "verdad"),
+            ("Moneda", "moneda")
+        ]
+    },
+    "community": {
+        "title": "COMUNIDAD",
+        "description": (
+            "Consulta salas, reclama recompensas y revisa tus puntos. "
+            "El sistema económico es ficticio y solo funciona dentro de Katherine."
+        ),
+        "commands": [
+            ("Salas en vivo", "salas"),
+            ("Recompensa diaria", "diario"),
+            ("Trabajar", "trabajar"),
+            ("Mis puntos", "puntos")
+        ]
+    },
+    "system": {
+        "title": "SISTEMA KATHERINE",
+        "description": "Diagnóstico y utilidades del bot.",
+        "commands": [
+            ("Estado", "estado"),
+            ("Fecha de Chile", "fecha"),
+            ("Autotest", "autotest")
+        ]
+    }
+}
+
+
+async def send_interactive_menu(
+    thread_id: str,
+    source: str,
+    raw_uid: str,
+    nickname: str,
+    category: str | None = None,
+    reply_id: str | None = None
+):
+    owner_uid = scoped_uid(f"{source}:{thread_id}", str(raw_uid))
+    if category is None:
+        buttons = register_buttons(
+            source,
+            thread_id,
+            "menu_category",
+            MENU_ROOT_CHOICES,
+            {"raw_uid": str(raw_uid), "nickname": nickname},
+            owner_uid=owner_uid,
+            ttl=1800
+        )
+        await send_message(
+            thread_id,
+            "KATHERINE · MENÚ INTERACTIVO\nSelecciona una categoría:",
+            source,
+            reply_id,
+            buttons
+        )
+        return
+
+    section = MENU_SECTIONS.get(category)
+    if not section:
+        return
+
+    commands = [
+        {"label": label, "value": command}
+        for label, command in section["commands"]
+    ]
+    buttons = register_buttons(
+        source,
+        thread_id,
+        "run_command",
+        commands,
+        {"raw_uid": str(raw_uid), "nickname": nickname},
+        owner_uid=owner_uid,
+        ttl=1800
+    )
+    content = (
+        f"KATHERINE · {section['title']}\n"
+        f"{section['description']}\n\n"
+        + "\n".join(f"• {PREFIX}{command}" for _, command in section["commands"])
+    )
+    if category == "genshin":
+        content += (
+            f"\nPara consultar un personaje: {PREFIX}guia nombre. "
+            f"También: {PREFIX}equipos nombre y {PREFIX}rotacion nombre."
+        )
+    elif category == "social":
+        content += (
+            f"\nInteracciones: {PREFIX}interaccion @usuario. "
+            f"Regalos: {PREFIX}regalo @usuario mensaje."
+        )
+    await send_message(thread_id, content, source, reply_id, buttons)
+
+
+def list_dj_tracks() -> list[str]:
+    DJ_MUSIC_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        return sorted(
+            path.name for path in DJ_MUSIC_DIR.iterdir()
+            if path.is_file() and path.suffix.lower() in DJ_AUDIO_EXTENSIONS
+        )
+    except OSError:
+        return []
+
+
+def resolve_dj_track(name: str) -> Path | None:
+    if not name or Path(name).name != name:
+        return None
+    path = (DJ_MUSIC_DIR / name).resolve()
+    if path.parent != DJ_MUSIC_DIR.resolve():
+        return None
+    if path.suffix.lower() not in DJ_AUDIO_EXTENSIONS:
+        return None
+    try:
+        if not path.is_file() or path.stat().st_size > 80 * 1024 * 1024:
+            return None
+    except OSError:
+        return None
+    return path
+
+
+async def stop_dj_room(
+    thread_id: str,
+    request_leave: bool = True,
+    cancel_playback: bool = True
+):
+    state = DJ_ROOMS.pop(str(thread_id), None)
+    if state:
+        stop_event = state.get("stop_event")
+        if stop_event:
+            stop_event.set()
+
+        task = state.get("task")
+        if (
+            cancel_playback
+            and task
+            and task is not asyncio.current_task()
+            and not task.done()
+        ):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logging.exception("[DJ] Error deteniendo reproducción")
+
+        room = state.get("room")
+        if room is not None:
+            try:
+                await room.disconnect()
+            except Exception:
+                logging.exception("[DJ] Error cerrando LiveKit")
+
+    if request_leave:
+        await api("POST", f"/live-rooms/{thread_id}/leave", "community")
+
+
+async def dj_playback_loop(thread_id: str, file_path: Path, looping: bool, audio_source):
+    state = DJ_ROOMS.get(str(thread_id))
+    if not state:
+        return
+    stop_event = state["stop_event"]
+
+    try:
+        while not stop_event.is_set():
+            container = pyav.open(str(file_path), mode="r")
+            try:
+                audio_stream = next(
+                    (stream for stream in container.streams if stream.type == "audio"),
+                    None
+                )
+                if audio_stream is None:
+                    raise ValueError("El archivo no contiene una pista de audio.")
+
+                resampler = pyav.AudioResampler(
+                    format="s16",
+                    layout="mono",
+                    rate=48000
+                )
+                for decoded in container.decode(audio_stream):
+                    if stop_event.is_set():
+                        break
+                    for frame in resampler.resample(decoded):
+                        samples = np.asarray(frame.to_ndarray(), dtype=np.int16).reshape(-1)
+                        for offset in range(0, len(samples), 480):
+                            if stop_event.is_set():
+                                break
+                            chunk = samples[offset:offset + 480]
+                            if not len(chunk):
+                                continue
+                            audio_frame = livekit_rtc.AudioFrame.create(48000, 1, len(chunk))
+                            destination = np.frombuffer(audio_frame.data, dtype=np.int16)
+                            destination[:len(chunk)] = chunk
+                            await audio_source.capture_frame(audio_frame)
+                    if stop_event.is_set():
+                        break
+            finally:
+                container.close()
+
+            if not looping:
+                break
+
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logging.exception("[DJ] Falló la reproducción de %s", file_path.name)
+    finally:
+        if DJ_ROOMS.get(str(thread_id)) is state:
+            await stop_dj_room(
+                str(thread_id),
+                request_leave=True,
+                cancel_playback=False
+            )
+
+
+async def start_dj_room(thread_id: str, file_path: Path, looping: bool):
+    if not COMMUNITY_TOKEN:
+        return False, "Falta COMMUNITY_BOT_TOKEN en Render."
+    if livekit_rtc is None or pyav is None or np is None:
+        return False, "Faltan dependencias de LiveKit, PyAV o NumPy en Render."
+    if str(thread_id) in DJ_ROOMS:
+        await stop_dj_room(str(thread_id), request_leave=True)
+
+    ready = asyncio.Event()
+    DJ_READY_EVENTS[str(thread_id)] = ready
+    result = await api("POST", f"/live-rooms/{thread_id}/join", "community")
+    if not result.get("ok"):
+        DJ_READY_EVENTS.pop(str(thread_id), None)
+        data = result.get("data") or {}
+        reason = data.get("anarchy:error") or data.get("error") or data.get("message")
+        return False, (
+            f"No pude entrar a la sala (HTTP {result.get('status')}): "
+            f"{reason or 'Error de Anarchy Apps'}."
+        )
+
+    grant = result.get("data") or {}
+    room_url = grant.get("url")
+    room_token = grant.get("token")
+    if not room_url or not room_token:
+        DJ_READY_EVENTS.pop(str(thread_id), None)
+        return False, "Anarchy no devolvió credenciales temporales de LiveKit."
+
+    room = livekit_rtc.Room()
+    try:
+        await room.connect(room_url, room_token)
+        await asyncio.wait_for(ready.wait(), timeout=20)
+        audio_source = livekit_rtc.AudioSource(48000, 1)
+        audio_track = livekit_rtc.LocalAudioTrack.create_audio_track(
+            "katherine-dj",
+            audio_source
+        )
+        await room.local_participant.publish_track(
+            audio_track,
+            livekit_rtc.TrackPublishOptions(
+                source=livekit_rtc.TrackSource.SOURCE_MICROPHONE
+            )
+        )
+        state = {
+            "room": room,
+            "audio_source": audio_source,
+            "audio_track": audio_track,
+            "stop_event": asyncio.Event(),
+            "task": None,
+            "filename": file_path.name,
+            "looping": looping,
+            "started_at": time.time()
+        }
+        DJ_ROOMS[str(thread_id)] = state
+        state["task"] = asyncio.create_task(
+            dj_playback_loop(str(thread_id), file_path, looping, audio_source)
+        )
+        return True, "Reproducción iniciada."
+    except asyncio.TimeoutError:
+        try:
+            await room.disconnect()
+        except Exception:
+            pass
+        await api("POST", f"/live-rooms/{thread_id}/leave", "community")
+        return False, "La sala no confirmó que Katherine pudiera publicar audio."
+    except Exception as exc:
+        try:
+            await room.disconnect()
+        except Exception:
+            pass
+        await api("POST", f"/live-rooms/{thread_id}/leave", "community")
+        logging.exception("[DJ] No se pudo conectar a LiveKit")
+        return False, f"No pude iniciar el reproductor: {type(exc).__name__}."
+    finally:
+        DJ_READY_EVENTS.pop(str(thread_id), None)
 
 
 # ---------------------------------------------------------------------------
@@ -9359,7 +9813,7 @@ async def handle_command(event: dict, source: str):
     raw_uid = str(author.get("uid") or author.get("nickname") or "unknown")
     scope_key = f"{source}:{thread}"
     uid = scoped_uid(scope_key, raw_uid)
-    game_key = scope_key
+    game_key = uid
     nickname = author.get("nickname") or "Viajero"
     message_id = msg.get("messageId")
 
@@ -9436,6 +9890,10 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}regalo @usuario [mensaje] — envía un regalo simbólico.",
                 f"{PREFIX}muro — muestra los regalos recibidos.",
                 f"{PREFIX}actividad — ranking de actividad del chat.",
+                f"{PREFIX}interaccion @usuario — abre acciones sociales con botones.",
+                f"{PREFIX}diario — reclama la recompensa diaria.",
+                f"{PREFIX}trabajar — gana puntos con cooldown.",
+                f"{PREFIX}pagar @usuario cantidad — transfiere puntos.",
                 f"{PREFIX}roast @usuario — broma amistosa."
             ],
             [
@@ -9484,8 +9942,9 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}top — alias de ranking.",
                 f"{PREFIX}encuesta pregunta | opción 1 | opción 2 — crea una encuesta.",
                 f"{PREFIX}elige opción 1 | opción 2 — elige aleatoriamente.",
-                f"{PREFIX}duelo @usuario — reta a otra persona.",
+                f"{PREFIX}duelo @usuario — reto con botones para aceptar o rechazar.",
                 f"{PREFIX}ship <usuario 1> <usuario 2> — compatibilidad ficticia.",
+                f"{PREFIX}elige opción 1 | opción 2 — elección mediante botones.",
                 f"{PREFIX}azar <mínimo> <máximo> — número aleatorio.",
                 f"{PREFIX}dado — lanza un dado.",
                 f"{PREFIX}moneda — lanza una moneda.",
@@ -9502,6 +9961,11 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}fecha — fecha y hora de Chile.",
                 f"{PREFIX}zona <Area/Ciudad> — hora de una zona.",
                 f"{PREFIX}salas — consulta salas en vivo.",
+                f"{PREFIX}dj lista — muestra audios disponibles para la sala.",
+                f"{PREFIX}dj archivo.mp3 [bucle] — reproduce audio local (comunidad).",
+                f"{PREFIX}djdetener — detiene la reproducción y sale de la sala.",
+                f"{PREFIX}menu — abre el menú interactivo.",
+                f"{PREFIX}economia — muestra el sistema de puntos.",
                 f"{PREFIX}perfilbot <Nombre> | <Estado> — modifica el perfil (administradores).",
                 f"{PREFIX}autotest — pruebas internas de Katherine."
             ]
@@ -9509,6 +9973,12 @@ async def handle_command(event: dict, source: str):
         for section in help_sections:
             await send_message(thread, "\n".join(section), source, reply)
             reply = None
+        return
+
+    if command in ("!menu", "!menú"):
+        await send_interactive_menu(
+            thread, source, raw_uid, nickname, reply_id=reply
+        )
         return
 
     if command == "!autotest":
@@ -9525,6 +9995,44 @@ async def handle_command(event: dict, source: str):
         else:
             lines.append("\nTodas las pruebas internas finalizaron correctamente.")
         await send_message(thread, "\n".join(lines), source, reply)
+        return
+
+    if command == "!interaccion":
+        target_uid, target_name = target_from_message(msg, args, scope_key)
+        if not target_name:
+            await send_message(thread, "Uso: !interaccion @usuario", source, reply)
+            return
+        if target_uid == uid:
+            await send_message(thread, "Elige a otra persona para esta interacción.", source, reply)
+            return
+
+        buttons = register_buttons(
+            source,
+            thread,
+            "social_action",
+            [
+                {"label": "Abrazo", "value": "abrazo"},
+                {"label": "Beso", "value": "beso"},
+                {"label": "Acariciar", "value": "acariciar"},
+                {"label": "Consolar", "value": "consolar"},
+                {"label": "Patada", "value": "patada"}
+            ],
+            {
+                "actor_uid": uid,
+                "actor_name": nickname,
+                "target_uid": target_uid,
+                "target_name": target_name
+            },
+            owner_uid=uid,
+            ttl=600
+        )
+        await send_message(
+            thread,
+            f"INTERACCIÓN CON {target_name.upper()}\nElige qué quieres hacer:",
+            source,
+            reply,
+            buttons
+        )
         return
 
     # -----------------------------------------------------------------------
@@ -10521,25 +11029,29 @@ async def handle_command(event: dict, source: str):
     # -----------------------------------------------------------------------
     if command == "!trivia":
         q = random.choice(TRIVIA)
-
+        game_id = secrets.token_hex(5)
         trivia[game_key] = {
             "q": q,
             "tries": 0,
-            "expires": time.time() + 120
+            "game_id": game_id,
+            "owner_uid": uid,
+            "expires": time.time() + 180
         }
-
+        buttons = register_buttons(
+            source,
+            thread,
+            "trivia_answer",
+            [{"label": answer, "value": i} for i, answer in enumerate(q[1])],
+            {"game_key": game_key, "game_id": game_id},
+            owner_uid=uid,
+            ttl=180
+        )
         await send_message(
             thread,
-            "TRIVIA KATHERINE\n\n"
-            + q[0]
-            + "\n"
-            + "\n".join(
-                f"{i+1}. {a}"
-                for i, a in enumerate(q[1])
-            )
-            + "\n\nResponde !responder 1, 2, 3 o 4.",
+            "TRIVIA KATHERINE\n\n" + q[0] + "\n\nSelecciona tu respuesta:",
             source,
-            reply
+            reply,
+            buttons
         )
         return
 
@@ -10665,6 +11177,64 @@ async def handle_command(event: dict, source: str):
         await send_message(thread, answer, source, reply)
         return
 
+    if command in ("!diario", "!daily"):
+        amount, remaining = claim_reward(uid, "daily", 86400, 25, 50)
+        if amount is None:
+            answer = f"Ya reclamaste tu recompensa diaria. Vuelve en {format_duration(remaining)}."
+        else:
+            add_points(uid, amount)
+            answer = (
+                f"🎁 Recompensa diaria: +{amount} puntos. "
+                f"Ahora tienes {(get_user(uid) or {}).get('points', 0)} puntos."
+            )
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!trabajar":
+        amount, remaining = claim_reward(uid, "work", 3600, 8, 22)
+        if amount is None:
+            answer = f"Ya trabajaste recientemente. Vuelve en {format_duration(remaining)}."
+        else:
+            add_points(uid, amount)
+            answer = f"🛠️ Terminaste tu jornada y ganaste {amount} puntos."
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command in ("!pagar", "!transferir"):
+        target_uid, target_name = target_from_message(msg, args, scope_key)
+        amounts = [int(value) for value in args if re.fullmatch(r"\d+", value)]
+        amount = amounts[-1] if amounts else 0
+
+        if not target_name or not target_uid or not amount:
+            answer = "Uso: !pagar @usuario cantidad"
+        elif amount > 10000:
+            answer = "El límite por transferencia es de 10.000 puntos."
+        else:
+            result = transfer_points(uid, target_uid, amount)
+            if result == "ok":
+                answer = f"💸 Transferiste {amount} puntos a {target_name}."
+            elif result == "insufficient":
+                answer = "No tienes suficientes puntos para esa transferencia."
+            elif result == "missing":
+                answer = "Ambos perfiles deben estar registrados en este chat."
+            else:
+                answer = "La transferencia no es válida."
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!economia":
+        await send_message(
+            thread,
+            "ECONOMÍA DE KATHERINE\n"
+            "!puntos — consulta tu saldo.\n"
+            "!diario — reclama 25-50 puntos cada 24 horas.\n"
+            "!trabajar — gana 8-22 puntos cada hora.\n"
+            "!pagar @usuario cantidad — transfiere hasta 10.000 puntos.",
+            source,
+            reply
+        )
+        return
+
     # -----------------------------------------------------------------------
     # ENCUESTAS
     # -----------------------------------------------------------------------
@@ -10726,33 +11296,63 @@ async def handle_command(event: dict, source: str):
     # -----------------------------------------------------------------------
     if command == "!elige":
         choices = [
-            x.strip()
-            for x in query.split("|")
-            if x.strip()
-        ]
-
+            value.strip()
+            for value in query.split("|")
+            if value.strip()
+        ][:5]
+        if not choices:
+            await send_message(
+                thread,
+                "Uso: !elige opción 1 | opción 2 [| opción 3...]",
+                source,
+                reply
+            )
+            return
+        buttons = register_buttons(
+            source,
+            thread,
+            "choose_option",
+            [{"label": option, "value": option} for option in choices],
+            {"created_by": nickname},
+            ttl=900
+        )
         await send_message(
             thread,
-            f"Mi elección: {random.choice(choices)}"
-            if choices
-            else "Uso: !elige opción 1 | opción 2",
+            f"ELECCIÓN DE KATHERINE\n{nickname} propone elegir entre:",
             source,
-            reply
+            reply,
+            buttons
         )
         return
 
     if command == "!duelo":
-        target = next(
-            (x for x in args if x.startswith("@")),
-            "un rival misterioso"
-        )
+        target_uid, target_name = target_from_message(msg, args, scope_key)
+        if not target_name:
+            target_name = "un rival misterioso"
 
+        buttons = register_buttons(
+            source,
+            thread,
+            "duel_response",
+            [
+                {"label": "Aceptar duelo", "value": "accept"},
+                {"label": "Rechazar", "value": "decline"}
+            ],
+            {
+                "challenger_uid": uid,
+                "challenger_name": nickname,
+                "target_uid": target_uid,
+                "target_name": target_name
+            },
+            owner_uid=target_uid,
+            ttl=300
+        )
         await send_message(
             thread,
-            f"⚔️ {nickname} desafía a {target}. "
-            f"¡La victoria es de {'Katherine' if random.random() < .5 else nickname}!",
+            f"⚔️ {nickname} ha retado a {target_name} a un duelo. ¿Aceptas el desafío?",
             source,
-            reply
+            reply,
+            buttons
         )
         return
 
@@ -10985,6 +11585,70 @@ async def handle_command(event: dict, source: str):
         )
         return
 
+    if command in ("!dj", "!reproducir"):
+        if source != "community":
+            await send_message(
+                thread,
+                "Katherine DJ solo está disponible para el bot de comunidad.",
+                source,
+                reply
+            )
+            return
+        if pyav is None or livekit_rtc is None or np is None:
+            await send_message(
+                thread,
+                "El reproductor DJ no está instalado correctamente en Render.",
+                source,
+                reply
+            )
+            return
+
+        if not args or args[0].lower() in ("lista", "list"):
+            tracks = list_dj_tracks()
+            answer = (
+                "KATHERINE DJ\nArchivos disponibles:\n"
+                + ("\n".join(f"• {name}" for name in tracks) if tracks else "No hay pistas todavía.")
+                + "\n\nColoca audio propio o con licencia en music/ y usa !dj archivo.mp3 [bucle]."
+            )
+            await send_message(thread, answer, source, reply)
+            return
+
+        track_path = resolve_dj_track(args[0])
+        if not track_path:
+            await send_message(
+                thread,
+                "No encuentro ese archivo en music/ o su formato no está permitido. "
+                "Usa !dj lista para ver las pistas disponibles.",
+                source,
+                reply
+            )
+            return
+
+        looping = any(value.lower() in ("bucle", "loop", "repetir") for value in args[1:])
+        room_id = thread
+        if len(args) > 1 and args[-1].isdigit():
+            room_id = args[-1]
+
+        ok, message = await start_dj_room(room_id, track_path, looping)
+        await send_message(
+            thread,
+            f"🎧 {message}" if ok else f"DJ: {message}",
+            source,
+            reply
+        )
+        return
+
+    if command in ("!djdetener", "!djstop", "!salirsala"):
+        if source != "community":
+            await send_message(thread, "Este control requiere el bot de comunidad.", source, reply)
+            return
+        if thread not in DJ_ROOMS:
+            await send_message(thread, "Katherine no está reproduciendo audio en esta sala.", source, reply)
+            return
+        await stop_dj_room(thread, request_leave=True)
+        await send_message(thread, "⏹️ Katherine salió de la sala y detuvo la reproducción.", source, reply)
+        return
+
     if command == "!salas":
         result = await api("GET", "/live-rooms", "community")
 
@@ -11009,58 +11673,220 @@ async def handle_command(event: dict, source: str):
 
 
 # ---------------------------------------------------------------------------
-# INTERACCIONES DE BOTONES DE ENCUESTAS
+# INTERACCIONES DE BOTONES: ENCUESTAS, MENÚS, JUEGOS Y ACCIONES
 # ---------------------------------------------------------------------------
 async def handle_interaction(event: dict, source: str):
     button_id = str(event.get("buttonId") or "")
+    thread_id = str(event.get("threadId") or "")
+    user_data = event.get("user") or {}
+    raw_user_uid = str(user_data.get("uid") or "unknown")
+    user_name = str(user_data.get("nickname") or "Viajero")
+    scoped_user_uid = scoped_uid(f"{source}:{thread_id}", raw_user_uid)
+
+    # Las encuestas usan su propio mapa para permitir votos de varias personas.
     match = re.fullmatch(r"p(\d+)_(\d+)", button_id)
+    if match:
+        poll = polls.get(poll_button_map.get(match.group(1), ""))
+        if not poll:
+            return
+        if (
+            poll.get("source") != source
+            or str(event.get("threadId") or "") != poll.get("thread")
+        ):
+            return
 
-    if not match:
-        return
-
-    poll = polls.get(
-        poll_button_map.get(match.group(1), "")
-    )
-
-    if not poll:
-        return
-
-    if poll.get("source") != source or str(event.get("threadId") or "") != poll.get("thread"):
-        return
-
-    index = int(match.group(2))
-
-    if index >= len(poll["options"]):
-        return
-
-    user = str(
-        (event.get("user") or {}).get("uid")
-        or "unknown"
-    )
-
-    poll["votes"][user] = index
-
-    counts = [
-        sum(v == i for v in poll["votes"].values())
-        for i in range(len(poll["options"]))
-    ]
-
-    result = (
-        "RESULTADOS — "
-        + poll["question"]
-        + "\n"
-        + "\n".join(
-            f"{opt}: {counts[i]} voto(s)"
-            for i, opt in enumerate(poll["options"])
+        index = int(match.group(2))
+        if index >= len(poll["options"]):
+            return
+        poll["votes"][raw_user_uid] = index
+        counts = [
+            sum(v == i for v in poll["votes"].values())
+            for i in range(len(poll["options"]))
+        ]
+        result = (
+            "RESULTADOS — " + poll["question"] + "\n"
+            + "\n".join(
+                f"{option}: {counts[i]} voto(s)"
+                for i, option in enumerate(poll["options"])
+            )
         )
-    )
+        await send_message(thread_id, result, source)
+        return
 
-    await send_message(
-        str(event.get("threadId") or ""),
-        result,
-        source
-    )
+    action = BUTTON_ACTIONS.get(button_id)
+    if not action:
+        return
+    if (
+        action.get("source") != source
+        or action.get("thread") != thread_id
+        or action.get("expires", 0) <= time.time()
+    ):
+        BUTTON_ACTIONS.pop(button_id, None)
+        return
 
+    owner_uid = action.get("owner_uid")
+    if owner_uid and owner_uid != scoped_user_uid:
+        await send_message(
+            thread_id,
+            "Este botón pertenece a la interacción de otra persona.",
+            source
+        )
+        return
+
+    action_type = action.get("type")
+    payload = action.get("payload") or {}
+    choice = payload.get("value")
+
+    if action_type == "menu_category":
+        BUTTON_ACTIONS.pop(button_id, None)
+        await remove_pressed_buttons(event, source, remove=[button_id])
+        await send_interactive_menu(
+            thread_id,
+            source,
+            payload.get("raw_uid", raw_user_uid),
+            payload.get("nickname", user_name),
+            category=str(choice)
+        )
+        return
+
+    if action_type == "run_command":
+        BUTTON_ACTIONS.pop(button_id, None)
+        await remove_pressed_buttons(event, source, remove=[button_id])
+        command_name = str(choice or "").strip().lower()
+        if not re.fullmatch(r"[a-záéíóúñ0-9_]+", command_name):
+            return
+        fake_event = {
+            "threadId": thread_id,
+            "message": {
+                "content": PREFIX + command_name,
+                "author": {
+                    "uid": payload.get("raw_uid", raw_user_uid),
+                    "nickname": payload.get("nickname", user_name)
+                }
+            }
+        }
+        await handle_command(fake_event, source)
+        return
+
+    if action_type == "social_action":
+        BUTTON_ACTIONS.pop(button_id, None)
+        await remove_pressed_buttons(event, source, remove=[button_id])
+        target_name = str(payload.get("target_name") or "esa persona")
+        actor_name = str(payload.get("actor_name") or user_name)
+        actor_uid = str(payload.get("actor_uid") or scoped_user_uid)
+        target_uid = payload.get("target_uid")
+        action_key = str(choice or "")
+        phrases = SOCIAL.get(action_key)
+        if not phrases:
+            return
+        affinity = None
+        if target_uid and target_uid != actor_uid:
+            affinity = add_affinity(actor_uid, str(target_uid))
+        answer = f"{actor_name} {random.choice(phrases)} {target_name}."
+        if affinity is not None:
+            answer += f"\nAfinidad: {affinity}"
+        await send_message(thread_id, answer, source)
+        return
+
+    if action_type == "trivia_answer":
+        game_key = str(payload.get("game_key") or "")
+        game = trivia.get(game_key)
+        if (
+            not game
+            or game.get("expires", 0) <= time.time()
+            or game.get("game_id") != payload.get("game_id")
+        ):
+            BUTTON_ACTIONS.pop(button_id, None)
+            await remove_pressed_buttons(event, source, remove=True)
+            await send_message(thread_id, "Esta trivia ya terminó. Usa !trivia para iniciar otra.", source)
+            return
+
+        try:
+            selected = int(choice)
+        except (TypeError, ValueError):
+            return
+
+        if selected == game["q"][2]:
+            owner = game.get("owner_uid")
+            if owner:
+                add_points(owner, 10)
+            trivia.pop(game_key, None)
+            for key, value in list(BUTTON_ACTIONS.items()):
+                data = value.get("payload") or {}
+                if data.get("game_key") == game_key and data.get("game_id") == game.get("game_id"):
+                    BUTTON_ACTIONS.pop(key, None)
+            await remove_pressed_buttons(event, source, remove=True)
+            await send_message(
+                thread_id,
+                f"¡Correcto, {user_name}! Ganaste 10 puntos.",
+                source
+            )
+        else:
+            game["tries"] += 1
+            BUTTON_ACTIONS.pop(button_id, None)
+            if game["tries"] >= 3:
+                answer = game["q"][1][game["q"][2]]
+                trivia.pop(game_key, None)
+                for key, value in list(BUTTON_ACTIONS.items()):
+                    data = value.get("payload") or {}
+                    if data.get("game_key") == game_key and data.get("game_id") == game.get("game_id"):
+                        BUTTON_ACTIONS.pop(key, None)
+                await remove_pressed_buttons(event, source, remove=True)
+                await send_message(
+                    thread_id,
+                    f"No era esa. Se acabaron los intentos; la respuesta era {answer}.",
+                    source
+                )
+            else:
+                await remove_pressed_buttons(event, source, remove=[button_id])
+                await send_message(
+                    thread_id,
+                    f"No es correcto. Te quedan {3 - game['tries']} intentos.",
+                    source
+                )
+        return
+
+    if action_type == "choose_option":
+        BUTTON_ACTIONS.pop(button_id, None)
+        await remove_pressed_buttons(event, source, remove=[button_id])
+        await send_message(
+            thread_id,
+            f"🗳️ {user_name} eligió: {choice}",
+            source
+        )
+        return
+
+    if action_type == "duel_response":
+        BUTTON_ACTIONS.pop(button_id, None)
+        await remove_pressed_buttons(event, source, remove=True)
+        challenger_name = str(payload.get("challenger_name") or "El retador")
+        challenger_uid = str(payload.get("challenger_uid") or "")
+        opponent_uid = scoped_user_uid
+        target_name = str(payload.get("target_name") or user_name)
+        if choice == "decline":
+            await send_message(
+                thread_id,
+                f"🛡️ {user_name} rechazó el duelo de {challenger_name}.",
+                source
+            )
+            return
+
+        winner_is_challenger = random.choice((True, False))
+        if winner_is_challenger:
+            winner_name = challenger_name
+            winner_uid = challenger_uid
+        else:
+            winner_name = user_name
+            winner_uid = opponent_uid
+
+        add_points(winner_uid, 10)
+        await send_message(
+            thread_id,
+            f"⚔️ Duelo entre {challenger_name} y {target_name}. "
+            f"¡{winner_name} ganó y recibió 10 puntos!",
+            source
+        )
+        return
 
 # ---------------------------------------------------------------------------
 # EVENTOS Y WEBHOOKS
@@ -11082,11 +11908,19 @@ async def dispatch(event: dict, source: str):
         "room.ready",
         "room.kicked"
     ):
-        logging.info(
-            "[SALA] %s | %s",
-            kind,
-            event.get("threadId")
-        )
+        thread_id = str(event.get("threadId") or "")
+        metrics[f"event_{kind}"] += 1
+        if kind == "room.ready":
+            ready = DJ_READY_EVENTS.get(thread_id)
+            if ready:
+                ready.set()
+        elif kind in ("room.end", "room.kicked"):
+            await stop_dj_room(thread_id, request_leave=False)
+        logging.info("[SALA] %s | %s", kind, thread_id)
+
+    elif kind in ("thread.added", "thread.removed", "message.edited", "message.deleted"):
+        metrics[f"event_{kind}"] += 1
+        logging.info("[EVENTO] %s | %s", kind, event.get("threadId"))
 
     else:
         logging.info("[EVENTO] Ignorado: %s", kind)
@@ -11246,6 +12080,12 @@ async def startup():
     CLEANUP_TASK = asyncio.create_task(cleanup_loop())
 
     logging.info("SQLite activo en %s", DB_PATH)
+    DJ_MUSIC_DIR.mkdir(parents=True, exist_ok=True)
+    logging.info(
+        "Katherine DJ: %s | directorio: %s",
+        "disponible" if livekit_rtc is not None and pyav is not None and np is not None else "dependencias ausentes",
+        DJ_MUSIC_DIR
+    )
 
     if not os.getenv("DATA_DIR"):
         logging.warning(
@@ -11284,6 +12124,8 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     global HTTP_CLIENT, CLEANUP_TASK
+    for thread_id in list(DJ_ROOMS):
+        await stop_dj_room(thread_id, request_leave=False)
     if CLEANUP_TASK is not None:
         CLEANUP_TASK.cancel()
         try:
