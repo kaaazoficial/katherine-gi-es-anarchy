@@ -33,3 +33,44 @@ Comandos:
 - `!dj pausa / reanudar / saltar / cola`: controles conservados.
 
 Jamendo permanece desactivado hasta que se configure su Client ID. YouTube y Spotify no se tratan como fuentes de descarga directa porque sus APIs no entregan una pista reproducible libremente para este flujo.
+
+
+## ASTRA NOVA 4.0 · alcance aprobado
+
+### Activación conversacional
+- El enrutador natural solo procesa mensajes que comienzan con «Katherine» u «Oye Katherine».
+- Los mensajes ordinarios no activan respuestas, menús ni respuestas automáticas; sí conservan el conteo de actividad y las comprobaciones antispam.
+- Los comandos clásicos con prefijo siguen disponibles sin cambios.
+- Las solicitudes conocidas se traducen a comandos existentes. Las solicitudes no reconocidas reciben una respuesta de capacidades; no se simula una IA generativa ni se ejecutan acciones no implementadas.
+
+### Enciclopedia de Teyvat
+\`!enciclopedia <nombre>\` consulta en paralelo personajes, armas, artefactos, enemigos, materiales, comida, dominios, geografía y elementos usando la API existente de Genshin-DB. Se mantiene separada de las guías y calculadoras que no forman parte de este alcance.
+
+### ECLIPSE · DJ y voz
+- Recomendaciones por ambiente: estudiar, concentración, trabajar, relajarse, dormir, jugar, combate, triste, feliz y anime.
+- Si la descarga o validación de la pista seleccionada falla por un problema del archivo, Katherine prueba las siguientes opciones de la búsqueda. Los errores de sala, permisos o LiveKit no se disfrazan como fallos de canción.
+- Favoritos por usuario y sala, solo en memoria, con caducidad de 24 horas y borrado al reiniciar. No se crea una nueva tabla ni se guardan URL de favoritos en SQLite.
+- Las playlists existentes siguen siendo persistentes y reproducen pistas locales en cola continua. No se mezclan con favoritos efímeros.
+- La cola TTS prioriza mensajes dirigidos a Katherine; conserva una cola normal para el resto de mensajes leídos. Se omiten duplicados recientes y se limita la longitud por intervención.
+- Las fuentes musicales y los metadatos de licencia siguen validándose antes de la reproducción.
+
+### GUARDIAN
+- Antispam por velocidad, repetición, ráfagas de enlaces y menciones masivas.
+- Límites por sala configurables desde \`!antispam\`: \`limite\`, \`ventana\`, \`repeticiones\`, \`enlaces\` y \`menciones\`.
+- Advertencias automáticas, retirada administrativa de advertencias, auditoría y panel \`!guardian\`.
+- No se promete borrar mensajes, silenciar o expulsar miembros: esas operaciones no están habilitadas en la API de este bot.
+
+### ASTRA CORE técnico
+- Helpers puros separados en \`katherine_nexus.py\` y \`katherine_astra.py\`.
+- Solicitudes externas con concurrencia limitada, timeouts, reintentos seguros y circuit breaker temporal por host.
+- Diagnóstico \`!estado\` con contadores de circuitos, recuperación DJ, TTS y fuentes externas.
+- Las nuevas pruebas cubren activación explícita, favoritos efímeros, límites Guardian, circuito externo y fallback DJ.
+
+### Despliegue por fases
+1. Rama aislada \`feature/astra-nova-4.0\`.
+2. Compilación y pruebas automáticas.
+3. Revisión del diff y compatibilidad con la API.
+4. Pull request y validación final.
+5. Merge a \`main\` solo tras CI verde.
+6. Render despliega automáticamente desde \`main\`; luego se verifica \`/health\`, inicio de ambos bots y logs.
+7. Si falla el arranque o una regresión crítica, se revierte al commit estable sin modificar \`rollback/katherine-2.0\`.
