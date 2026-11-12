@@ -403,3 +403,29 @@ async def test_katherine_identity_faq_works_without_ai_credentials(monkeypatch):
     result = await ai.assist("¿Quién eres?", "room:verified-user", unexpected_request)
     assert "bot de entretenimiento" in result["answer"]
     assert "bot de soporte de Anarchy Apps" in result["answer"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("Katherine, preséntate", "bot de entretenimiento"),
+        ("Katherine, ¿quién eres?", "bot de entretenimiento"),
+        ("Katherine, ¿quién es tu creador?", "Mi creador es Sinner."),
+        ("Katherine, ¿quién es su creador?", "Mi creador es Sinner."),
+        ("¿Quién es el creador de Katherine?", "Mi creador es Sinner."),
+    ],
+)
+async def test_katherine_identity_questions_with_name_prefix(monkeypatch, question, expected):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+
+    async def unexpected_request(*args, **kwargs):
+        raise AssertionError("La identidad canónica no debe depender del proveedor.")
+
+    result = await ai.assist(question, "room:verified-user", unexpected_request)
+    assert result["kind"] == "answer"
+    if expected == "bot de entretenimiento":
+        assert expected in result["answer"]
+    else:
+        assert result["answer"] == expected
