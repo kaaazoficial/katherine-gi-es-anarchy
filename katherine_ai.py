@@ -88,6 +88,19 @@ TASK_INSTRUCTIONS = {
 }
 
 
+def is_bot_author(author: dict[str, Any] | None, bot_uid: str | None) -> bool:
+    """Identify bot authors without treating missing user IDs as a match."""
+    details = author if isinstance(author, dict) else {}
+    if any(
+        str(details.get(flag, "")).casefold() in {"true", "1", "yes"}
+        for flag in ("bot", "isBot", "is_bot")
+    ):
+        return True
+    incoming_uid = str(details.get("uid") or details.get("userId") or "").strip()
+    expected_uid = str(bot_uid or "").strip()
+    return bool(incoming_uid and expected_uid and incoming_uid == expected_uid)
+
+
 def validate_ai_tool_call(command: str, arguments: str) -> str | None:
     """Return a safe existing command invocation or None."""
     name = re.sub(r"^!", "", str(command or "").strip().casefold())
