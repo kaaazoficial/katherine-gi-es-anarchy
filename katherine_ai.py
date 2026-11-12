@@ -8,6 +8,8 @@ import re
 import time
 from collections import deque
 from typing import Any, Awaitable, Callable
+
+from katherine_topics import is_genshin_related_request
 from urllib.parse import urlsplit
 
 RequestFunc = Callable[..., Awaitable[Any]]
@@ -18,6 +20,11 @@ AI_ALLOWED_COMMANDS = frozenset({
     "equipos", "rotacion", "materiales", "reacciones", "buscargenshin",
     "banner", "calendario", "dj", "multimedia", "traducir", "join", "leer",
     "noleer",
+})
+
+GENSHIN_ONLY_TOOL_COMMANDS = frozenset({
+    "enciclopedia", "guia", "equipos", "rotacion", "materiales",
+    "reacciones", "buscargenshin", "banner", "calendario",
 })
 
 GROQ_STRICT_JSON_MODELS = frozenset({
@@ -42,10 +49,14 @@ BASE_INSTRUCTIONS = """Eres Katherine, la asistente de una comunidad de Anarchy 
 Responde en español natural, claro y con personalidad cordial, sin fingir capacidades.
 Puedes contestar directamente o solicitar una herramienta existente mediante el JSON
 estructurado. Nunca inventes resultados, datos actuales, noticias, estadísticas o
-acciones realizadas. Para datos concretos de Genshin Impact prefiere usar enciclopedia,
-guías, equipos, rotaciones o materiales; la información recuperada por esas funciones
-es más fiable que tu conocimiento interno. Para música usa las búsquedas y controles
-del DJ. Para horarios usa fecha/zona. Para consultas que exijan fuentes que el bot no
+acciones realizadas. Usa enciclopedia, guías, equipos, rotaciones y materiales de Genshin
+únicamente cuando la pregunta trate claramente de Genshin Impact, Teyvat o una entidad
+reconocible del juego. Una pregunta genérica como "qué es", "quién es" o "háblame de"
+NO implica que sea una consulta de Genshin. Nunca uses herramientas de Teyvat para
+preguntas sobre Anarchy Apps, Katherine, bots, APIs, programación, plataformas u otros
+temas ajenos al juego. Si no está claro que se trata de Genshin, responde como asistente
+general o pide una aclaración; no fuerces una búsqueda de la enciclopedia. Para música usa
+las búsquedas y controles del DJ. Para horarios usa fecha/zona. Para consultas que exijan fuentes que el bot no
 tiene, explica la limitación y no inventes una respuesta.
 
 Las herramientas disponibles son únicamente comandos preexistentes y no destructivos:
@@ -547,8 +558,83 @@ class KatherineAI:
                 "fallback": True,
             }
 
+        invocation = (
+            validate_ai_tool_call(result["command"], result["args"])
+            if result["kind"] == "command" else None
+        )
+        result_answer = str(result.get("answer") or "").strip()
+        result_tool_name = invocation.split(maxsplit=1)[0] if invocation else ""
+        unrelated_genshin_output = (
+            not is_genshin_related_request(text)
+            and (
+                result_tool_name in GENSHIN_ONLY_TOOL_COMMANDS
+                or (
+                    result["kind"] == "answer"
+                    and is_genshin_related_request(result_answer)
+                )
+            )
+        )
+        if unrelated_genshin_output:
+            # Guard both wrong tool calls and direct answers that drift into
+            # Genshin when the user's request is about an unrelated subject.
+            retry_instructions = (
+                BASE_INSTRUCTIONS
+                + "\\n\\nREGLA DE DOMINIO: esta petición no contiene contexto "
+                "de Genshin Impact ni Teyvat. No invoques ninguna herramienta de "
+                "Genshin ni respondas sobre el juego. Responde directamente a la "
+                "pregunta general con la información que realmente conozcas; si no "
+                "puedes verificarla, reconoce esa limitación."
+            )
+            try:
+                retry = await self._request_json(
+                    retry_instructions,
+                    messages,
+                    request_func,
+                    rate_key=None,
+                    cooldown=0,
+                    max_output_tokens=650,
+                )
+            except Exception:
+                retry = {"kind": "answer", "answer": ""}
+            retry_answer = str(retry.get("answer") or "").strip()
+            if (
+                retry.get("kind") == "answer"
+                and retry_answer
+                and not is_genshin_related_request(retry_answer)
+            ):
+                self._append_history(key, "user", text[:1200])
+                self._append_history(key, "assistant", retry_answer[:1800])
+                return {
+                    "kind": "answer", "answer": retry_answer[:4000],
+                    "command": "", "args": "",
+                }
+
+            retry_invocation = (
+                validate_ai_tool_call(retry.get("command", ""), retry.get("args", ""))
+                if retry.get("kind") == "command" else None
+            )
+            if retry_invocation and retry_invocation.split(maxsplit=1)[0] not in GENSHIN_ONLY_TOOL_COMMANDS:
+                self._append_history(key, "user", text[:1200])
+                return {
+                    "kind": "command",
+                    "answer": "",
+                    "command": retry.get("command", ""),
+                    "args": retry.get("args", ""),
+                }
+
+            self._append_history(key, "user", text[:1200])
+            safe_answer = (
+                "Esa consulta no parece relacionada con Genshin Impact, así que "
+                "no consultaré la enciclopedia de Teyvat. No tengo suficiente "
+                "información verificada para responderla con precisión."
+            )
+            self._append_history(key, "assistant", safe_answer)
+            return {
+                "kind": "answer", "answer": safe_answer,
+                "command": "", "args": "",
+            }
+
         if result["kind"] == "command":
-            invocation = validate_ai_tool_call(result["command"], result["args"])
             if invocation:
                 self._append_history(key, "user", text[:1200])
                 return {
