@@ -8,6 +8,7 @@ import re
 import time
 from collections import deque
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlsplit
 
 RequestFunc = Callable[..., Awaitable[Any]]
 
@@ -17,6 +18,13 @@ AI_ALLOWED_COMMANDS = frozenset({
     "equipos", "rotacion", "materiales", "reacciones", "buscargenshin",
     "banner", "calendario", "dj", "multimedia", "traducir", "join", "leer",
     "noleer",
+})
+
+GROQ_STRICT_JSON_MODELS = frozenset({
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+    "qwen/qwen3.8-27b",
+    "meta-models/muse-spark-open",
 })
 
 ACTION_SCHEMA = {
@@ -180,6 +188,23 @@ class KatherineAI:
         return (os.getenv("KATHERINE_AI_MODEL") or "gpt-5.4-mini").strip()
 
     @property
+    def provider_name(self) -> str:
+        host = (urlsplit(self.api_url).hostname or "").casefold()
+        if host == "api.groq.com" or host.endswith(".groq.com"):
+            return "Groq"
+        if host == "api.openai.com" or host.endswith(".openai.com"):
+            return "OpenAI"
+        return "proveedor configurado"
+
+    @property
+    def is_groq(self) -> bool:
+        return self.provider_name == "Groq"
+
+    @property
+    def uses_groq_strict_schema(self) -> bool:
+        return self.is_groq and self.model.casefold() in GROQ_STRICT_JSON_MODELS
+
+    @property
     def is_enabled(self) -> bool:
         return bool(self.api_key and self.api_url and self.model)
 
@@ -188,7 +213,8 @@ class KatherineAI:
         lines = [
             "KATHERINE AI · ESTADO",
             f"Credencial API: {'detectada' if configured else 'no detectada'}",
-            "Conexión con OpenAI: no comprobada (usa !ia probar).",
+            f"Proveedor: {self.provider_name if configured else 'sin configurar'}.",
+            f"Conexión con {self.provider_name}: no comprobada (usa !ia probar).",
             f"Modelo: {self.model if configured else 'no conectado'}",
             "Memoria contextual: temporal, aislada por usuario y sala (15 min).",
             "Almacenamiento de conversaciones: desactivado en la solicitud al proveedor.",
@@ -329,9 +355,28 @@ class KatherineAI:
         if self._semaphore is None:
             self._semaphore = asyncio.Semaphore(3)
 
+        prompt_instructions = instructions
+        if self.is_groq and not self.uses_groq_strict_schema:
+            prompt_instructions += (
+                "\n\nDevuelve únicamente un objeto JSON válido, sin bloques Markdown, "
+                "con estas cuatro claves: kind (answer o command), answer, command y args. "
+                "Todos los valores deben ser cadenas. Si respondes directamente usa kind=answer "
+                "y deja command y args vacíos."
+            )
+
+        output_format = (
+            {
+                "type": "json_schema",
+                "name": "katherine_action",
+                "strict": True,
+                "schema": ACTION_SCHEMA,
+            }
+            if not self.is_groq or self.uses_groq_strict_schema
+            else {"type": "json_object"}
+        )
         body = {
             "model": self.model,
-            "instructions": instructions,
+            "instructions": prompt_instructions,
             "input": [
                 {"role": turn["role"], "content": str(turn["content"])[:4000]}
                 for turn in messages[-(self.memory_turns * 2 + 1):]
@@ -339,14 +384,7 @@ class KatherineAI:
             ],
             "store": False,
             "max_output_tokens": max(100, min(1200, int(max_output_tokens))),
-            "text": {
-                "format": {
-                    "type": "json_schema",
-                    "name": "katherine_action",
-                    "strict": True,
-                    "schema": ACTION_SCHEMA,
-                }
-            },
+            "text": {"format": output_format},
         }
         async with self._semaphore:
             response = await request_func(
@@ -398,8 +436,13 @@ class KatherineAI:
             raise RuntimeError("La respuesta estructurada de IA no es válida.") from exc
         if not isinstance(result, dict):
             raise RuntimeError("La salida de IA no tiene el formato esperado.")
+        kind = str(result.get("kind") or "answer").casefold()
+        if kind not in {"answer", "command"}:
+            raise RuntimeError("La salida de IA contiene un tipo de acción no válido.")
+        if any(not isinstance(result.get(field, ""), str) for field in ("answer", "command", "args")):
+            raise RuntimeError("La salida JSON de IA contiene campos con tipos no válidos.")
         return {
-            "kind": str(result.get("kind") or "answer"),
+            "kind": kind,
             "answer": str(result.get("answer") or "")[:4000],
             "command": str(result.get("command") or ""),
             "args": str(result.get("args") or "")[:240],
