@@ -6991,6 +6991,7 @@ MESSAGE_SPLIT_REGRESSION_CASES = (
 def run_message_split_regression() -> dict:
     """Comprueba todos los tamaños registrados y devuelve un resumen."""
     total = 0
+    failure_count = 0
     failures = []
     for length, expected_parts in MESSAGE_SPLIT_REGRESSION_CASES:
         total += 1
@@ -7001,15 +7002,17 @@ def run_message_split_regression() -> dict:
             and all(0 < len(part) <= 2000 for part in parts)
             and "".join(parts) == content
         )
-        if not valid and len(failures) < 25:
-            failures.append(
-                f"Longitud {length}: bloques esperados {expected_parts}, "
-                f"recibidos {len(parts)}"
-            )
+        if not valid:
+            failure_count += 1
+            if len(failures) < 25:
+                failures.append(
+                    f"Longitud {length}: bloques esperados {expected_parts}, "
+                    f"recibidos {len(parts)}"
+                )
     return {
         "total": total,
-        "passed": total - len(failures),
-        "failed": len(failures),
+        "passed": total - failure_count,
+        "failed": failure_count,
         "failures": failures
     }
 
@@ -7472,7 +7475,9 @@ async def handle_command(event: dict, source: str):
             f"{PREFIX}misbuilds [personaje] — lista tus builds guardadas.",
             f"{PREFIX}buildlocal <id> — muestra una build guardada.",
             f"{PREFIX}buildborrar <id> — elimina una build tuya.",
-            f"{PREFIX}equipo guardar/ver/borrar — administra equipos personales.",
+            f"{PREFIX}equipo guardar <nombre> | <personajes> | <nota> — guarda un equipo.",
+            f"{PREFIX}equipo ver <nombre> / {PREFIX}equipo borrar <nombre> — consulta o elimina un equipo.",
+            f"{PREFIX}equiposguardados — muestra tus equipos personales.
             f"{PREFIX}equiposguardados — lista tus equipos guardados.",
             f"{PREFIX}farmmeta material | actual | objetivo — registra materiales por conseguir.",
             f"{PREFIX}farmlista — muestra tu lista de materiales pendientes.",
@@ -7636,11 +7641,11 @@ async def handle_command(event: dict, source: str):
             f"Fallidas: {results['failed']}"
         ]
         if results["failures"]:
-            lines.append("\\nERRORES")
+            lines.append("\nERRORES")
             lines.extend("• " + value for value in results["failures"][:15])
         else:
-            lines.append("\\nTodas las pruebas internas finalizaron correctamente.")
-        await send_message(thread, "\\n".join(lines), source, reply)
+            lines.append("\nTodas las pruebas internas finalizaron correctamente.")
+        await send_message(thread, "\n".join(lines), source, reply)
         return
 
     # -----------------------------------------------------------------------
@@ -9361,21 +9366,26 @@ async def handle_command(event: dict, source: str):
     # -----------------------------------------------------------------------
     if command == "!equipo":
         parts = [part.strip() for part in query.split("|")]
-        if not parts:
-            await send_message(thread, f"Uso: {PREFIX}equipo guardar/ver/borrar ...", source, reply)
-            return
-        action = parts[0].casefold()
+        first = parts[0].split(maxsplit=1) if parts else []
+        action = first[0].casefold() if first else ""
+        team_name = first[1].strip() if len(first) > 1 else ""
+
         if action == "guardar":
-            if len(parts) < 3 or not parts[1] or not parts[2]:
-                await send_message(thread, f"Uso: {PREFIX}equipo guardar nombre | Cyno, Nahida, Baizhu, Fischl | nota", source, reply)
-                return
-            members = [value.strip() for value in re.split(r"[,;/]", parts[2]) if value.strip()]
-            note = parts[3] if len(parts) > 3 else ""
-            try:
-                saved = save_team_record(uid, parts[1], members, note)
+            if not team_name or len(parts) < 2 or not parts[1]:
                 await send_message(
                     thread,
-                    f"EQUIPO GUARDADO — {parts[1]}\n"
+                    f"Uso: {PREFIX}equipo guardar nombre | Cyno, Nahida, Baizhu, Fischl | nota",
+                    source,
+                    reply
+                )
+                return
+            members = [value.strip() for value in re.split(r"[,;/]", parts[1]) if value.strip()]
+            note = parts[2] if len(parts) > 2 else ""
+            try:
+                saved = save_team_record(uid, team_name, members, note)
+                await send_message(
+                    thread,
+                    f"EQUIPO GUARDADO — {team_name}\n"
                     + "\n".join(f"{i}. {name}" for i, name in enumerate(saved, 1))
                     + (f"\nNota: {note}" if note else ""),
                     source,
@@ -9384,8 +9394,9 @@ async def handle_command(event: dict, source: str):
             except ValueError as exc:
                 await send_message(thread, str(exc), source, reply)
             return
+
         if action == "ver":
-            name = "|".join(parts[1:]).strip()
+            name = team_name or "|".join(parts[1:]).strip()
             team = get_team_record(uid, name)
             if not team:
                 await send_message(thread, "No encontré ese equipo guardado.", source, reply)
@@ -9399,12 +9410,25 @@ async def handle_command(event: dict, source: str):
                 reply
             )
             return
+
         if action == "borrar":
-            name = "|".join(parts[1:]).strip()
+            name = team_name or "|".join(parts[1:]).strip()
             deleted = delete_team_record(uid, name) if name else False
-            await send_message(thread, "Equipo eliminado." if deleted else "No encontré ese equipo.", source, reply)
+            await send_message(
+                thread,
+                "Equipo eliminado." if deleted else "No encontré ese equipo.",
+                source,
+                reply
+            )
             return
-        await send_message(thread, f"Acciones: {PREFIX}equipo guardar, ver o borrar.", source, reply)
+
+        await send_message(
+            thread,
+            f"Uso: {PREFIX}equipo guardar nombre | personajes | nota; "
+            f"{PREFIX}equipo ver nombre; {PREFIX}equipo borrar nombre.",
+            source,
+            reply
+        )
         return
 
     if command == "!equiposguardados":
