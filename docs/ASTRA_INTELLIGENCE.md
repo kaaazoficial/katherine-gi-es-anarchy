@@ -40,3 +40,8 @@ Las solicitudes naturales explícitas se envían al núcleo si hay clave configu
 - No añade reconocimiento de imágenes entrantes ni recepción de audio, no expuestos por la API del bot.
 - Las respuestas pasan por el filtro global de enlaces de \`send_message\`.
 - CREATIVITY AI no está incluido.
+
+
+## Planes de acciones encadenadas
+
+El núcleo de IA puede devolver un plan de hasta tres herramientas. Katherine valida todos los pasos antes de ejecutar el primero; si uno no está permitido o no tiene argumentos válidos, rechaza el plan completo. Los pasos se ejecutan secuencialmente a través de los manejadores originales, por lo que conservan sus validaciones. No se permiten comandos administrativos ni acciones destructivas dentro de los planes.
