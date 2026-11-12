@@ -482,3 +482,59 @@ def test_research_search_parser_deduplicates_domains_and_unwraps_results():
     assert len(results) == 2
     assert results[0]["url"] == "https://example.com/a"
     assert results[1]["domain"] == "another.example.org"
+
+
+@pytest.mark.asyncio
+async def test_ai_plan_validates_all_steps_before_returning_plan(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+
+    async def fake_request(method, url, **kwargs):
+        return FakeResponse(response_payload({
+            "kind": "plan",
+            "answer": "",
+            "command": "",
+            "args": "",
+            "steps": [
+                {"command": "investigar", "args": "cambios recientes de Python"},
+                {"command": "enlace", "args": "https://example.com/articulo"},
+            ],
+        }))
+
+    result = await ai.assist(
+        "investiga los cambios de Python y analiza este artículo",
+        "room:user",
+        fake_request,
+    )
+    assert result["kind"] == "plan"
+    assert result["steps"] == [
+        "investigar cambios recientes de Python",
+        "enlace https://example.com/articulo",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ai_plan_rejects_entire_sequence_if_one_step_is_forbidden(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+
+    async def fake_request(method, url, **kwargs):
+        return FakeResponse(response_payload({
+            "kind": "plan",
+            "answer": "",
+            "command": "",
+            "args": "",
+            "steps": [
+                {"command": "investigar", "args": "cambios recientes de Python"},
+                {"command": "admin", "args": "eliminar mensajes"},
+            ],
+        }))
+
+    result = await ai.assist(
+        "investiga y luego elimina mensajes",
+        "room:user",
+        fake_request,
+    )
+    assert result["kind"] == "answer"
+    assert result["fallback"] is True
+    assert "No ejecutaré una secuencia parcial" in result["answer"]
