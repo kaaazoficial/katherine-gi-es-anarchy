@@ -10201,7 +10201,7 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}salas — consulta salas en vivo.",
                 f"{PREFIX}dj lista — muestra audios locales e instrucciones.",
                 f"{PREFIX}dj buscar <tema> — busca música pública y licenciada.",
-                f"{PREFIX}dj archivo.mp3 [bucle] — reproduce audio local (comunidad).
+                f"{PREFIX}dj archivo.mp3 [bucle] — reproduce audio local (comunidad).",
                 f"{PREFIX}djdetener — detiene la reproducción y sale de la sala.",
                 f"{PREFIX}menu — abre el menú interactivo.",
                 f"{PREFIX}economia — muestra el sistema de puntos.",
