@@ -12526,10 +12526,10 @@ async def handle_command(event: dict, source: str):
         session_key = f"{source}:{thread}:{raw_uid}"
         if sub in ("ayuda", "help"):
             await send_message(thread,
-                "ASTRA INTELLIGENCE\\n!ia estado / olvidar / preguntar <consulta> / genshin <consulta>\\n"
-                "!ia musica <descripción> / traducir idioma | texto\\n"
-                "!ia guardian revisar <texto> (administradores)\\n"
-                "!ia analista activar|resumen|limpiar|desactivar (administradores)\\n"
+                "ASTRA INTELLIGENCE\n!ia estado / olvidar / preguntar <consulta> / genshin <consulta>\n"
+                "!ia musica <descripción> / traducir idioma | texto\n"
+                "!ia guardian revisar <texto> (administradores)\n"
+                "!ia analista activar|resumen|limpiar|desactivar (administradores)\n"
                 "!ia diagnostico (administradores)", source, reply)
             return
         if sub in ("estado", "status"):
@@ -12601,7 +12601,7 @@ async def handle_command(event: dict, source: str):
             except Exception:
                 logging.exception("[AI] Error en Guardian AI")
                 answer = "No pude analizar el texto. Comprueba la conexión con el proveedor."
-            await send_message(thread, "GUARDIAN AI · REVISIÓN PREVENTIVA\\n" + answer, source, reply)
+            await send_message(thread, "GUARDIAN AI · REVISIÓN PREVENTIVA\n" + answer, source, reply)
             return
         if sub == "analista":
             if not is_admin_uid(raw_uid):
@@ -12621,7 +12621,7 @@ async def handle_command(event: dict, source: str):
                 if not AI_CORE.analyst_messages(thread):
                     answer = "No hay mensajes temporales. Activa primero el analizador."
                 else:
-                    await send_message(thread, "AI CHAT ANALYST\\nPreparando resumen del buffer temporal…", source, reply)
+                    await send_message(thread, "AI CHAT ANALYST\nPreparando resumen del buffer temporal…", source, reply)
                     try:
                         answer = await AI_CORE.summarize_chat(thread, external_request)
                     except Exception:
@@ -12643,7 +12643,7 @@ async def handle_command(event: dict, source: str):
             except Exception:
                 logging.exception("[AI] Error en Astra Admin AI")
                 answer = "No pude interpretar el diagnóstico. Consulta !estado para ver los datos técnicos."
-            await send_message(thread, "ASTRA ADMIN AI\\n" + answer, source, reply)
+            await send_message(thread, "ASTRA ADMIN AI\n" + answer, source, reply)
             return
         await send_message(thread, "Subcomando IA desconocido. Usa !ia ayuda.", source, reply)
         return
@@ -13853,16 +13853,16 @@ Uso: !enciclopedia <nombre>""",
                 if name.casefold() == query.casefold() or query.casefold() in name.casefold():
                     detail = describe_game(data, query, folder)
                     if detail and not detail.startswith("No encontré"):
-                        sections.append(f"【{label}】\\n{detail}")
+                        sections.append(f"【{label}】\n{detail}")
             elif isinstance(data, list) and data:
                 matches = [
                     clean_game_text(item.get("name") if isinstance(item, dict) else item)
                     for item in data[:8]
                 ]
                 if any(query.casefold() in item.casefold() for item in matches):
-                    sections.append(f"【{label}】\\n" + ", ".join(matches[:6]))
+                    sections.append(f"【{label}】\n" + ", ".join(matches[:6]))
         if sections:
-            answer = f"ARCHIVO DE TEYVAT · {query}\\n\\n" + "\\n\\n".join(sections[:5])
+            answer = f"ARCHIVO DE TEYVAT · {query}\n\n" + "\n\n".join(sections[:5])
         else:
             answer = (
                 f"No encontré una ficha exacta de «{query}» en la enciclopedia. "
@@ -15389,11 +15389,11 @@ Uso: !enciclopedia <nombre>""",
                 if not favorites:
                     await send_message(thread, "Todavía no tienes canciones favoritas en esta sala.", dj_source, reply)
                     return
-                listing = "\\n".join(
+                listing = "\n".join(
                     f"{item['id']}. {item['title']} — {item['creator']} ({item['source']})"
                     for item in favorites
                 )
-                await send_message(thread, "DJ · FAVORITOS\\n" + listing, dj_source, reply)
+                await send_message(thread, "DJ · FAVORITOS\n" + listing, dj_source, reply)
                 return
             if sub in ("guardar", "agregar", "añadir"):
                 try:
