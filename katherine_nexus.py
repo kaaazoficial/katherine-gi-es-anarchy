@@ -76,7 +76,7 @@ def interpret_natural_request(value: str) -> str | None:
         (r"^(?:que cobertura tiene|cobertura de|apartados de la guia de) (.+)$", "cobertura"),
         (r"^(?:busca en genshin|busqueda de genshin|busca genshin) (.+)$", "buscargenshin"),
         (r"^(?:haz un roast a|roast a|insulta amistosamente a) (.+)$", "roast"),
-        (r"^(?:crea|haz) (?:una )?encuesta (.+)$", "encuesta"),
+        (r"^(?:crea|haz) (?:una )?encuesta (?:sobre )?(.+)$", "encuesta"),
         (r"^(?:consulta|abre|busca en)?\s*(?:la )?enciclopedia(?: de genshin)? (?:sobre |de |del )?(.+)$", "enciclopedia"),
         (r"^(?:quien es|que es|que sabes de) (.+)$", "enciclopedia"),
         (r"^(?:reproduce|pon|busca musica de|busca la cancion) (.+)$", "dj buscar"),
