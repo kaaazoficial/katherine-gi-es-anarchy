@@ -12353,6 +12353,8 @@ async def handle_command(event: dict, source: str):
     if command == "!buscar":
         command = "!dj"
         args = ["buscar", *args]
+    if command == "!guardian":
+        command = "!admin"
 
     query = " ".join(args).strip()
     reply = message_id
@@ -12395,7 +12397,7 @@ async def handle_command(event: dict, source: str):
         )
         return
 
-    if command in ("!admin", "!paneladmin"):
+    if command in ("!admin", "!paneladmin", "!guardian"):
         if not is_admin_uid(raw_uid):
             await send_message(thread, "No tienes permisos de administración.", source, reply)
             return
@@ -12542,6 +12544,7 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}jefes — lista de jefes reconocidos.",
                 f"{PREFIX}banner — banners con fuente oficial verificable.",
                 f"{PREFIX}calendario — eventos y fechas verificables.",
+                f"{PREFIX}enciclopedia <nombre> — consulta el archivo de Teyvat por categorías.",
                 f"{PREFIX}buscargenshin <texto> — busca personajes y objetos.",
                 f"{PREFIX}lista personajes|enemigos [página] — consulta listados.",
                 f"{PREFIX}enemigo <nombre> — ficha de enemigo o jefe.",
@@ -13535,6 +13538,57 @@ async def handle_command(event: dict, source: str):
     # -----------------------------------------------------------------------
     # EXPLORADOR DINÁMICO DE GENSHIN-DB
     # -----------------------------------------------------------------------
+    if command in ("!enciclopedia", "!archivo", "!teyvat"):
+        if not query:
+            await send_message(
+                thread,
+                "ENCICLOPEDIA DE TEYVAT\\nConsulta personajes, armas, artefactos, enemigos, materiales, comida, dominios, regiones y elementos.\\nUso: !enciclopedia <nombre>",
+                source,
+                reply
+            )
+            return
+        categories = [
+            ("Personajes", "characters"),
+            ("Armas", "weapons"),
+            ("Artefactos", "artifacts"),
+            ("Enemigos", "enemies"),
+            ("Materiales", "materials"),
+            ("Comida", "foods"),
+            ("Dominios", "domains"),
+            ("Geografía", "geographies"),
+            ("Elementos", "elements"),
+        ]
+        results = await asyncio.gather(
+            *(game_data(folder, query) for _, folder in categories),
+            return_exceptions=True
+        )
+        sections = []
+        for (label, folder), data in zip(categories, results):
+            if isinstance(data, Exception) or data is None:
+                continue
+            if isinstance(data, dict):
+                name = clean_game_text(data.get("name") or data.get("Name") or query)
+                if name.casefold() == query.casefold() or query.casefold() in name.casefold():
+                    detail = describe_game(data, query, folder)
+                    if detail and not detail.startswith("No encontré"):
+                        sections.append(f"【{label}】\\n{detail}")
+            elif isinstance(data, list) and data:
+                matches = [
+                    clean_game_text(item.get("name") if isinstance(item, dict) else item)
+                    for item in data[:8]
+                ]
+                if any(query.casefold() in item.casefold() for item in matches):
+                    sections.append(f"【{label}】\\n" + ", ".join(matches[:6]))
+        if sections:
+            answer = f"ARCHIVO DE TEYVAT · {query}\\n\\n" + "\\n\\n".join(sections[:5])
+        else:
+            answer = (
+                f"No encontré una ficha exacta de «{query}» en la enciclopedia. "
+                "Prueba con el nombre oficial, un alias o una consulta más específica."
+            )
+        await send_message(thread, answer, source, reply)
+        return
+
     if command == "!buscargenshin":
         if not query:
             await send_message(
@@ -15017,7 +15071,7 @@ async def handle_command(event: dict, source: str):
                 "• Internet Archive: búsqueda y validación de licencia automática.\n"
                 "• Wikimedia Commons: audio libre con licencia verificable.\n"
                 f"• Jamendo: {jamendo_status}; requiere Client ID gratuito.\n"
-                "Las búsquedas combinan los catálogos disponibles y mezclan sus resultados.",
+                "Las búsquedas combinan los catálogos disponibles, validan las pistas antes de reproducirlas y pueden usar recomendaciones por ambiente: estudiar, trabajar, relajarse, dormir, jugar, combate, triste o feliz.",
                 dj_source,
                 reply
             )
@@ -15038,6 +15092,24 @@ async def handle_command(event: dict, source: str):
             )
             return
 
+        if args[0].lower() in ("ambiente", "mood", "recomendar"):
+            mood = " ".join(args[1:]).strip().casefold()
+            mood_queries = {
+                "estudiar": "instrumental focus study ambient",
+                "concentracion": "instrumental focus study ambient",
+                "concentración": "instrumental focus study ambient",
+                "trabajar": "lofi chill instrumental",
+                "relajarse": "calm ambient piano relaxing",
+                "dormir": "soft ambient sleep meditation",
+                "jugar": "epic cinematic game soundtrack",
+                "gaming": "epic cinematic game soundtrack",
+                "combate": "epic battle orchestral",
+                "triste": "melancholic piano ambient",
+                "feliz": "upbeat cheerful instrumental",
+                "anime": "anime instrumental soundtrack",
+            }
+            search_term = mood_queries.get(mood, mood or "ambient instrumental")
+            args = ["buscar", search_term]
         if args[0].lower() in ("buscar", "search"):
             search_term = " ".join(args[1:]).strip()
             if not search_term:
@@ -15545,11 +15617,13 @@ async def dispatch(event: dict, source: str):
                 routed_message = dict(message_data)
                 routed_message["content"] = f"{PREFIX}{routed_command}"
                 routed_event["message"] = routed_message
-                logging.info("[NEXUS] Solicitud interpretada como %s", routed_command.split()[0])
+                logging.info("[NEXUS] Solicitud dirigida a Katherine interpretada como %s", routed_command.split()[0])
                 await handle_command(routed_event, source)
             else:
-                await handle_command(event, source)
+                # Conversación ordinaria: Katherine no responde si no la invocan.
+                metrics["unaddressed_messages_ignored"] += 1
         else:
+            # Los comandos clásicos con prefijo siguen funcionando.
             await handle_command(event, source)
 
     elif kind == "interaction":
