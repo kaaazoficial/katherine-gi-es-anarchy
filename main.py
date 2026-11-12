@@ -8415,12 +8415,14 @@ async def fetch_community_character_guide(
     target_slugs = set(candidates)
     tasks = []
 
+    sources = {}
     needs_build = any(needs.get(field) for field in (
         "weapons", "artifacts", "stats", "talents"
     ))
     if needs_build:
         builds_data = await fetch_genshin_builds_guide(candidates)
-        sources = {"genshin_builds": builds_data} if builds_data else {}
+        if builds_data:
+            sources["genshin_builds"] = builds_data
         tasks.extend([
             (
                 "kqm",
@@ -8455,6 +8457,9 @@ async def fetch_community_character_guide(
         ])
 
     if needs.get("teams"):
+        builds_teams_data = await fetch_genshin_builds_guide(candidates)
+        if builds_teams_data and builds_teams_data.get("teams"):
+            sources["genshin_builds_teams"] = builds_teams_data
         tasks.append((
             "icy_veins_teams",
             fetch_first_community_guide(
@@ -8507,17 +8512,18 @@ async def fetch_community_character_guide(
                 break
 
     if needs.get("teams"):
-        data = sources.get("icy_veins_teams") or {}
+        data = sources.get("genshin_builds_teams") or sources.get("icy_veins_teams") or {}
         if data.get("teams"):
             merged["teams"] = "\n".join(
                 f"{index}. {item}"
                 for index, item in enumerate(data["teams"], 1)
             )
             merged["teams_url"] = data.get("url")
-            merged["sources"].append("icy_veins_teams")
+            merged["sources"].append("genshin_builds_teams" if sources.get("genshin_builds_teams") else "icy_veins_teams")
 
     source_labels = {
         "genshin_builds": "Genshin-Builds (español)",
+        "genshin_builds_teams": "Genshin-Builds (español) · equipos",
         "kqm": "KeqingMains",
         "genshin_gg": "Genshin.gg",
         "icy_veins": "Icy Veins",
