@@ -230,6 +230,20 @@ def init_db():
             FOREIGN KEY(playlist_id) REFERENCES dj_playlists(id) ON DELETE CASCADE
         )""")
         db.execute("CREATE INDEX IF NOT EXISTS idx_playlist_tracks ON dj_playlist_tracks(playlist_id,id)")
+        db.execute("""CREATE TABLE IF NOT EXISTS dj_favorites (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id TEXT NOT NULL,
+            uid TEXT NOT NULL,
+            title TEXT NOT NULL,
+            url TEXT NOT NULL,
+            creator TEXT NOT NULL DEFAULT '',
+            license TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '',
+            extension TEXT NOT NULL DEFAULT '.mp3',
+            created_at REAL NOT NULL,
+            UNIQUE(thread_id, uid, url)
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_dj_favorites_owner ON dj_favorites(thread_id,uid,id)")
 
         db.execute("""CREATE TABLE IF NOT EXISTS chat_activity_daily (
             thread_id TEXT NOT NULL,
@@ -447,6 +461,50 @@ def delete_dj_playlist(thread_id: str, playlist_name: str) -> bool:
         return True
 
 
+
+
+def save_dj_favorite(thread_id: str, uid: str, track: dict) -> bool:
+    url = str(track.get("url") or "").strip()
+    if not url or not dj_audio_url_allowed(url):
+        return False
+    try:
+        with db_session() as db:
+            db.execute(
+                """INSERT INTO dj_favorites
+                   (thread_id,uid,title,url,creator,license,source,extension,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (
+                    str(thread_id), str(uid), str(track.get("title") or "Pista")[:160],
+                    url, str(track.get("creator") or "")[:120],
+                    str(track.get("license") or "")[:100],
+                    str(track.get("source") or "")[:80],
+                    str(track.get("extension") or ".mp3")[:8], time.time()
+                )
+            )
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def list_dj_favorites(thread_id: str, uid: str, limit: int = 20) -> list[dict]:
+    with db_session() as db:
+        rows = db.execute(
+            """SELECT id,title,url,creator,license,source,extension
+               FROM dj_favorites WHERE thread_id=? AND uid=?
+               ORDER BY id DESC LIMIT ?""",
+            (str(thread_id), str(uid), max(1, min(50, int(limit))))
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def delete_dj_favorite(thread_id: str, uid: str, favorite_id: int) -> bool:
+    with db_session() as db:
+        cursor = db.execute(
+            "DELETE FROM dj_favorites WHERE thread_id=? AND uid=? AND id=?",
+            (str(thread_id), str(uid), int(favorite_id))
+        )
+        return cursor.rowcount > 0
+
 def anti_spam_configuration(thread_id: str) -> dict:
     def bounded(key, default, minimum, maximum):
         try:
@@ -457,7 +515,9 @@ def anti_spam_configuration(thread_id: str) -> dict:
         "enabled": get_chat_setting(thread_id, "antispam_enabled", "1") == "1",
         "max_messages": bounded("antispam_max_messages", 7, 3, 20),
         "window_seconds": bounded("antispam_window_seconds", 8, 3, 60),
-        "repeat_limit": bounded("antispam_repeat_limit", 3, 2, 10)
+        "repeat_limit": bounded("antispam_repeat_limit", 3, 2, 10),
+        "max_links": bounded("antispam_max_links", 4, 2, 12),
+        "max_mentions": bounded("antispam_max_mentions", 8, 3, 20)
     }
 
 
@@ -538,8 +598,16 @@ def check_antispam_message(event: dict, source: str):
     digest = hashlib.sha256(content.encode("utf-8", errors="ignore")).hexdigest()
     activity.append((now, digest))
     repeated = sum(1 for _, item_digest in activity if item_digest == digest)
-    flooded = len(activity) >= config["max_messages"] or repeated >= config["repeat_limit"]
-    if not flooded:
+    link_count = len(re.findall(r"(?:https?://|www\\.)\\S+", content, flags=re.I))
+    mention_count = len(message.get("mentions") or [])
+    reason = ""
+    if link_count > config["max_links"]:
+        reason = f"Exceso de enlaces en un mensaje ({link_count})."
+    elif mention_count > config["max_mentions"]:
+        reason = f"Menciones masivas en un mensaje ({mention_count})."
+    elif len(activity) >= config["max_messages"] or repeated >= config["repeat_limit"]:
+        reason = "Antispam automático: demasiados mensajes o contenido repetido."
+    if not reason:
         return False, None
 
     warn_key = f"{thread_id}:{uid}"
@@ -549,7 +617,7 @@ def check_antispam_message(event: dict, source: str):
     target_uid = scoped_uid(f"developer:{thread_id}", uid)
     warning_id = add_moderation_warning(
         thread_id, target_uid, nickname, "Katherine", "Katherine",
-        "Antispam automático: demasiados mensajes o contenido repetido.",
+        reason,
         automatic=True
     )
     metrics["antispam_blocked"] += 1
@@ -1136,6 +1204,15 @@ async def external_request(method: str, url: str, **kwargs):
     """HTTP compartido con concurrencia limitada, telemetría y reintentos seguros."""
     host_match = re.match(r"https?://([^/:]+)", str(url), flags=re.I)
     host = host_match.group(1).lower() if host_match else "unknown"
+    host_state = SOURCE_HEALTH.setdefault(host, {
+        "requests": 0, "successes": 0, "failures": 0,
+        "last_status": None, "last_latency_ms": 0.0,
+        "last_success_at": None, "last_error": None,
+        "consecutive_failures": 0, "circuit_open_until": 0.0
+    })
+    if float(host_state.get("circuit_open_until", 0) or 0) > time.time():
+        metrics["external_circuit_open"] += 1
+        raise RuntimeError(f"Fuente {host} temporalmente aislada por fallos consecutivos.")
     host_semaphore = EXTERNAL_HOST_LIMITS.setdefault(host, asyncio.Semaphore(3))
     safe_retry = str(method).upper() in ("GET", "HEAD")
     attempts = 3 if safe_retry else 1
@@ -1166,10 +1243,19 @@ async def external_request(method: str, url: str, **kwargs):
                         state["successes"] += 1
                         state["last_success_at"] = time.time()
                         state["last_error"] = None
+                        state["consecutive_failures"] = 0
+                        state["circuit_open_until"] = 0.0
                         return response
 
                     state["failures"] += 1
                     state["last_error"] = f"HTTP {response.status_code}"
+                    if response.status_code in (429, 500, 502, 503, 504):
+                        state["consecutive_failures"] = int(state.get("consecutive_failures", 0)) + 1
+                        if state["consecutive_failures"] >= 6:
+                            state["circuit_open_until"] = time.time() + 30
+                            logging.warning("[NEXUS] Circuit breaker abierto para %s durante 30 s", host)
+                    else:
+                        state["consecutive_failures"] = 0
 
                     if (
                         safe_retry
@@ -1197,6 +1283,10 @@ async def external_request(method: str, url: str, **kwargs):
                     state["failures"] += 1
                     state["last_latency_ms"] = (time.perf_counter() - started) * 1000
                     state["last_error"] = type(exc).__name__
+                    state["consecutive_failures"] = int(state.get("consecutive_failures", 0)) + 1
+                    if state["consecutive_failures"] >= 6:
+                        state["circuit_open_until"] = time.time() + 30
+                        logging.warning("[NEXUS] Circuit breaker abierto para %s durante 30 s", host)
                     if not safe_retry or attempt + 1 >= attempts:
                         raise
                     await asyncio.sleep(0.35 * (attempt + 1))
@@ -2867,6 +2957,17 @@ async def enqueue_message_for_speech(event: dict, source: str):
     if len(speech_text) < 2:
         return
 
+    speech_text = speech_text[:700]
+    digest = hashlib.sha256(speech_text.casefold().encode("utf-8")).hexdigest()
+    recent = state.setdefault("speech_recent", {})
+    now = time.time()
+    for old_digest, stamp in list(recent.items()):
+        if now - stamp > 15:
+            recent.pop(old_digest, None)
+    if digest in recent:
+        metrics["tts_duplicates_skipped"] += 1
+        return
+    recent[digest] = now
     queue = state["speech_queue"]
     if queue.full():
         try:
@@ -12383,6 +12484,21 @@ async def handle_command(event: dict, source: str):
 
 
 
+    if command == "!asistente":
+        request_text = query.strip()
+        answer = (
+            f"Te escucho. Sobre «{request_text[:180]}», todavía no tengo una acción específica conectada.\\n"
+            "Puedo consultar la enciclopedia de Genshin, buscar y reproducir música, "
+            "controlar el DJ, entrar a la sala de voz, leer mensajes, revisar el estado "
+            "y abrir el panel de administración. Dime qué necesitas empezando por «Katherine»."
+            if request_text else
+            "Estoy lista. Puedes pedirme consultas o acciones empezando por «Katherine». "
+            "Por ejemplo: «Katherine, busca a Nahida en la enciclopedia», "
+            "«Katherine, pon música para estudiar» o «Katherine, pausa la música»."
+        )
+        await send_message(thread, answer, source, reply)
+        return
+
     if command in ("!centro", "!nexus"):
         await send_nexus_center(thread, source, raw_uid, nickname, reply)
         return
@@ -15090,6 +15206,57 @@ async def handle_command(event: dict, source: str):
                 dj_source,
                 reply
             )
+            return
+
+        if args[0].lower() in ("favorito", "favoritos"):
+            sub = args[1].lower() if len(args) > 1 else "lista"
+            if sub in ("lista", "listar"):
+                favorites = list_dj_favorites(thread, raw_uid)
+                if not favorites:
+                    await send_message(thread, "Todavía no tienes canciones favoritas en esta sala.", dj_source, reply)
+                    return
+                listing = "\\n".join(
+                    f"{item['id']}. {item['title']} — {item['creator']} ({item['source']})"
+                    for item in favorites
+                )
+                await send_message(thread, "DJ · FAVORITOS\\n" + listing, dj_source, reply)
+                return
+            if sub in ("guardar", "agregar", "añadir"):
+                try:
+                    index = int(args[2]) - 1
+                    track = (DJ_SEARCH_RESULTS.get(thread) or {}).get("tracks", [])[index]
+                except (ValueError, IndexError):
+                    await send_message(thread, "Primero busca música con !dj buscar y elige un número válido.", dj_source, reply)
+                    return
+                saved = save_dj_favorite(thread, raw_uid, track)
+                await send_message(thread, "⭐ Canción guardada en favoritos." if saved else "No se pudo guardar; quizá ya existe.", dj_source, reply)
+                return
+            if sub in ("quitar", "eliminar", "borrar") and len(args) > 2:
+                try:
+                    favorite_id = int(args[2])
+                except ValueError:
+                    favorite_id = -1
+                removed = delete_dj_favorite(thread, raw_uid, favorite_id)
+                await send_message(thread, "Favorito eliminado." if removed else "No encontré ese favorito.", dj_source, reply)
+                return
+            if sub in ("reproducir", "play") and len(args) > 2:
+                try:
+                    favorite_id = int(args[2])
+                except ValueError:
+                    favorite_id = -1
+                favorite = next((item for item in list_dj_favorites(thread, raw_uid, 50) if item["id"] == favorite_id), None)
+                if not favorite:
+                    await send_message(thread, "No encontré ese favorito.", dj_source, reply)
+                    return
+                metadata = {
+                    "title": favorite["title"], "creator": favorite["creator"],
+                    "license": favorite["license"], "source": favorite["source"],
+                    "extension": favorite["extension"], "url": favorite["url"]
+                }
+                ok, message = await start_dj_room(thread, favorite["url"], False, track_metadata=metadata)
+                await send_message(thread, f"🎧 {message}" if ok else f"DJ: {message}", dj_source, reply)
+                return
+            await send_message(thread, "Usa !dj favorito lista, guardar <número>, reproducir <id> o quitar <id>.", dj_source, reply)
             return
 
         if args[0].lower() in ("ambiente", "mood", "recomendar"):
