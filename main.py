@@ -69,6 +69,7 @@ from katherine_ai import (
     KatherineAI, build_ai_session_key, is_bot_author, validate_ai_tool_call
 )
 from katherine_research import search_web, fetch_public_page, build_source_context
+from katherine_retention import cleanup_database_retention
 
 AI_CORE = KatherineAI()
 AI_TOOL_OUTPUT_CAPTURE: ContextVar[list[str] | None] = ContextVar(
@@ -191,7 +192,8 @@ def init_db():
             points INTEGER NOT NULL DEFAULT 0,
             message_count INTEGER NOT NULL DEFAULT 0,
             created_at REAL NOT NULL,
-            last_seen REAL NOT NULL
+            last_seen REAL NOT NULL,
+            profile_updated_at REAL
         )""")
         db.execute("""CREATE TABLE IF NOT EXISTS affinities (
             uid TEXT NOT NULL,
@@ -243,6 +245,12 @@ def init_db():
                 # Compatibilidad con SQLite antiguo: deja el campo vacío y sin uso.
                 db.execute("UPDATE users SET genshin_uid=''")
 
+        user_columns = {row["name"] for row in db.execute("PRAGMA table_info(users)").fetchall()}
+        if "profile_updated_at" not in user_columns:
+            db.execute("ALTER TABLE users ADD COLUMN profile_updated_at REAL")
+            db.execute("UPDATE users SET profile_updated_at=last_seen WHERE bio<>'' OR status<>''")
+
+        db.execute("CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_gifts_target ON gifts(target_uid, id DESC)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_users_points ON users(points DESC)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_users_activity ON users(message_count DESC)")
