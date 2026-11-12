@@ -48,12 +48,14 @@ ACTION_SCHEMA = {
 def resolve_community_faq(question: str) -> str | None:
     """Canonical facts about Katherine and her community."""
     text = normalize_topic_text(question)
-    text = re.sub(r"^katherine\\s+", "", text).strip()
+    if text.startswith("katherine "):
+        text = text[len("katherine "):].strip()
 
     creator = (
-        "quien es tu creador", "quien fue tu creador", "quien te creo",
-        "quien creo a katherine", "quien te hizo", "quien te desarrollo",
-        "quien te programo",
+        "quien es tu creador", "quien fue tu creador", "quien es su creador",
+        "quien es el creador de katherine", "quien es el creador",
+        "quien te creo", "quien creo a katherine", "quien te hizo",
+        "quien te desarrollo", "quien te programo", "quien es tu desarrollador",
     )
     if any(x in text for x in creator):
         return "Mi creador es Sinner."
