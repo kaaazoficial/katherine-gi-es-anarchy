@@ -12618,6 +12618,28 @@ async def execute_ai_tool(
     )
 
 
+async def execute_ai_plan(
+    event: dict, source: str, session_key: str, steps: list
+) -> bool:
+    """Validate the entire bounded plan before executing any step in order."""
+    if not isinstance(steps, list) or not 1 <= len(steps) <= 3:
+        return False
+    validated = []
+    for step in steps:
+        if not isinstance(step, str):
+            return False
+        parts = step.split(maxsplit=1)
+        invocation = validate_ai_tool_call(
+            parts[0] if parts else "", parts[1] if len(parts) > 1 else ""
+        )
+        if not invocation:
+            return False
+        validated.append(invocation)
+    for invocation in validated:
+        await execute_ai_tool(event, source, session_key, invocation)
+    return True
+
+
 async def handle_command(event: dict, source: str):
     global LAST_EVENT_AT, LAST_COMMAND_AT, LAST_COMMAND_NAME, LAST_COMMAND_USER
     LAST_EVENT_AT = time.time()
@@ -12717,6 +12739,15 @@ async def handle_command(event: dict, source: str):
                 "[NEXUS] IA sin herramienta válida; se ejecuta la ruta determinista."
             )
             await execute_ai_tool(event, source, session_key, fallback_command)
+            return
+        if ai_result.get("kind") == "plan":
+            if await execute_ai_plan(event, source, session_key, ai_result.get("steps") or []):
+                return
+            await send_message(
+                thread,
+                "No pude validar la secuencia completa. No ejecuté ningún paso.",
+                source, reply
+            )
             return
         if ai_result.get("kind") == "command":
             invocation = validate_ai_tool_call(
@@ -12848,6 +12879,15 @@ async def handle_command(event: dict, source: str):
                 return
             prompt = ("Consulta de Genshin Impact. Usa la enciclopedia o guías existentes para verificar. " if sub == "genshin" else "") + rest
             result = await AI_CORE.assist(prompt, session_key, external_request)
+            if result.get("kind") == "plan":
+                if await execute_ai_plan(event, source, session_key, result.get("steps") or []):
+                    return
+                await send_message(
+                    thread,
+                    "No pude validar la secuencia completa. No ejecuté ningún paso.",
+                    source, reply
+                )
+                return
             if result.get("kind") == "command":
                 invocation = validate_ai_tool_call(result.get("command", ""), result.get("args", ""))
                 if invocation:
