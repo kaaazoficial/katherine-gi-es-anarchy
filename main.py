@@ -12049,7 +12049,7 @@ async def handle_interaction(event: dict, source: str):
     if not action:
         return
     if (
-        action.get("source") != source
+        (action.get("source") != source and action.get("type") != "dj_select")
         or action.get("thread") != thread_id
         or action.get("expires", 0) <= time.time()
     ):
@@ -12189,7 +12189,7 @@ async def handle_interaction(event: dict, source: str):
             await send_message(
                 thread_id,
                 "Los resultados de búsqueda caducaron. Usa !dj buscar <tema> otra vez.",
-                source
+                dj_source
             )
             return
         try:
