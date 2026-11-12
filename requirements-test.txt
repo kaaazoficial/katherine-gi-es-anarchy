@@ -1,0 +1,6 @@
+# Dependencies needed to import Katherine and run isolated tests.
+# Optional audio/media dependencies are intentionally omitted: the bot
+# already treats them as optional imports, and tests do not connect to voice.
+fastapi>=0.115.0
+httpx>=0.27.0
+pytest>=8.0.0
