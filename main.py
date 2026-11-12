@@ -2631,6 +2631,7 @@ async def ensure_voice_room(thread_id: str):
                 "task": None,
                 "speech_task": None,
                 "speech_queue": asyncio.Queue(maxsize=20),
+                "speech_priority_queue": asyncio.Queue(maxsize=5),
                 "reading_enabled": False,
                 "speaking": asyncio.Event(),
                 "filename": None,
@@ -2828,12 +2829,16 @@ async def speech_queue_worker(thread_id: str):
     state = DJ_ROOMS.get(str(thread_id))
     if not state or edge_tts is None:
         return
-    queue = state["speech_queue"]
     while not state["stop_event"].is_set():
+        queue = state.get("speech_priority_queue")
         try:
-            text_to_read = await asyncio.wait_for(queue.get(), timeout=1.0)
-        except asyncio.TimeoutError:
-            continue
+            text_to_read = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            queue = state["speech_queue"]
+            try:
+                text_to_read = await asyncio.wait_for(queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
 
         temp_path = None
         try:
@@ -2979,7 +2984,11 @@ async def enqueue_message_for_speech(event: dict, source: str):
         metrics["tts_duplicates_skipped"] += 1
         return
     recent[digest] = now
-    queue = state["speech_queue"]
+    is_directed = bool(re.match(r"^(?:oye[, ]+)?katherine\b", content, flags=re.I))
+    queue = (
+        state.get("speech_priority_queue") or state["speech_queue"]
+        if is_directed else state["speech_queue"]
+    )
     if queue.full():
         try:
             queue.get_nowait()
@@ -2988,8 +2997,9 @@ async def enqueue_message_for_speech(event: dict, source: str):
             pass
     try:
         queue.put_nowait(speech_text)
+        metrics["tts_priority_enqueued" if is_directed else "tts_regular_enqueued"] += 1
     except asyncio.QueueFull:
-        logging.warning("[TTS] Cola llena; se omitió un mensaje en %s", thread_id)
+        logging.warning("[TTS] Cola %s llena; se omitió un mensaje en %s", "prioritaria" if is_directed else "normal", thread_id)
 
 
 async def download_dj_audio(url: str, file_extension: str | None = None) -> Path:
