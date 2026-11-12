@@ -61,6 +61,7 @@ from katherine_nexus import (
     toggle_community_participant,
 )
 from katherine_astra import (
+    is_livekit_audio_source_failure,
     is_recoverable_dj_failure,
     resolve_music_mood,
 )
@@ -1469,40 +1470,63 @@ async def api_upload_bytes(path: str, source: str, content: bytes, content_type:
         }
 
 
-def split_message_content(content: str, limit: int = 2000) -> list[str]:
-    """Divide mensajes en bloques de hasta 'limit' caracteres."""
+def utf16_length(value: str) -> int:
+    """Return the number of UTF-16 code units used by the platform message API."""
+    return len(str(value or "").encode("utf-16-le", errors="surrogatepass")) // 2
+
+
+def utf16_prefix_length(value: str, limit: int) -> int:
+    """Return a Python string index that does not cross a UTF-16 unit limit."""
+    units = 0
+    for index, character in enumerate(value):
+        width = 2 if ord(character) > 0xFFFF else 1
+        if units + width > limit:
+            return index
+        units += width
+    return len(value)
+
+
+def split_message_content(content: str, limit: int = 1800) -> list[str]:
+    """Split outgoing messages below the API cap, counting UTF-16 code units."""
+    if limit < 1:
+        raise ValueError("El límite de mensaje debe ser positivo.")
     text = clean_text(content)
     if not text:
         return []
 
     chunks = []
-    while len(text) > limit:
-        newline_at = text.rfind("\n", 0, limit + 1)
-        paragraph_at = text.rfind("\n\n", 0, limit + 1)
+    while utf16_length(text) > limit:
+        safe_end = utf16_prefix_length(text, limit)
+        if safe_end <= 0:
+            raise ValueError("No pude dividir el mensaje sin romper un carácter Unicode.")
+        prefix = text[:safe_end]
+        newline_at = prefix.rfind("\n")
+        paragraph_at = prefix.rfind("\n\n")
         sentence_ends = [
             match.end()
-            for match in re.finditer(r"[.!?…](?:[\"')\]]?)(?:\s+|$)", text[:limit + 1])
-            if limit * 0.65 <= match.end() <= limit
+            for match in re.finditer(r"[.!?…](?:[\"')\]]?)(?:\s+|$)", prefix)
+            if utf16_length(prefix[:match.end()]) >= limit * 0.65
         ]
         sentence_at = sentence_ends[-1] if sentence_ends else -1
-        space_at = text.rfind(" ", 0, limit + 1)
+        space_at = prefix.rfind(" ")
         cut = max(paragraph_at, newline_at, sentence_at, space_at)
 
-        # Evita crear un bloque demasiado corto por un salto temprano.
-        if cut < limit // 2:
-            cut = limit
+        # Avoid tiny blocks caused by an early newline.
+        if cut <= 0 or utf16_length(prefix[:cut]) < limit // 2:
+            cut = safe_end
 
         chunk = text[:cut].rstrip()
         if not chunk:
-            cut = limit
+            cut = safe_end
             chunk = text[:cut]
+        if not chunk:
+            raise ValueError("No pude producir un bloque de mensaje válido.")
 
         chunks.append(chunk)
         text = text[cut:].lstrip()
 
     if text:
         chunks.append(text)
-
     return chunks
 
 
@@ -1619,7 +1643,7 @@ async def send_message(
         )
         if normalized_capture and not is_progress and len(capture) < 8:
             capture.append(normalized_capture[:2000])
-    parts = split_message_content(content, 2000)
+    parts = split_message_content(content, 1800)
     if not parts:
         return None
 
@@ -2610,8 +2634,24 @@ async def ensure_voice_room(thread_id: str):
 
     lock = VOICE_CONNECT_LOCKS.setdefault(thread_id, asyncio.Lock())
     async with lock:
-        if thread_id in DJ_ROOMS:
-            return True, "Katherine ya está dentro de la llamada."
+        existing_state = DJ_ROOMS.get(thread_id)
+        if existing_state:
+            existing_room = existing_state.get("room")
+            try:
+                room_connected = bool(
+                    existing_room
+                    and callable(getattr(existing_room, "isconnected", None))
+                    and existing_room.isconnected()
+                )
+            except Exception:
+                room_connected = False
+            if room_connected and not existing_state.get("_cleanup_started"):
+                return True, "Katherine ya está dentro de la llamada."
+            logging.warning(
+                "[VOZ] Estado LiveKit obsoleto en %s; limpiando antes de reconectar.",
+                thread_id,
+            )
+            await stop_dj_room(thread_id, request_leave=True)
 
         ready = asyncio.Event()
         DJ_READY_EVENTS[thread_id] = ready
@@ -2645,7 +2685,10 @@ async def ensure_voice_room(thread_id: str):
             await room.connect(room_url, room_token)
             await asyncio.wait_for(ready.wait(), timeout=20)
 
-            audio_source = livekit_rtc.AudioSource(48000, 1)
+            # Extra bounded headroom absorbs short scheduler/network stalls.
+            audio_source = livekit_rtc.AudioSource(
+                48000, 1, queue_size_ms=2000
+            )
             audio_track = livekit_rtc.LocalAudioTrack.create_audio_track(
                 "katherine-voice",
                 audio_source
@@ -2688,6 +2731,23 @@ async def ensure_voice_room(thread_id: str):
                 "started_at": time.time()
             }
             room_state = DJ_ROOMS[thread_id]
+
+            def on_livekit_disconnected(reason=None):
+                current_state = DJ_ROOMS.get(thread_id)
+                if (
+                    current_state is room_state
+                    and not current_state.get("_cleanup_started")
+                ):
+                    current_state["_cleanup_started"] = True
+                    logging.warning(
+                        "[VOZ] LiveKit desconectó la sala %s; limpiando el estado de audio.",
+                        thread_id,
+                    )
+                    asyncio.create_task(
+                        stop_dj_room(thread_id, request_leave=True)
+                    )
+
+            room.on("disconnected", on_livekit_disconnected)
             room_state["tts_voice"] = get_chat_setting(thread_id, "tts_voice", TTS_VOICE)
             room_state["tts_rate"] = get_chat_setting(thread_id, "tts_rate", "+0%")
             try:
@@ -2900,7 +2960,16 @@ async def speech_queue_worker(thread_id: str):
                 await stream_speech_file(thread_id, temp_path)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            if is_livekit_audio_source_failure(exc):
+                if not state.get("_cleanup_started"):
+                    state["_cleanup_started"] = True
+                    logging.warning(
+                        "[TTS] La fuente LiveKit quedó inválida en %s; cerrando la sesión de voz para permitir una reconexión limpia.",
+                        thread_id,
+                    )
+                    await stop_dj_room(thread_id, request_leave=True)
+                break
             logging.exception("[TTS] No se pudo leer un mensaje en %s", thread_id)
         finally:
             state["speaking"].clear()
@@ -9892,9 +9961,12 @@ async def get_helper_build_tree():
             }
         )
         if response.status_code != 200:
+            cooldown = 900 if response.status_code in (403, 429) else 120
+            cache[key] = (time.time() + cooldown, None)
             logging.warning(
-                "Genshin Builds tree respondió HTTP %s",
-                response.status_code
+                "Genshin Builds tree respondió HTTP %s; se pausa la consulta %s s",
+                response.status_code,
+                cooldown,
             )
             return None
 
@@ -9917,8 +9989,12 @@ async def get_helper_build_tree():
         }
         cache[key] = (time.time() + HELPER_BUILDS_CACHE_TTL, result)
         return result
-    except (httpx.HTTPError, ValueError, TypeError) as exc:
-        logging.warning("No se pudo leer el índice de Genshin Builds: %s", exc)
+    except Exception as exc:
+        cache[key] = (time.time() + 300, None)
+        logging.warning(
+            "No se pudo leer el índice de Genshin Builds: %s",
+            type(exc).__name__,
+        )
         return None
 
 

@@ -1,5 +1,6 @@
 """Regression tests for ASTRA NOVA pure intent and recovery helpers."""
 from katherine_astra import (
+    is_livekit_audio_source_failure,
     is_recoverable_dj_failure,
     normalize_music_mood,
     resolve_music_mood,
@@ -25,3 +26,28 @@ def test_dj_recovery_only_skips_invalid_audio_errors():
     assert is_recoverable_dj_failure("El archivo no pasó la validación de audio.")
     assert not is_recoverable_dj_failure("No pude entrar a la llamada (HTTP 403).")
     assert not is_recoverable_dj_failure("La sala no confirmó que Katherine publicara audio.")
+
+
+
+def test_livekit_audio_source_failure_detection_is_specific():
+    assert is_livekit_audio_source_failure(
+        "an RtcError occurred: InvalidState - failed to capture frame"
+    )
+    assert is_livekit_audio_source_failure("failed to capture frame")
+    assert not is_livekit_audio_source_failure(
+        "edge_tts returned a temporary HTTP 503"
+    )
+
+
+def test_dj_remote_download_http_errors_are_recoverable_but_voice_403_is_not():
+    assert is_recoverable_dj_failure(
+        "No pude descargar o validar la canción "
+        "(RuntimeError: La fuente musical respondió HTTP 403)."
+    )
+    assert is_recoverable_dj_failure(
+        "No pude descargar o validar la canción "
+        "(RuntimeError: La fuente musical respondió HTTP 404)."
+    )
+    assert not is_recoverable_dj_failure(
+        "No pude entrar a la llamada (HTTP 403): not_in_chat."
+    )

@@ -32,6 +32,12 @@ def resolve_music_mood(value: str) -> str:
     return DJ_MOOD_QUERIES.get(normalized, normalized or "ambient instrumental")
 
 
+def is_livekit_audio_source_failure(message: str | BaseException) -> bool:
+    """Identify a disposed/invalid LiveKit audio source, not ordinary TTS errors."""
+    value = str(message or "").casefold()
+    return "invalidstate" in value or "failed to capture frame" in value
+
+
 def is_recoverable_dj_failure(message: str) -> bool:
     """Only skip to another result when the selected audio itself is invalid."""
     value = str(message or "").casefold()
