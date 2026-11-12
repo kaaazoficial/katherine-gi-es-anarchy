@@ -15,13 +15,24 @@ def interpret_natural_request(value: str) -> str | None:
     raw = re.sub(r"\s+", " ", str(value or "")).strip()
     if not raw or len(raw) > 500 or raw.startswith(("!", "-")):
         return None
-    text = _normalize(raw)
-    text = re.sub(r"^(?:por favor\s+)?(?:katherine[, ]+)", "", text)
-    text = re.sub(r"\s+(?:por favor|porfa)$", "", text).strip()
-    if not text:
+    # Procesar lenguaje natural únicamente cuando el usuario invoque a Katherine.
+    addressed = re.match(
+        r"^(?:oye[, ]+)?katherine(?:[, :]+|$)\\s*(.*)$",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if not addressed:
         return None
+    raw = addressed.group(1).strip()
+    text = _normalize(raw)
+    text = re.sub(r"\\s+(?:por favor|porfa)$", "", text).strip()
+    if not text:
+        return "ayuda"
     patterns = (
         (r"^(?:abre|abrir|muestra|mostrar) (?:el )?(?:menu|panel)(?: interactivo)?$", "menu"),
+        (r"^(?:ayuda|que puedes hacer|que sabes hacer|comandos disponibles)$", "ayuda"),
+        (r"^(?:revisa|consulta|muestra) (?:el )?(?:estado|salud|diagnostico)(?: del bot| de katherine)?$", "estado"),
+        (r"^(?:abre|muestra|consulta) (?:el )?(?:panel de administracion|guardian)$", "guardian"),
         (r"^(?:abre|abrir|muestra|mostrar) (?:el )?centro(?: de control)?$", "centro"),
         (r"^(?:como esta|estado de|diagnostico de) katherine$", "estado"),
         (r"^(?:diagnostica) katherine$", "estado"),
@@ -55,7 +66,10 @@ def interpret_natural_request(value: str) -> str | None:
         (r"^(?:que materiales necesita|materiales para|materiales de) (.+)$", "materiales"),
         (r"^(?:que cobertura tiene|cobertura de|apartados de la guia de) (.+)$", "cobertura"),
         (r"^(?:busca en genshin|busqueda de genshin|busca genshin) (.+)$", "buscargenshin"),
+        (r"^(?:consulta|abre|busca en)?\\s*(?:la )?enciclopedia(?: de genshin)? (?:sobre |de |del )?(.+)$", "enciclopedia"),
+        (r"^(?:quien es|que es|que sabes de) (.+)$", "enciclopedia"),
         (r"^(?:reproduce|pon|busca musica de|busca la cancion) (.+)$", "dj buscar"),
+        (r"^(?:recomiendame|ponme) musica (?:para|de) (.+)$", "dj ambiente"),
         (r"^(?:busca imagenes? de|imagenes? de) (.+)$", "imagen"),
         (r"^(?:busca videos? de|videos? de) (.+)$", "video"),
         (r"^(?:busca audios? de|audios? de) (.+)$", "audio"),
