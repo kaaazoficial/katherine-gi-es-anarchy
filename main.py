@@ -13231,12 +13231,12 @@ async def handle_command(event: dict, source: str):
             ]),
         ]
         header = (
-            f"KATHERINE · COMANDOS\\nPrefijo: {PREFIX} (también ! y -)\\n"
+            f"KATHERINE · COMANDOS\nPrefijo: {PREFIX} (también ! y -)\n"
             "Consulta la categoría que necesites; [ADMIN] requiere UID autorizado."
         )
         await send_message(thread, header, source, reply)
         for title, entries in help_sections:
-            panel = f"【 {title} 】\\n" + "\\n".join(f"• {entry}" for entry in entries)
+            panel = f"【 {title} 】\n" + "\n".join(f"• {entry}" for entry in entries)
             await send_message(thread, panel, source, None)
         return
 
