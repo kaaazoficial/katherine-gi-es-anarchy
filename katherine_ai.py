@@ -184,7 +184,12 @@ class KatherineAI:
 
     @property
     def model(self) -> str:
-        return (os.getenv("KATHERINE_AI_MODEL") or "gpt-5.4-mini").strip()
+        configured = (os.getenv("KATHERINE_AI_MODEL") or "").strip()
+        if configured:
+            return configured
+        # Use a model available on Groq when the endpoint is Groq; never
+        # send OpenAI-only model IDs to a different provider by default.
+        return "openai/gpt-oss-20b" if self.is_groq else "gpt-5.4-mini"
 
     @property
     def provider_name(self) -> str:
