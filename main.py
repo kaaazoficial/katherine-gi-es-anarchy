@@ -15434,6 +15434,44 @@ async def handle_command(event: dict, source: str):
 # ---------------------------------------------------------------------------
 # INTERACCIONES DE BOTONES: ENCUESTAS, MENÚS, JUEGOS Y ACCIONES
 # ---------------------------------------------------------------------------
+async def start_dj_search_with_fallback(
+    thread_id: str, tracks: list[dict], selected_index: int = 0
+) -> tuple[bool, str, dict | None, int | None]:
+    """Try the selected track and later search results if a file cannot be validated."""
+    if not tracks:
+        return False, "No hay pistas disponibles.", None, None
+    start = max(0, min(len(tracks) - 1, int(selected_index)))
+    last_error = "No pude preparar ninguna pista."
+    for index in range(start, len(tracks)):
+        track = tracks[index]
+        ok, message = await start_dj_room(
+            thread_id,
+            track["url"],
+            looping=False,
+            track_metadata=track
+        )
+        if ok:
+            if index != start:
+                metrics["dj_fallback_tracks_started"] += 1
+                logging.info(
+                    "[DJ] Pista alternativa %s iniciada tras fallo de validación en sala %s",
+                    index + 1, thread_id
+                )
+                message = f"La pista seleccionada no se pudo validar; inicié «{track.get('title', 'otra pista')}» como alternativa."
+            return True, message, track, index
+        last_error = message
+        recoverable = (
+            "No pude descargar o validar" in message
+            or "no pasó la validación de audio" in message
+            or "formato de audio no compatible" in message
+            or "no contiene una pista de audio" in message
+        )
+        if not recoverable:
+            break
+        metrics["dj_fallback_tracks_skipped"] += 1
+    return False, last_error, None, None
+
+
 async def handle_interaction(event: dict, source: str):
     button_id = str(event.get("buttonId") or "")
     thread_id = str(event.get("threadId") or "")
@@ -15689,13 +15727,11 @@ async def handle_interaction(event: dict, source: str):
             await send_message(thread_id, "Esa selección ya no está disponible.", dj_source)
             return
 
-        ok, message = await start_dj_room(
-            thread_id,
-            track["url"],
-            looping=False,
-            track_metadata=track
+        ok, message, selected_track, selected_index = await start_dj_search_with_fallback(
+            thread_id, saved.get("tracks", []), selected_index
         )
-        if ok:
+        if ok and selected_track:
+            track = selected_track
             credit = (
                 f"🎧 Ahora suena: {track['title']} — {track['creator']}\n"
                 f"Fuente: {track.get('source', 'catálogo musical')}\n"
