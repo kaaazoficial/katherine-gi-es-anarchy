@@ -1907,6 +1907,39 @@ def archive_license_label(license_url: str) -> str | None:
     return None
 
 
+def archive_audio_download_url(identifier: str, filename: str, payload: dict) -> str:
+    """Build a direct Internet Archive storage URL, avoiding HTML item pages."""
+    server = str(payload.get("d1") or "").strip().lower()
+    directory = str(payload.get("dir") or "").strip()
+    safe_directory_parts = [
+        part for part in directory.strip("/").split("/")
+        if part and part not in (".", "..")
+    ]
+    if (
+        server
+        and re.fullmatch(r"[a-z0-9.-]+", server)
+        and dj_audio_host_allowed(server)
+        and directory.startswith("/")
+        and safe_directory_parts
+        and len(safe_directory_parts) == len(
+            [part for part in directory.strip("/").split("/") if part]
+        )
+    ):
+        encoded_directory = "/".join(
+            quote(part, safe="") for part in safe_directory_parts
+        )
+        return (
+            f"https://{server}/{encoded_directory}/"
+            f"{quote(filename, safe='')}"
+        )
+
+    # Compatibility fallback for metadata records without storage coordinates.
+    return (
+        f"{IA_BASE}/download/{quote(identifier, safe='')}/"
+        f"{quote(filename, safe='')}"
+    )
+
+
 async def archive_item_details(identifier: str) -> dict | None:
     """Obtiene metadatos públicos y valida licencia y formato antes de ofrecer audio."""
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,120}", str(identifier or "")):
@@ -1977,10 +2010,7 @@ async def archive_item_details(identifier: str) -> dict | None:
     )
     year = clean_archive_value(metadata.get("year") or "", 12)
     item_url = f"{IA_BASE}/details/{quote(identifier, safe='')}"
-    audio_url = (
-        f"{IA_BASE}/download/{quote(identifier, safe='')}/"
-        f"{quote(filename, safe='')}"
-    )
+    audio_url = archive_audio_download_url(identifier, filename, payload)
     track = {
         "identifier": identifier,
         "title": title or identifier,
@@ -2798,7 +2828,7 @@ async def download_dj_audio(url: str, file_extension: str | None = None) -> Path
                 content_type = response.headers.get("content-type", "").lower()
                 if "text/html" in content_type or "application/json" in content_type:
                     raise RuntimeError(
-                        "Internet Archive devolvió una página web en vez del audio."
+                        "La fuente musical devolvió una página web en vez del audio."
                     )
                 try:
                     content_length = int(response.headers.get("content-length", "0"))
