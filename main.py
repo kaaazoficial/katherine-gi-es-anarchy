@@ -7477,7 +7477,6 @@ async def handle_command(event: dict, source: str):
             f"{PREFIX}buildborrar <id> — elimina una build tuya.",
             f"{PREFIX}equipo guardar <nombre> | <personajes> | <nota> — guarda un equipo.",
             f"{PREFIX}equipo ver <nombre> / {PREFIX}equipo borrar <nombre> — consulta o elimina un equipo.",
-            f"{PREFIX}equiposguardados — muestra tus equipos personales.
             f"{PREFIX}equiposguardados — lista tus equipos guardados.",
             f"{PREFIX}farmmeta material | actual | objetivo — registra materiales por conseguir.",
             f"{PREFIX}farmlista — muestra tu lista de materiales pendientes.",
