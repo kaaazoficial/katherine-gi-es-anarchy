@@ -25,6 +25,7 @@ from pathlib import Path
 from collections import defaultdict, deque
 from typing import Any
 from html.parser import HTMLParser
+from urllib.parse import urljoin
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
@@ -9033,7 +9034,11 @@ async def fetch_official_news(category: str):
             )
             if detail.status_code != 200:
                 continue
-            body = clean_game_text(detail.text)
+            safe_html = re.sub(
+                r"<(?:script|style|noscript)\b[^>]*>.*?</(?:script|style|noscript)\s*>",
+                " ", detail.text, flags=re.I | re.S
+            )
+            body = clean_game_text(safe_html)
             body = re.sub(r"\s+", " ", body)
             published = extract_guide_update_label(detail.text)
             results.append({
@@ -10068,8 +10073,12 @@ async def handle_command(event: dict, source: str):
             )
         elif community_data and community_data.get("teams"):
             sections.append(
-                "EQUIPOS RECOMENDADOS · ICY VEINS\n"
-                + community_data["teams"]
+                "EQUIPOS RECOMENDADOS · " + str(
+                    GUIDE_COVERAGE_SOURCE_NAMES.get(
+                        (community_data.get("field_sources") or {}).get("teams"),
+                        "FUENTE EXTERNA"
+                    )
+                ) + "\n" + community_data["teams"]
             )
         else:
             sections.append(
