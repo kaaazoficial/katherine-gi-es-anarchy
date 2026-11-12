@@ -12,6 +12,7 @@ import asyncio
 import logging
 import sqlite3
 import sys
+import unicodedata
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -23,6 +24,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from collections import defaultdict, deque
 from typing import Any
+from html.parser import HTMLParser
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
@@ -7215,6 +7217,650 @@ CHARACTER_GUIDE_ALIASES = {
     "errante": "wanderer", "scaramouche": "wanderer",
     "arconte dendro": "nahida"
 }
+
+
+# ---------------------------------------------------------------------------
+# FUENTES SECUNDARIAS PARA GUIAS DE PERSONAJES
+# ---------------------------------------------------------------------------
+HELPER_BUILDS_TREE_URL = (
+    "https://api.github.com/repos/Genshin-Impact-Helper-Team/"
+    "genshin-builds/git/trees/main?recursive=1"
+)
+HELPER_BUILDS_RAW_BASE = (
+    "https://raw.githubusercontent.com/Genshin-Impact-Helper-Team/"
+    "genshin-builds/main/"
+)
+HELPER_BUILDS_CACHE_TTL = 21600
+KQM_QUICKGUIDE_BASE = "https://keqingmains.com/q/"
+
+HELPER_CHARACTER_SLUGS = {
+    "raiden": "shogun-raiden",
+    "raiden-shogun": "shogun-raiden",
+    "kazuha": "kaedehara-kazuha",
+    "ayaka": "kamisato-ayaka",
+    "ayato": "kamisato-ayato",
+    "itto": "arataki-itto",
+    "kokomi": "sangonomiya-kokomi",
+    "sara": "kujou-sara",
+    "heizou": "shikanoin-heizou",
+    "yae": "yae-miko",
+    "miko": "yae-miko",
+    "childe": "tartaglia",
+    "scaramouche": "wanderer",
+    "hutao": "hu-tao",
+    "yunjin": "yun-jin",
+    "yun-jin": "yun-jin",
+    "viajero": "traveler",
+    "traveler": "traveler"
+}
+
+
+def guide_slugify(value: Any) -> str:
+    """Normaliza nombres localizados para buscar carpetas de personajes."""
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    normalized = normalized.encode("ascii", "ignore").decode("ascii").casefold()
+    slug = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
+    return HELPER_CHARACTER_SLUGS.get(slug, slug)
+
+
+async def fetch_helper_build_json(path: str):
+    """Descarga y cachea un JSON público del repositorio Genshin Builds."""
+    if not path or ".." in path.split("/") or not path.startswith("src/"):
+        return None
+
+    key = f"helper-builds:{path}"
+    cached = cache.get(key)
+    if cached and cached[0] > time.time():
+        return cached[1]
+
+    try:
+        response = await external_request(
+            "GET",
+            HELPER_BUILDS_RAW_BASE + path,
+            timeout=15,
+            headers={"User-Agent": "Katherine-AnarchyBot/3.0"}
+        )
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        cache[key] = (time.time() + HELPER_BUILDS_CACHE_TTL, data)
+        return data
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        logging.debug("Genshin Builds JSON no disponible (%s): %s", path, exc)
+        return None
+
+
+async def get_helper_build_tree():
+    """Obtiene una sola vez el índice de guías publicado en GitHub."""
+    key = "helper-builds:tree"
+    cached = cache.get(key)
+    if cached and cached[0] > time.time():
+        return cached[1]
+
+    try:
+        response = await external_request(
+            "GET",
+            HELPER_BUILDS_TREE_URL,
+            timeout=22,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "Katherine-AnarchyBot/3.0"
+            }
+        )
+        if response.status_code != 200:
+            logging.warning(
+                "Genshin Builds tree respondió HTTP %s",
+                response.status_code
+            )
+            return None
+
+        payload = response.json()
+        entries = payload.get("tree") if isinstance(payload, dict) else None
+        if not isinstance(entries, list) or payload.get("truncated"):
+            logging.warning("El índice remoto de builds está incompleto.")
+            return None
+
+        paths = {
+            entry.get("path")
+            for entry in entries
+            if isinstance(entry, dict)
+            and entry.get("type") == "blob"
+            and isinstance(entry.get("path"), str)
+        }
+        result = {
+            "paths": paths,
+            "tree_sha": payload.get("sha")
+        }
+        cache[key] = (time.time() + HELPER_BUILDS_CACHE_TTL, result)
+        return result
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        logging.warning("No se pudo leer el índice de Genshin Builds: %s", exc)
+        return None
+
+
+def helper_character_candidates(character: dict | None, query: str, name: str, key: str):
+    raw_values = [name, query, key]
+    if isinstance(character, dict):
+        raw_values.extend([
+            character.get("id"),
+            character.get("name"),
+            character.get("fullname")
+        ])
+
+    candidates = []
+    for value in raw_values:
+        slug = guide_slugify(value)
+        if slug and slug not in candidates:
+            candidates.append(slug)
+    return candidates
+
+
+def helper_element_slug(character: dict | None) -> str | None:
+    if not isinstance(character, dict):
+        return None
+
+    raw = (
+        character.get("elementText")
+        or character.get("element")
+        or character.get("vision")
+        or ""
+    )
+    slug = guide_slugify(raw)
+    return slug if slug in {
+        "anemo", "cryo", "dendro", "electro", "geo", "hydro", "pyro"
+    } else None
+
+
+async def load_helper_character_file(root: str, build_name: str, filename: str, paths: set):
+    candidates = []
+    if build_name and build_name != "__character__":
+        candidates.append(f"{root}/{build_name}/{filename}")
+    candidates.append(f"{root}/{filename}")
+
+    for candidate in candidates:
+        if candidate in paths:
+            return await fetch_helper_build_json(candidate)
+    return None
+
+
+async def load_helper_build_translations():
+    files = {
+        "weapons": "src/i18n/es/weapons.json",
+        "artifacts": "src/i18n/es/artifact-sets.json",
+        "stats": "src/i18n/es/stats.json",
+        "abilities": "src/i18n/es/abilities.json"
+    }
+    names = list(files)
+    values = await asyncio.gather(
+        *(fetch_helper_build_json(files[name]) for name in names)
+    )
+    return {
+        name: value if isinstance(value, dict) else {}
+        for name, value in zip(names, values)
+    }
+
+
+def helper_translate_id(value: Any, category: str, translations: dict) -> str:
+    if isinstance(value, dict):
+        value = value.get("name") or value.get("id") or ""
+    if not isinstance(value, str) or not value.strip():
+        return "No informado"
+
+    key = value.strip()
+    dictionary = translations.get(category, {})
+    if key in dictionary:
+        return str(dictionary[key])
+
+    if category == "artifacts":
+        stats = translations.get("stats", {})
+        if key in stats:
+            return str(stats[key])
+    if category == "stats":
+        stats = translations.get("stats", {})
+        if key in stats:
+            return str(stats[key])
+
+    return key.replace("-", " ").replace("_", " ").title()
+
+
+def helper_format_weapons(data: Any, translations: dict, build_label: str) -> str | None:
+    if not isinstance(data, dict):
+        return None
+    ranking = data.get("weapons")
+    if not isinstance(ranking, list):
+        return None
+
+    rows = []
+    for position, group in enumerate(ranking[:8], 1):
+        if not isinstance(group, dict):
+            continue
+        items = group.get("items") or []
+        if not isinstance(items, list):
+            continue
+        names = []
+        for item in items:
+            name = helper_translate_id(item, "weapons", translations)
+            if name != "No informado" and name not in names:
+                names.append(name)
+        if names:
+            rows.append(f"{position}. " + " / ".join(names))
+
+    if not rows:
+        return None
+    return f"{build_label}\n" + "\n".join(rows)
+
+
+def helper_format_artifacts(sets_data: Any, main_data: Any, sub_data: Any,
+                            translations: dict, build_label: str) -> str | None:
+    lines = [build_label]
+    has_data = False
+
+    if isinstance(sets_data, dict):
+        ranked_sets = sets_data.get("artifact_sets") or []
+        if isinstance(ranked_sets, list):
+            set_rows = []
+            for rank, ranking in enumerate(ranked_sets[:5], 1):
+                if not isinstance(ranking, dict):
+                    continue
+                for group in (ranking.get("groups") or [])[:3]:
+                    if not isinstance(group, dict):
+                        continue
+                    items = group.get("items") or []
+                    if not isinstance(items, list):
+                        continue
+                    rendered = []
+                    for item in items:
+                        if isinstance(item, str):
+                            item = {"name": item}
+                        if not isinstance(item, dict):
+                            continue
+                        item_name = helper_translate_id(
+                            item.get("name"), "artifacts", translations
+                        )
+                        pieces = item.get("pieces")
+                        rendered.append(
+                            f"{pieces} piezas {item_name}"
+                            if pieces else item_name
+                        )
+                    if rendered:
+                        separator = " / " if group.get("choose") else " + "
+                        set_rows.append(f"{rank}. " + separator.join(rendered))
+            if set_rows:
+                lines.append("Sets:\n" + "\n".join(set_rows[:8]))
+                has_data = True
+
+    if isinstance(main_data, dict):
+        main_stats = main_data.get("main_stats") or {}
+        if isinstance(main_stats, dict):
+            stat_labels = (
+                ("sands", "Reloj"),
+                ("goblet", "Copa"),
+                ("circlet", "Corona")
+            )
+            stat_rows = []
+            for field, label in stat_labels:
+                values = main_stats.get(field) or []
+                if not isinstance(values, list):
+                    continue
+                names = [
+                    helper_translate_id(item, "stats", translations)
+                    for item in values
+                ]
+                names = [name for name in names if name != "No informado"]
+                if names:
+                    stat_rows.append(f"{label}: " + " / ".join(names))
+            if stat_rows:
+                lines.append("Stats principales:\n" + "\n".join(stat_rows))
+                has_data = True
+
+    if isinstance(sub_data, dict):
+        priorities = sub_data.get("substats_priority") or []
+        if isinstance(priorities, list):
+            sub_rows = []
+            for item in priorities:
+                if isinstance(item, dict) and isinstance(item.get("items"), list):
+                    values = item["items"]
+                else:
+                    values = [item]
+                names = [
+                    helper_translate_id(value, "stats", translations)
+                    for value in values
+                ]
+                names = [name for name in names if name != "No informado"]
+                if names:
+                    sub_rows.append(" / ".join(names))
+            if sub_rows:
+                lines.append("Prioridad de substats: " + " > ".join(sub_rows))
+                has_data = True
+
+    return "\n".join(lines) if has_data else None
+
+
+def helper_format_talents(data: Any, translations: dict, build_label: str) -> str | None:
+    if not isinstance(data, dict):
+        return None
+    ranking = data.get("talents")
+    if not isinstance(ranking, list):
+        return None
+
+    priorities = []
+    for group in ranking:
+        if not isinstance(group, dict):
+            continue
+        items = group.get("items") or []
+        if not isinstance(items, list):
+            continue
+        names = [
+            helper_translate_id(item, "abilities", translations)
+            for item in items
+        ]
+        names = [name for name in names if name != "No informado"]
+        if names:
+            priorities.append(" / ".join(names))
+
+    if not priorities:
+        return None
+    return f"{build_label}\nPrioridad: " + " > ".join(priorities)
+
+
+async def fetch_helper_character_guide(
+    character: dict | None,
+    query: str,
+    name: str,
+    key: str,
+    needs: dict
+):
+    """Busca build data estructurada cuando faltan recomendaciones locales."""
+    tree_data = await get_helper_build_tree()
+    if not isinstance(tree_data, dict):
+        return None
+    paths = tree_data.get("paths")
+    if not isinstance(paths, set):
+        return None
+
+    candidate_slugs = helper_character_candidates(character, query, name, key)
+    element = helper_element_slug(character)
+    rarity = None
+    if isinstance(character, dict):
+        try:
+            raw_rarity = int(float(character.get("rarity")))
+            rarity = str(raw_rarity) if raw_rarity in (4, 5) else None
+        except (TypeError, ValueError):
+            rarity = None
+
+    roots = []
+    for path in paths:
+        if not path.startswith("src/content/") or not path.endswith("/metadata.json"):
+            continue
+        parts = path.split("/")
+        if len(parts) != 6:
+            continue
+        slug = parts[4]
+        if slug not in candidate_slugs:
+            continue
+        if element and parts[2] != element:
+            continue
+        if rarity and parts[3] != rarity:
+            continue
+        roots.append((path, parts[2], parts[3], slug))
+
+    if not roots:
+        return None
+
+    def root_score(item):
+        _, root_element, root_rarity, root_slug = item
+        score = 0
+        if root_slug == candidate_slugs[0]:
+            score += 10
+        if element and root_element == element:
+            score += 5
+        if rarity and root_rarity == rarity:
+            score += 3
+        return score
+
+    roots.sort(key=root_score, reverse=True)
+    if not element and roots[0][3] == "traveler" and len(roots) > 1:
+        return None
+
+    metadata_path, _, _, _ = roots[0]
+    root = metadata_path.rsplit("/", 1)[0]
+    metadata = await fetch_helper_build_json(metadata_path)
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    build_files = {}
+    for path in paths:
+        if not path.startswith(root + "/"):
+            continue
+        relative = path[len(root) + 1:].split("/")
+        if len(relative) >= 2 and relative[-1].endswith(".json"):
+            build_name = relative[0]
+            build_files.setdefault(build_name, set()).add(relative[-1])
+
+    build_names = sorted(build_files)
+    if not build_names:
+        build_names = ["__character__"]
+    else:
+        build_names = build_names[:3]
+
+    async def load_bundle(build_name):
+        notes = await load_helper_character_file(
+            root, build_name, "build-notes.json", paths
+        )
+        version = (
+            (notes or {}).get("last_updated")
+            or metadata.get("last_updated")
+            or ""
+        )
+        if str(version).strip().upper() == "WIP":
+            return None
+
+        requests = {}
+        if needs.get("weapons"):
+            requests["weapons"] = load_helper_character_file(
+                root, build_name, "weapons.json", paths
+            )
+        if needs.get("artifacts"):
+            requests["artifact_sets"] = load_helper_character_file(
+                root, build_name, "artifacts-sets.json", paths
+            )
+            requests["artifact_main"] = load_helper_character_file(
+                root, build_name, "artifacts-mainstats.json", paths
+            )
+            requests["artifact_sub"] = load_helper_character_file(
+                root, build_name, "artifacts-substats.json", paths
+            )
+        if needs.get("talents"):
+            requests["talents"] = load_helper_character_file(
+                root, build_name, "talents.json", paths
+            )
+
+        names = list(requests)
+        values = await asyncio.gather(*(requests[item] for item in names))
+        bundle = dict(zip(names, values))
+        bundle["build"] = build_name
+        bundle["version"] = version or metadata.get("last_updated") or "No informada"
+        return bundle
+
+    bundles = await asyncio.gather(*(load_bundle(build) for build in build_names))
+    bundles = [bundle for bundle in bundles if isinstance(bundle, dict)]
+    if not bundles:
+        return None
+
+    translation_names = []
+    if needs.get("weapons"):
+        translation_names.append("weapons")
+    if needs.get("artifacts"):
+        translation_names.extend(["artifacts", "stats"])
+    if needs.get("talents"):
+        translation_names.append("abilities")
+
+    translations = await load_helper_build_translations() if translation_names else {}
+    result = {
+        "artifacts": [],
+        "weapons": [],
+        "talents": [],
+        "source_url": (
+            "https://github.com/Genshin-Impact-Helper-Team/genshin-builds/tree/main/"
+            + root
+        ),
+        "version": metadata.get("last_updated") or ""
+    }
+
+    for bundle in bundles:
+        build_name = bundle.get("build") or "build"
+        build_label = (
+            "Variante: " + build_name.replace("-", " ").replace("_", " ").title()
+            if build_name != "__character__" else "Configuración general"
+        )
+        if needs.get("weapons"):
+            formatted = helper_format_weapons(
+                bundle.get("weapons"), translations, build_label
+            )
+            if formatted:
+                result["weapons"].append(formatted)
+        if needs.get("artifacts"):
+            formatted = helper_format_artifacts(
+                bundle.get("artifact_sets"),
+                bundle.get("artifact_main"),
+                bundle.get("artifact_sub"),
+                translations,
+                build_label
+            )
+            if formatted:
+                result["artifacts"].append(formatted)
+        if needs.get("talents"):
+            formatted = helper_format_talents(
+                bundle.get("talents"), translations, build_label
+            )
+            if formatted:
+                result["talents"].append(formatted)
+
+        if bundle.get("version") and not result["version"]:
+            result["version"] = bundle["version"]
+
+    if not any(result[field] for field in ("artifacts", "weapons", "talents")):
+        return None
+
+    for field in ("artifacts", "weapons", "talents"):
+        result[field] = "\n\n".join(result[field])
+    result["build_count"] = len(bundles)
+    return result
+
+
+class KQMTeamParser(HTMLParser):
+    """Extrae composiciones de equipo de las imágenes accesibles de KQM."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.heading_stack = []
+        self.heading_level = None
+        self.heading_parts = []
+        self.teams = []
+
+    def current_path(self):
+        return " ".join(value for _, value in self.heading_stack).casefold()
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            self.heading_level = int(tag[1])
+            self.heading_parts = []
+        elif tag == "img" and "team" in self.current_path():
+            attributes = dict(attrs)
+            self.add_team(attributes.get("alt") or "")
+
+    def handle_data(self, data):
+        if self.heading_level is not None:
+            self.heading_parts.append(data)
+        elif "team" in self.current_path():
+            self.add_team(data)
+
+    def handle_endtag(self, tag):
+        if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            level = int(tag[1])
+            if self.heading_level == level:
+                title = re.sub(r"\s+", " ", "".join(self.heading_parts)).strip()
+                self.heading_stack = [
+                    item for item in self.heading_stack if item[0] < level
+                ]
+                if title:
+                    self.heading_stack.append((level, title))
+                self.heading_level = None
+                self.heading_parts = []
+
+    def add_team(self, value):
+        line = re.sub(r"\s+", " ", html.unescape(str(value or ""))).strip()
+        if not line or len(line) > 150:
+            return
+        separators = line.count("—") + line.count("–")
+        if separators >= 2 and line not in self.teams:
+            self.teams.append(line)
+
+
+async def fetch_kqm_teams(character: dict | None, query: str, name: str, key: str):
+    """Busca equipos en la guía rápida de KQM cuando no hay equipo local."""
+    raw_values = [key, name, query]
+    if isinstance(character, dict):
+        raw_values.extend([character.get("id"), character.get("name")])
+
+    candidates = []
+    for value in raw_values:
+        slug = guide_slugify(value)
+        if slug and slug not in candidates:
+            candidates.append(slug)
+
+    # Algunos nombres del juego tienen slugs editoriales diferentes.
+    for slug in list(candidates):
+        if slug == "shogun-raiden":
+            candidates.append("raiden")
+        elif slug == "tartaglia":
+            candidates.append("childe")
+        elif slug == "kaedehara-kazuha":
+            candidates.append("kazuha")
+        elif slug == "kamisato-ayaka":
+            candidates.append("ayaka")
+        elif slug == "sangonomiya-kokomi":
+            candidates.append("kokomi")
+
+    for slug in candidates[:4]:
+        url = f"{KQM_QUICKGUIDE_BASE}{slug}-quickguide/"
+        key_cache = f"kqm-teams:{slug}"
+        cached = cache.get(key_cache)
+        if cached and cached[0] > time.time():
+            if cached[1]:
+                return cached[1]
+            continue
+
+        try:
+            response = await external_request(
+                "GET",
+                url,
+                timeout=18,
+                follow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0 Katherine-AnarchyBot/3.0"}
+            )
+            if response.status_code != 200:
+                cache[key_cache] = (time.time() + 3600, None)
+                continue
+
+            parser = KQMTeamParser()
+            parser.feed(response.text)
+            teams = parser.teams[:6]
+            if teams:
+                result = {"teams": teams, "url": str(response.url)}
+                cache[key_cache] = (
+                    time.time() + HELPER_BUILDS_CACHE_TTL, result
+                )
+                return result
+
+            cache[key_cache] = (time.time() + 3600, None)
+        except (httpx.HTTPError, ValueError) as exc:
+            logging.debug("Guía KQM no disponible para %s: %s", slug, exc)
+
+    return None
+
+
+
 def normalize_character_guide_key(name: str) -> str:
     key = re.sub(r"\s+", " ", str(name).casefold().strip())
     return CHARACTER_GUIDE_ALIASES.get(key, key)
@@ -7728,25 +8374,64 @@ async def handle_command(event: dict, source: str):
         if not query:
             await send_message(thread, f"Uso: {PREFIX}guia nombre del personaje", source, reply)
             return
-        character, stats = await asyncio.gather(get_character(query), character_stats(query))
-        if not isinstance(character, dict):
-            await send_message(thread, f"No encontré al personaje «{query}».", source, reply)
-            return
 
-        name = clean_game_text(character.get("name") or query)
+        character, stats = await asyncio.gather(
+            get_character(query),
+            character_stats(query)
+        )
+
+        name = (
+            clean_game_text(character.get("name") or query)
+            if isinstance(character, dict) else clean_game_text(query)
+        )
         key = normalize_character_guide_key(name)
-        sections = [f"╔══ GUÍA COMPLETA · {name.upper()} ══╗", describe_game(character, name, "characters")]
-
-        base = get_level90(stats)
-        if isinstance(base, dict):
-            sections.append(
-                "ESTADÍSTICAS BASE · NIVEL 90\n"
-                f"Vida: {format_number(base.get('hp'))} · ATQ: {format_number(base.get('attack'))} · "
-                f"DEF: {format_number(base.get('defense'))}\n"
-                f"Atributo de ascensión: {base.get('specialized', 'No informado')}"
-            )
 
         artifact = ARTIFACT_GUIDES.get(key)
+        weapons = WEAPON_GUIDES.get(key)
+        priority = TALENT_PRIORITIES.get(key)
+        team = BUILD_TEAMS.get(key)
+
+        needs_helper = {
+            "artifacts": not bool(artifact),
+            "weapons": not bool(weapons),
+            "talents": not bool(priority)
+        }
+        helper_data = None
+        if any(needs_helper.values()):
+            helper_data = await fetch_helper_character_guide(
+                character, query, name, key, needs_helper
+            )
+
+        kqm_data = None
+        if not team:
+            kqm_data = await fetch_kqm_teams(character, query, name, key)
+
+        if not isinstance(character, dict) and not helper_data and not kqm_data:
+            await send_message(
+                thread,
+                f"No encontré información de «{query}» en Genshin-DB, Genshin Builds ni KQM.",
+                source,
+                reply
+            )
+            return
+
+        sections = [f"╔══ GUÍA COMPLETA · {name.upper()} ══╗"]
+        if isinstance(character, dict):
+            sections.append(describe_game(character, name, "characters"))
+            base = get_level90(stats)
+            if isinstance(base, dict):
+                sections.append(
+                    "ESTADÍSTICAS BASE · NIVEL 90\n"
+                    f"Vida: {format_number(base.get('hp'))} · ATQ: {format_number(base.get('attack'))} · "
+                    f"DEF: {format_number(base.get('defense'))}\n"
+                    f"Atributo de ascensión: {base.get('specialized', 'No informado')}"
+                )
+        else:
+            sections.append(
+                "La ficha básica no respondió desde Genshin-DB. "
+                "Se muestran las recomendaciones recuperadas de las fuentes secundarias."
+            )
+
         if artifact:
             sections.append(
                 "ARTEFACTOS RECOMENDADOS\n"
@@ -7755,89 +8440,158 @@ async def handle_command(event: dict, source: str):
                 f"Substats: {artifact['subs']}\n"
                 f"Consejo: {artifact['note']}"
             )
+        elif helper_data and helper_data.get("artifacts"):
+            sections.append(
+                "ARTEFACTOS RECOMENDADOS · FUENTE SECUNDARIA\n"
+                + helper_data["artifacts"]
+            )
         else:
-            sections.append("ARTEFACTOS\nNo hay una recomendación curada para este personaje todavía.")
+            sections.append(
+                "ARTEFACTOS\nNo encontré una recomendación publicada para este personaje."
+            )
 
-        weapons = WEAPON_GUIDES.get(key)
         if weapons:
             sections.append(
                 "ARMAS RECOMENDADAS\n"
-                + "\n".join(f"{i}. {v}" for i,v in enumerate(weapons["weapons"],1))
+                + "\n".join(f"{i}. {value}" for i, value in enumerate(weapons["weapons"], 1))
                 + f"\nNota: {weapons['note']}"
             )
+        elif helper_data and helper_data.get("weapons"):
+            sections.append(
+                "ARMAS RECOMENDADAS · FUENTE SECUNDARIA\n"
+                + helper_data["weapons"]
+            )
         else:
-            sections.append("ARMAS\nNo hay una lista curada para este personaje todavía.")
+            sections.append(
+                "ARMAS\nNo encontré una clasificación publicada para este personaje."
+            )
 
-        team = BUILD_TEAMS.get(key)
         if team:
             sections.append(f"EQUIPO RECOMENDADO\n{team[0]}\nSinergia: {team[1]}")
-
-        priority = TALENT_PRIORITIES.get(key)
-        if priority:
-            sections.append(f"PRIORIDAD DE TALENTOS\n{priority[0]}\nMotivo: {priority[1]}")
-
-        talent_lines = ["HABILIDADES Y PASIVAS"]
-        skill_entries = character.get("skillTalents") or character.get("talents") or []
-        passive_entries = character.get("passiveTalents") or []
-        if isinstance(skill_entries, dict):
-            skill_entries = list(skill_entries.values())
-        if isinstance(passive_entries, dict):
-            passive_entries = list(passive_entries.values())
-        if not isinstance(skill_entries, list):
-            skill_entries = []
-        if not isinstance(passive_entries, list):
-            passive_entries = []
-        for index, entry in enumerate(skill_entries, 1):
-            if not isinstance(entry, dict):
-                continue
-            title = clean_game_text(entry.get("name") or entry.get("unlock") or f"Habilidad {index}")
-            desc = clean_game_text(entry.get("description") or "")
-            talent_lines.append(f"{index}. {title}")
-            if desc:
-                talent_lines.append(game_excerpt(desc, 300))
-        for index, entry in enumerate(passive_entries, 1):
-            if not isinstance(entry, dict):
-                continue
-            title = clean_game_text(entry.get("name") or f"Pasiva {index}")
-            desc = clean_game_text(entry.get("description") or "")
-            talent_lines.append(f"Pasiva {index}. {title}")
-            if desc:
-                talent_lines.append(game_excerpt(desc, 200))
-        if len(talent_lines) > 1:
-            sections.append("\n".join(talent_lines))
-
-        constellation = CONSTELLATION_GUIDES.get(key)
-        constellation_lines = ["CONSTELACIONES Y PRIORIDAD"]
-        if constellation:
-            constellation_lines.extend([f"Recomendación: {constellation[0]}", constellation[1]])
+        elif kqm_data and kqm_data.get("teams"):
+            sections.append(
+                "EQUIPOS RECOMENDADOS · KQM\n"
+                + "\n".join(
+                    f"{index}. {value}"
+                    for index, value in enumerate(kqm_data["teams"], 1)
+                )
+                + "\nLas composiciones se muestran como aparecen en la guía original."
+            )
         else:
-            constellation_lines.append("C0 es un punto de partida válido; no necesitas constelaciones para usar al personaje.")
-        constellation_data = character.get("constellations") or character.get("Constellations") or []
-        if isinstance(constellation_data, dict):
-            constellation_data = list(constellation_data.values())
-        if isinstance(constellation_data, list):
-            for index, entry in enumerate(constellation_data[:6], 1):
+            sections.append(
+                "EQUIPOS\nNo encontré una composición publicada para este personaje."
+            )
+
+        if priority:
+            sections.append(
+                f"PRIORIDAD DE TALENTOS\n{priority[0]}\nMotivo: {priority[1]}"
+            )
+        elif helper_data and helper_data.get("talents"):
+            sections.append(
+                "PRIORIDAD DE TALENTOS · FUENTE SECUNDARIA\n"
+                + helper_data["talents"]
+            )
+        else:
+            sections.append(
+                "PRIORIDAD DE TALENTOS\nNo encontré una prioridad específica publicada."
+            )
+
+        if isinstance(character, dict):
+            talent_lines = ["HABILIDADES Y PASIVAS"]
+            skill_entries = character.get("skillTalents") or character.get("talents") or []
+            passive_entries = character.get("passiveTalents") or []
+            if isinstance(skill_entries, dict):
+                skill_entries = list(skill_entries.values())
+            if isinstance(passive_entries, dict):
+                passive_entries = list(passive_entries.values())
+            if not isinstance(skill_entries, list):
+                skill_entries = []
+            if not isinstance(passive_entries, list):
+                passive_entries = []
+            for index, entry in enumerate(skill_entries, 1):
                 if not isinstance(entry, dict):
                     continue
-                title = clean_game_text(entry.get("name") or f"C{index}")
-                description = clean_game_text(entry.get("description") or "")
-                constellation_lines.append(f"C{index} · {title}")
-                if description:
-                    constellation_lines.append(game_excerpt(description, 180))
-        sections.append("\n".join(constellation_lines))
+                title = clean_game_text(entry.get("name") or entry.get("unlock") or f"Habilidad {index}")
+                desc = clean_game_text(entry.get("description") or "")
+                talent_lines.append(f"{index}. {title}")
+                if desc:
+                    talent_lines.append(game_excerpt(desc, 300))
+            for index, entry in enumerate(passive_entries, 1):
+                if not isinstance(entry, dict):
+                    continue
+                title = clean_game_text(entry.get("name") or f"Pasiva {index}")
+                desc = clean_game_text(entry.get("description") or "")
+                talent_lines.append(f"Pasiva {index}. {title}")
+                if desc:
+                    talent_lines.append(game_excerpt(desc, 200))
+            if len(talent_lines) > 1:
+                sections.append("\n".join(talent_lines))
 
-        totals = aggregate_material_costs(character.get("costs"))
-        if totals:
+            constellation = CONSTELLATION_GUIDES.get(key)
+            constellation_lines = ["CONSTELACIONES Y PRIORIDAD"]
+            if constellation:
+                constellation_lines.extend([
+                    f"Recomendación: {constellation[0]}",
+                    constellation[1]
+                ])
+            else:
+                constellation_lines.append(
+                    "C0 es un punto de partida válido; revisa las mejoras según tu inversión."
+                )
+            constellation_data = (
+                character.get("constellations")
+                or character.get("Constellations")
+                or []
+            )
+            if isinstance(constellation_data, dict):
+                constellation_data = list(constellation_data.values())
+            if isinstance(constellation_data, list):
+                for index, entry in enumerate(constellation_data[:6], 1):
+                    if not isinstance(entry, dict):
+                        continue
+                    title = clean_game_text(entry.get("name") or f"C{index}")
+                    description = clean_game_text(entry.get("description") or "")
+                    constellation_lines.append(f"C{index} · {title}")
+                    if description:
+                        constellation_lines.append(game_excerpt(description, 180))
+            sections.append("\n".join(constellation_lines))
+
+            totals = aggregate_material_costs(character.get("costs"))
+            if totals:
+                sections.append(
+                    "MATERIALES DE ASCENSIÓN · TOTAL\n"
+                    + "\n".join(
+                        f"• {material}: {amount}"
+                        for material, amount in totals.items()
+                    )
+                )
+
+        if helper_data:
+            version = helper_data.get("version") or "No informada"
             sections.append(
-                "MATERIALES DE ASCENSIÓN · TOTAL\n"
-                + "\n".join(f"• {material}: {amount}" for material,amount in totals.items())
+                "FUENTE SECUNDARIA · GENSHIN IMPACT HELPER TEAM\n"
+                f"Datos de build: versión {version}\n"
+                f"Repositorio: {helper_data.get('source_url')}"
+            )
+
+        if kqm_data and kqm_data.get("url"):
+            sections.append(
+                "FUENTE DE EQUIPOS · KEQINGMAINS\n"
+                + kqm_data["url"]
+                + "\nLa guía original puede estar en inglés."
             )
 
         sections.append(
-            "RECOMENDACIÓN FINAL\nAjusta la build a tu equipo, rotación y armas disponibles. "
-            "Estas recomendaciones son orientativas, no una simulación de daño."
+            "RECOMENDACIÓN FINAL\n"
+            "Ajusta las estadísticas y armas a tu equipo, rotación y necesidades de energía. "
+            "Las clasificaciones pueden variar según la composición y la versión del juego."
         )
-        await send_message(thread, "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n".join(sections), source, reply)
+        await send_message(
+            thread,
+            "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n".join(sections),
+            source,
+            reply
+        )
         return
 
     if command == "!reacciones":
