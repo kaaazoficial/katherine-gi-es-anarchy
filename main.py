@@ -63,6 +63,9 @@ from katherine_astra import (
     is_recoverable_dj_failure,
     resolve_music_mood,
 )
+from katherine_ai import KatherineAI, validate_ai_tool_call
+
+AI_CORE = KatherineAI()
 
 # ---------------------------------------------------------------------------
 # CONFIGURACION
@@ -1012,6 +1015,7 @@ def cleanup_expired_state():
         if action.get("expires", now + 1) <= now:
             BUTTON_ACTIONS.pop(key, None)
     cleanup_community_events(COMMUNITY_EVENTS, now=now)
+    AI_CORE.cleanup(now=now)
     active_poll_ids = set(polls)
     for button_key, poll_id in list(poll_button_map.items()):
         if poll_id not in active_poll_ids:
@@ -12500,17 +12504,148 @@ async def handle_command(event: dict, source: str):
         request_text = query.strip()
         if request_text and await maybe_send_auto_reply(thread, raw_uid, nickname, request_text):
             return
-        answer = (
-            f"Te escucho. Sobre «{request_text[:180]}», todavía no tengo una acción específica conectada.\\n"
-            "Puedo consultar la enciclopedia de Genshin, buscar y reproducir música, "
-            "controlar el DJ, entrar a la sala de voz, leer mensajes, revisar el estado "
-            "y abrir el panel de administración. Dime qué necesitas empezando por «Katherine»."
-            if request_text else
-            "Estoy lista. Puedes pedirme consultas o acciones empezando por «Katherine». "
-            "Por ejemplo: «Katherine, busca a Nahida en la enciclopedia», "
-            "«Katherine, pon música para estudiar» o «Katherine, pausa la música»."
-        )
-        await send_message(thread, answer, source, reply)
+        session_key = f"{source}:{thread}:{raw_uid}"
+        ai_result = await AI_CORE.assist(request_text, session_key, external_request)
+        if ai_result.get("kind") == "command":
+            invocation = validate_ai_tool_call(ai_result.get("command", ""), ai_result.get("args", ""))
+            if invocation:
+                AI_CORE.remember_tool_action(session_key, invocation)
+                routed_event = dict(event)
+                routed_message = dict(msg)
+                routed_message["content"] = f"{PREFIX}{invocation}"
+                routed_event["message"] = routed_message
+                logging.info("[AI] Herramienta permitida: %s", invocation.split()[0])
+                await handle_command(routed_event, source)
+                return
+        await send_message(thread, ai_result.get("answer") or "No pude completar tu solicitud.", source, reply)
+        return
+
+    if command == "!ia":
+        sub = args[0].casefold() if args else "ayuda"
+        rest = " ".join(args[1:]).strip()
+        session_key = f"{source}:{thread}:{raw_uid}"
+        if sub in ("ayuda", "help"):
+            await send_message(thread,
+                "ASTRA INTELLIGENCE\\n!ia estado / olvidar / preguntar <consulta> / genshin <consulta>\\n"
+                "!ia musica <descripción> / traducir idioma | texto\\n"
+                "!ia guardian revisar <texto> (administradores)\\n"
+                "!ia analista activar|resumen|limpiar|desactivar (administradores)\\n"
+                "!ia diagnostico (administradores)", source, reply)
+            return
+        if sub in ("estado", "status"):
+            await send_message(thread, AI_CORE.status(thread), source, reply)
+            return
+        if sub in ("olvidar", "forget"):
+            removed = AI_CORE.forget(session_key)
+            await send_message(thread, "Contexto temporal eliminado." if removed else "No había contexto temporal para eliminar.", source, reply)
+            return
+        if sub in ("preguntar", "genshin", "consulta"):
+            if not rest:
+                await send_message(thread, "Uso: !ia preguntar <consulta>.", source, reply)
+                return
+            prompt = ("Consulta de Genshin Impact. Usa la enciclopedia o guías existentes para verificar. " if sub == "genshin" else "") + rest
+            result = await AI_CORE.assist(prompt, session_key, external_request)
+            if result.get("kind") == "command":
+                invocation = validate_ai_tool_call(result.get("command", ""), result.get("args", ""))
+                if invocation:
+                    AI_CORE.remember_tool_action(session_key, invocation)
+                    routed_event = dict(event)
+                    routed_message = dict(msg)
+                    routed_message["content"] = f"{PREFIX}{invocation}"
+                    routed_event["message"] = routed_message
+                    await handle_command(routed_event, source)
+                    return
+            await send_message(thread, result.get("answer") or "No pude responder.", source, reply)
+            return
+        if sub == "musica":
+            if not rest:
+                await send_message(thread, "Uso: !ia musica <ambiente o descripción>.", source, reply)
+                return
+            try:
+                optimized = await AI_CORE.optimize_music_query(rest, external_request)
+                invocation = validate_ai_tool_call("dj", f"buscar {optimized}")
+                if not invocation:
+                    raise ValueError("Búsqueda no válida")
+                AI_CORE.remember_tool_action(session_key, invocation)
+                routed_event = dict(event)
+                routed_message = dict(msg)
+                routed_message["content"] = f"{PREFIX}{invocation}"
+                routed_event["message"] = routed_message
+                await handle_command(routed_event, source)
+            except Exception:
+                logging.exception("[AI] Error optimizando consulta musical")
+                await send_message(thread, "No pude optimizar la búsqueda. Prueba !dj buscar <tema>.", source, reply)
+            return
+        if sub == "traducir":
+            pair = rest.split("|", 1)
+            if len(pair) != 2 or not pair[0].strip() or not pair[1].strip():
+                await send_message(thread, "Uso: !ia traducir idioma | texto.", source, reply)
+                return
+            try:
+                answer = await AI_CORE.translate(pair[0].strip(), pair[1].strip(), external_request)
+            except Exception:
+                logging.exception("[AI] Error de traducción")
+                answer = "No pude completar la traducción con IA. Comprueba la configuración del proveedor."
+            await send_message(thread, answer, source, reply)
+            return
+        if sub == "guardian":
+            if not is_admin_uid(raw_uid):
+                await send_message(thread, "Solo un administrador puede usar Guardian AI.", source, reply)
+                return
+            parts = rest.split(maxsplit=1)
+            if len(parts) != 2 or parts[0].casefold() not in ("revisar", "analizar"):
+                await send_message(thread, "Uso: !ia guardian revisar <texto>.", source, reply)
+                return
+            try:
+                answer = await AI_CORE.review_guardian(parts[1], external_request)
+            except Exception:
+                logging.exception("[AI] Error en Guardian AI")
+                answer = "No pude analizar el texto. Comprueba la conexión con el proveedor."
+            await send_message(thread, "GUARDIAN AI · REVISIÓN PREVENTIVA\\n" + answer, source, reply)
+            return
+        if sub == "analista":
+            if not is_admin_uid(raw_uid):
+                await send_message(thread, "Solo un administrador puede controlar el analizador.", source, reply)
+                return
+            mode = rest.casefold()
+            if mode in ("activar", "on"):
+                AI_CORE.set_analyst(thread, True)
+                answer = "AI Chat Analyst activado. Solo recopila mensajes recibidos desde ahora; el buffer temporal caduca en una hora y se elimina al desactivar o reiniciar."
+            elif mode in ("desactivar", "off"):
+                AI_CORE.set_analyst(thread, False)
+                answer = "AI Chat Analyst desactivado y buffer temporal eliminado."
+            elif mode in ("limpiar", "vaciar"):
+                count = AI_CORE.clear_analyst_messages(thread)
+                answer = f"Buffer temporal limpiado: {count} mensajes descartados."
+            elif mode in ("resumen", "resumir"):
+                if not AI_CORE.analyst_messages(thread):
+                    answer = "No hay mensajes temporales. Activa primero el analizador."
+                else:
+                    await send_message(thread, "AI CHAT ANALYST\\nPreparando resumen del buffer temporal…", source, reply)
+                    try:
+                        answer = await AI_CORE.summarize_chat(thread, external_request)
+                    except Exception:
+                        logging.exception("[AI] Error en Chat Analyst")
+                        answer = "No pude generar el resumen. Los mensajes siguen en memoria hasta caducar o desactivar."
+                    await send_message(thread, answer, source)
+                    return
+            else:
+                answer = "Uso: !ia analista activar|resumen|limpiar|desactivar."
+            await send_message(thread, answer, source, reply)
+            return
+        if sub in ("diagnostico", "diagnóstico"):
+            if not is_admin_uid(raw_uid):
+                await send_message(thread, "Solo un administrador puede usar Astra Admin AI.", source, reply)
+                return
+            try:
+                diagnostic = await build_status_message(source, nickname, thread)
+                answer = await AI_CORE.explain_diagnostics(diagnostic, external_request)
+            except Exception:
+                logging.exception("[AI] Error en Astra Admin AI")
+                answer = "No pude interpretar el diagnóstico. Consulta !estado para ver los datos técnicos."
+            await send_message(thread, "ASTRA ADMIN AI\\n" + answer, source, reply)
+            return
+        await send_message(thread, "Subcomando IA desconocido. Usa !ia ayuda.", source, reply)
         return
 
     if command in ("!centro", "!nexus"):
@@ -12806,6 +12941,12 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}avatarbot <URL> — cambia el avatar del bot.",
                 f"{PREFIX}traducir idioma | texto — traduce texto con detección aproximada.",
                 f"{PREFIX}multimedia imagen|video|audio <consulta> — busca recursos públicos.",
+                f"{PREFIX}ia estado / ayuda / olvidar — controla el núcleo de IA.",
+                f"{PREFIX}ia preguntar <consulta> / genshin <consulta> — conversación y Teyvat AI.",
+                f"{PREFIX}ia musica <descripción> / traducir idioma | texto — Eclipse AI y Language AI.",
+                f"{PREFIX}ia guardian revisar <texto> — revisión preventiva para administradores.",
+                f"{PREFIX}ia analista activar|resumen|limpiar|desactivar — análisis temporal para administradores.",
+                f"{PREFIX}ia diagnostico — explicación técnica asistida para administradores.",
                 f"{PREFIX}imagen / video / audio <consulta> — accesos directos multimedia.",
                 f"{PREFIX}respuestas on/off — activa o pausa respuestas contextuales.",
                 f"{PREFIX}respuesta añadir/lista/eliminar — administra respuestas automáticas.",
@@ -15822,20 +15963,35 @@ async def dispatch(event: dict, source: str):
                     "developer"
                 )
             return
+        message_data = event.get("message") or {}
+        author_data = message_data.get("author") or {}
+        incoming_text = str(message_data.get("content") or "").strip()
+        author_is_bot = any(
+            str(author_data.get(flag, "")).casefold() in ("true", "1", "yes")
+            for flag in ("bot", "isBot", "is_bot")
+        )
+        AI_CORE.record_chat_message(
+            str(event.get("threadId") or ""),
+            str(author_data.get("nickname") or author_data.get("name") or "Usuario"),
+            incoming_text,
+            is_bot=author_is_bot,
+        )
         await enqueue_message_for_speech(event, source)
 
-        # NEXUS: convierte solicitudes claras en lenguaje natural a comandos
+        # NEXUS conserva el enrutamiento determinista cuando IA no está configurada.
         # existentes. No inventa acciones ni llama endpoints nuevos.
-        message_data = event.get("message") or {}
-        incoming_text = str(message_data.get("content") or "").strip()
         if incoming_text and not incoming_text.startswith((PREFIX, "!", "-")):
             routed_command = interpret_natural_request(incoming_text)
             if routed_command:
                 routed_event = dict(event)
                 routed_message = dict(message_data)
-                routed_message["content"] = f"{PREFIX}{routed_command}"
+                if AI_CORE.is_enabled:
+                    routed_message["content"] = f"{PREFIX}asistente {incoming_text}"
+                    logging.info("[AI] Solicitud explícita enviada al núcleo conversacional")
+                else:
+                    routed_message["content"] = f"{PREFIX}{routed_command}"
+                    logging.info("[NEXUS] Solicitud dirigida interpretada como %s", routed_command.split()[0])
                 routed_event["message"] = routed_message
-                logging.info("[NEXUS] Solicitud dirigida a Katherine interpretada como %s", routed_command.split()[0])
                 await handle_command(routed_event, source)
             else:
                 # Conversación ordinaria: se mantienen estadísticas de actividad,
@@ -16095,6 +16251,7 @@ async def startup():
         "Katherine Python iniciando en puerto %s",
         PORT
     )
+    logging.info("[AI] Núcleo %s | modelo=%s", "configurado" if AI_CORE.is_enabled else "sin credenciales", AI_CORE.model if AI_CORE.is_enabled else "pendiente")
     logging.info(
         "[WEBHOOK] Secretos configurados | developer=%s | community=%s",
         bool(WEBHOOK_SECRET),
