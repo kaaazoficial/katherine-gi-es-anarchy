@@ -7646,6 +7646,7 @@ async def handle_command(event: dict, source: str):
             f"{PREFIX}talentoguia <personaje> — explica habilidades, pasivas y constelaciones.",
             f"{PREFIX}statsnivel <personaje|arma> <nombre> <nivel> — estadísticas a nivel concreto, como 80+.",
             f"{PREFIX}farm <personaje> — reúne ficha, estadísticas y materiales de ascensión.",
+            f"{PREFIX}farmmeta <material> | <actual> | <objetivo> — lleva un inventario personal de materiales.",
             f"{PREFIX}materialesdetalle <personaje> — desglose por fase y totales de ascensión.",
             f"{PREFIX}drops <enemigo> / {PREFIX}recompensas <enemigo> — muestra las recompensas registradas.",
             f"{PREFIX}artefactos <personaje> — recomienda sets, estadísticas principales y subestadísticas.",
@@ -9204,8 +9205,25 @@ async def handle_command(event: dict, source: str):
     # -----------------------------------------------------------------------
     # RECOMENDACIONES DE ARMAS Y PRIORIDAD DE TALENTOS
     # -----------------------------------------------------------------------
+    def normalize_character_guide_key(name):
+        key = re.sub(r"\\s+", " ", name.casefold().strip())
+        aliases = {
+            "hu tao": "hu tao",
+            "hutao": "hu tao",
+            "shogun raiden": "raiden",
+            "raiden shogun": "raiden",
+            "kamisato ayaka": "ayaka",
+            "kaedehara kazuha": "kazuha",
+            "alhacén": "alhaitham",
+            "alhacen": "alhaitham",
+            "errante": "wanderer",
+            "scaramouche": "wanderer",
+            "shikanoin heizou": "heizou"
+        }
+        return aliases.get(key, key)
+
     def resolve_character_guide(name):
-        key = name.casefold().strip()
+        key = normalize_character_guide_key(name)
         guide = WEAPON_GUIDES.get(key)
         if not guide:
             guide = next(
@@ -9244,18 +9262,8 @@ async def handle_command(event: dict, source: str):
         if not query:
             await send_message(thread, f"Uso: {PREFIX}prioridadtalentos nombre del personaje", source, reply)
             return
-        key = query.casefold().strip()
+        key = normalize_character_guide_key(query)
         guide = TALENT_PRIORITIES.get(key)
-        if not guide:
-            alias = {
-                "shogun raiden": "raiden",
-                "kamisato ayaka": "ayaka",
-                "kaedehara kazuha": "kazuha",
-                "alhacén": "alhaitham",
-                "wanderer": "wanderer",
-                "scaramouche": "wanderer"
-            }
-            guide = TALENT_PRIORITIES.get(alias.get(key, ""))
         if not guide:
             await send_message(
                 thread,
@@ -9289,7 +9297,7 @@ async def handle_command(event: dict, source: str):
             return
 
         name = clean_game_text(character.get("name") or query)
-        key = query.casefold().strip()
+        key = normalize_character_guide_key(query)
         weapon_guide = resolve_character_guide(key)
         artifact_guide = ARTIFACT_GUIDES.get(key)
         talent_guide = TALENT_PRIORITIES.get(key)
@@ -9582,7 +9590,13 @@ async def handle_command(event: dict, source: str):
     if command == "!misbuilds":
         records = list_build_records(uid, query or None)
         if not records:
-            await send_message(thread, "No tienes builds guardadas. Usa !buildguardar nombre | personaje | arma | set | nota.", source, reply)
+            await send_message(
+                thread,
+                "No tienes builds guardadas. "
+                f"Usa {PREFIX}buildguardar nombre | personaje | arma | set | stats | nota.",
+                source,
+                reply
+            )
             return
         lines = ["TUS BUILDS GUARDADAS"]
         for row in records:
