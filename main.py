@@ -3,6 +3,7 @@
 import os
 import re
 import json
+import base64
 import time
 import hmac
 import hashlib
@@ -10962,6 +10963,139 @@ def normalize_character_guide_key(name: str) -> str:
     key = re.sub(r"\s+", " ", str(name).casefold().strip())
     return CHARACTER_GUIDE_ALIASES.get(key, key)
 
+AVATAR_MAX_BYTES = 5 * 1024 * 1024
+AVATAR_MIME_TYPES = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "image/gif": "gif"
+}
+
+
+def avatar_fields_from_profile(value: Any, prefix: str = "", depth: int = 0) -> dict:
+    """Extrae solo campos de avatar/foto para verificar el perfil sin exponer otros datos."""
+    found = {}
+    if depth > 3 or not isinstance(value, dict):
+        return found
+    for key, item in value.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        lowered = str(key).casefold()
+        if any(word in lowered for word in ("avatar", "picture", "photo", "profileimage", "profile_image")):
+            found[path] = item
+        elif isinstance(item, dict):
+            found.update(avatar_fields_from_profile(item, path, depth + 1))
+    return found
+
+
+def avatar_meta_image(markup: str) -> str | None:
+    """Obtiene la imagen principal de un artículo desde Open Graph/Twitter o sus imágenes."""
+    tags = re.findall(r"<meta\b[^>]*>", markup or "", flags=re.I)
+    for tag in tags:
+        name = re.search(
+            r"""(?:property|name)\s*=\s*["'](?:og:image|og:image:url|twitter:image)["']""",
+            tag, flags=re.I
+        )
+        content = re.search(r"""content\s*=\s*["']([^"']+)["']""", tag, flags=re.I)
+        if name and content:
+            return html.unescape(content.group(1)).strip()
+
+    image_tags = re.findall(r"<img\b[^>]*>", markup or "", flags=re.I)
+    for tag in image_tags:
+        label = " ".join(re.findall(
+            r"""(?:alt|title)\s*=\s*["']([^"']*)["']""",
+            tag, flags=re.I
+        )).casefold()
+        src = re.search(
+            r"""(?:src|data-src)\s*=\s*["']([^"']+)["']""",
+            tag, flags=re.I
+        )
+        if src and ("캐서린" in label or "katheryne" in label):
+            return html.unescape(src.group(1)).strip()
+
+    return None
+
+
+async def resolve_avatar_image(source_url: str) -> tuple[bytes, str]:
+    """Acepta imagen directa o artículo Namu y devuelve bytes validados + MIME."""
+    parsed = urlparse(source_url)
+    host = (parsed.hostname or "").lower()
+    if (
+        parsed.scheme.lower() != "https"
+        or not host
+        or parsed.username
+        or parsed.password
+        or host in {"localhost", "127.0.0.1", "::1"}
+        or host.endswith((".local", ".internal"))
+    ):
+        raise ValueError("Usa una URL HTTPS pública de una imagen o artículo.")
+
+    candidates = [source_url]
+    if host in {"en.namu.wiki", "namu.wiki"}:
+        candidates.append(
+            "https://www.namu.moe" + parsed.path
+            + (f"?{parsed.query}" if parsed.query else "")
+        )
+
+    last_problem = "No pude obtener una imagen de esa dirección."
+    for candidate in dict.fromkeys(candidates):
+        response = await external_request(
+            "GET",
+            candidate,
+            follow_redirects=True,
+            timeout=20,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; Katherine-AnarchyBot/4.0)",
+                "Accept": "image/avif,image/webp,image/png,image/jpeg,image/gif,text/html"
+            }
+        )
+        if response.status_code != 200:
+            last_problem = f"La página de origen respondió HTTP {response.status_code}."
+            continue
+
+        mime = str(response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+        image_url = None
+        if mime in AVATAR_MIME_TYPES:
+            image_bytes = response.content
+        elif mime in {"text/html", "application/xhtml+xml"} or not mime:
+            image_url = avatar_meta_image(response.text)
+            if not image_url:
+                last_problem = "La página no expone una imagen principal reconocible."
+                continue
+            image_url = urljoin(str(response.url), image_url)
+            image_response = await external_request(
+                "GET",
+                image_url,
+                follow_redirects=True,
+                timeout=20,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; Katherine-AnarchyBot/4.0)",
+                    "Accept": "image/png,image/jpeg,image/webp,image/gif"
+                }
+            )
+            if image_response.status_code != 200:
+                last_problem = f"La imagen de la página respondió HTTP {image_response.status_code}."
+                continue
+            mime = str(image_response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+            image_bytes = image_response.content
+        else:
+            last_problem = "El enlace no devuelve una imagen compatible."
+            continue
+
+        if mime not in AVATAR_MIME_TYPES:
+            last_problem = "La imagen debe ser PNG, JPG, WebP o GIF."
+            continue
+        if not image_bytes:
+            last_problem = "El archivo de imagen está vacío."
+            continue
+        if len(image_bytes) > AVATAR_MAX_BYTES:
+            last_problem = "La imagen supera el límite de 5 MB."
+            continue
+
+        return image_bytes, mime
+
+    raise ValueError(last_problem)
+
+
 async def handle_command(event: dict, source: str):
     global LAST_EVENT_AT, LAST_COMMAND_AT, LAST_COMMAND_NAME, LAST_COMMAND_USER
     LAST_EVENT_AT = time.time()
@@ -11173,7 +11307,7 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}menu — abre el menú interactivo.",
                 f"{PREFIX}economia — muestra el sistema de puntos.",
                 f"{PREFIX}perfilbot <Nombre> | <Estado> — modifica el perfil (administradores).",
-                f"{PREFIX}avatarbot <URL|eliminar> — cambia o retira el avatar (administradores).",
+                f"{PREFIX}avatarbot <URL|eliminar> — cambia o retira el avatar con una imagen o artículo (administradores).",
                 f"{PREFIX}autotest — pruebas internas de Katherine."
             ]
         ]
@@ -12797,8 +12931,9 @@ async def handle_command(event: dict, source: str):
         if not avatar_value:
             await send_message(
                 thread,
-                "Uso: !avatarbot https://.../imagen.png\n"
-                "También puedes usar !avatarbot eliminar para retirar el avatar.",
+                "Uso: !avatarbot URL_DE_IMAGEN_O_ARTICULO\n"
+                "Acepta una imagen HTTPS directa o una página de Namu Wiki.\n"
+                "Usa !avatarbot eliminar para retirar el avatar personalizado.",
                 source,
                 reply
             )
@@ -12807,43 +12942,80 @@ async def handle_command(event: dict, source: str):
         remove_avatar = avatar_value.casefold() in {
             "eliminar", "quitar", "borrar", "reset", "default"
         }
+
         if remove_avatar:
-            payload = {"avatar": None}
-        else:
-            parsed_avatar = urlparse(avatar_value)
-            hostname = (parsed_avatar.hostname or "").lower()
-            if (
-                len(avatar_value) > 2048
-                or parsed_avatar.scheme.lower() != "https"
-                or not hostname
-                or parsed_avatar.username
-                or parsed_avatar.password
-                or hostname in {"localhost", "127.0.0.1", "::1"}
-                or hostname.endswith((".local", ".internal"))
-            ):
+            result = await api("PATCH", "/me", "community", {"avatar": None})
+            if not result.get("ok"):
                 await send_message(
                     thread,
-                    "URL no válida. Usa un enlace HTTPS público a una imagen.",
+                    f"No se pudo retirar el avatar. HTTP {result.get('status', '?')}.",
                     source,
                     reply
                 )
                 return
-            payload = {"avatar": avatar_value}
 
-        result = await api("PATCH", "/me", "community", payload)
-        if result.get("ok"):
             await send_message(
                 thread,
-                "Avatar de Katherine actualizado."
-                if not remove_avatar
-                else "Avatar personalizado de Katherine retirado.",
+                "La solicitud para retirar el avatar fue aceptada por Anarchy Apps.",
+                source,
+                reply
+            )
+            return
+
+        try:
+            image_bytes, mime = await resolve_avatar_image(avatar_value)
+        except Exception as exc:
+            await send_message(
+                thread,
+                f"No pude preparar el avatar: {str(exc)[:220]}",
+                source,
+                reply
+            )
+            return
+
+        before = await api("GET", "/me", "community")
+        before_data = before.get("data") if before.get("ok") else {}
+        before_fields = avatar_fields_from_profile(before_data or {})
+
+        data_uri = (
+            f"data:{mime};base64,"
+            + base64.b64encode(image_bytes).decode("ascii")
+        )
+        result = await api(
+            "PATCH",
+            "/me",
+            "community",
+            {"avatar": data_uri}
+        )
+
+        if not result.get("ok"):
+            await send_message(
+                thread,
+                f"Anarchy Apps rechazó la imagen. HTTP {result.get('status', '?')}.",
+                source,
+                reply
+            )
+            return
+
+        after = await api("GET", "/me", "community")
+        after_data = after.get("data") if after.get("ok") else {}
+        after_fields = avatar_fields_from_profile(after_data or {})
+
+        changed = bool(after_fields) and after_fields != before_fields
+        if changed:
+            await send_message(
+                thread,
+                f"Avatar de Katherine actualizado y verificado ({len(image_bytes) // 1024} KB).",
                 source,
                 reply
             )
         else:
+            keys = ", ".join(after_fields.keys()) if after_fields else "la API no expone campos de avatar en /me"
             await send_message(
                 thread,
-                f"No se pudo cambiar el avatar. La API respondió HTTP {result.get('status', '?')}.",
+                "Anarchy Apps aceptó la solicitud (HTTP 200), pero no confirmó el cambio "
+                f"al volver a consultar el perfil. Campos detectados: {keys}. "
+                "No marcaré el avatar como actualizado hasta poder verificarlo.",
                 source,
                 reply
             )
