@@ -154,3 +154,68 @@ async def test_no_credentials_keeps_safe_fallback(monkeypatch):
     result = await ai.assist("explica Cyno", "room:user", lambda *a, **k: None)
     assert result["kind"] == "answer"
     assert "todavía no está conectada" in result["answer"]
+
+
+@pytest.mark.asyncio
+async def test_groq_responses_omits_unsupported_store_and_uses_json_object(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-groq-key")
+    monkeypatch.setenv("KATHERINE_AI_API_URL", "https://api.groq.com/openai/v1/responses")
+    monkeypatch.delenv("KATHERINE_AI_MODEL", raising=False)
+    ai = KatherineAI()
+    captured = {}
+
+    async def fake_request(method, url, **kwargs):
+        captured.update({"method": method, "url": url, **kwargs})
+        return FakeResponse(response_payload({
+            "kind": "answer", "answer": "OK", "command": "", "args": ""
+        }))
+
+    assert ai.provider_name == "Groq"
+    assert ai.model == "openai/gpt-oss-20b"
+    assert await ai.test_connection(fake_request) == "OK"
+    assert "store" not in captured["json"]
+    assert captured["json"]["text"]["format"]["type"] == "json_schema"
+    assert captured["json"]["text"]["format"]["strict"] is True
+
+
+@pytest.mark.asyncio
+async def test_groq_model_without_strict_schema_uses_json_object_mode(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-groq-key")
+    monkeypatch.setenv("KATHERINE_AI_API_URL", "https://api.groq.com/openai/v1/responses")
+    monkeypatch.setenv("KATHERINE_AI_MODEL", "llama-3.3-70b-versatile")
+    ai = KatherineAI()
+    captured = {}
+
+    async def fake_request(method, url, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse(response_payload({
+            "kind": "answer", "answer": "OK", "command": "", "args": ""
+        }))
+
+    assert await ai.test_connection(fake_request) == "OK"
+    assert "store" not in captured["json"]
+    assert captured["json"]["text"]["format"] == {"type": "json_object"}
+
+
+@pytest.mark.asyncio
+async def test_provider_error_exposes_only_safe_error_fields(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "must-not-appear")
+    ai = KatherineAI()
+
+    async def fake_request(method, url, **kwargs):
+        return FakeResponse({
+            "error": {
+                "code": "model_not_found",
+                "type": "invalid_request_error",
+                "message": "The model is not available.",
+            }
+        }, status_code=400)
+
+    with pytest.raises(RuntimeError) as error:
+        await ai.test_connection(fake_request)
+    message = str(error.value)
+    assert "HTTP 400" in message
+    assert "model_not_found" in message
+    assert "invalid_request_error" in message
+    assert "The model is not available." in message
+    assert "must-not-appear" not in message
