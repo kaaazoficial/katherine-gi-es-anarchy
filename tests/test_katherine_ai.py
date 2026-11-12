@@ -2,7 +2,7 @@
 import json
 import time
 import pytest
-from katherine_ai import ACTION_SCHEMA, KatherineAI, validate_ai_tool_call
+from katherine_ai import ACTION_SCHEMA, KatherineAI, is_bot_author, validate_ai_tool_call
 
 class FakeResponse:
     def __init__(self, payload, status_code=200):
@@ -16,6 +16,13 @@ def response_payload(result):
     return {"output": [{"type": "message", "content": [
         {"type": "output_text", "text": json.dumps(result)}
     ]}]}
+
+def test_bot_author_detection_requires_a_real_uid_match():
+    assert is_bot_author({"uid": "bot-123"}, "bot-123")
+    assert is_bot_author({"isBot": True}, "")
+    assert not is_bot_author({"nickname": "Ana"}, "")
+    assert not is_bot_author({"uid": "user-123"}, "bot-123")
+
 
 def test_default_model_is_current_mini(monkeypatch):
     monkeypatch.delenv("KATHERINE_AI_MODEL", raising=False)
