@@ -58,6 +58,10 @@ from katherine_nexus import (
     interpret_natural_request,
     toggle_community_participant,
 )
+from katherine_astra import (
+    is_recoverable_dj_failure,
+    resolve_music_mood,
+)
 
 # ---------------------------------------------------------------------------
 # CONFIGURACION
@@ -15326,21 +15330,7 @@ Uso: !enciclopedia <nombre>""",
 
         if args[0].lower() in ("ambiente", "mood", "recomendar"):
             mood = " ".join(args[1:]).strip().casefold()
-            mood_queries = {
-                "estudiar": "instrumental focus study ambient",
-                "concentracion": "instrumental focus study ambient",
-                "concentración": "instrumental focus study ambient",
-                "trabajar": "lofi chill instrumental",
-                "relajarse": "calm ambient piano relaxing",
-                "dormir": "soft ambient sleep meditation",
-                "jugar": "epic cinematic game soundtrack",
-                "gaming": "epic cinematic game soundtrack",
-                "combate": "epic battle orchestral",
-                "triste": "melancholic piano ambient",
-                "feliz": "upbeat cheerful instrumental",
-                "anime": "anime instrumental soundtrack",
-            }
-            search_term = mood_queries.get(mood, mood or "ambient instrumental")
+            search_term = resolve_music_mood(mood)
             args = ["buscar", search_term]
         if args[0].lower() in ("buscar", "search"):
             search_term = " ".join(args[1:]).strip()
@@ -15525,12 +15515,7 @@ async def start_dj_search_with_fallback(
                 message = f"La pista seleccionada no se pudo validar; inicié «{track.get('title', 'otra pista')}» como alternativa."
             return True, message, track, index
         last_error = message
-        recoverable = (
-            "No pude descargar o validar" in message
-            or "no pasó la validación de audio" in message
-            or "formato de audio no compatible" in message
-            or "no contiene una pista de audio" in message
-        )
+        recoverable = is_recoverable_dj_failure(message)
         if not recoverable:
             break
         metrics["dj_fallback_tracks_skipped"] += 1
