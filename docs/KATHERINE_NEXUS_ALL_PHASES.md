@@ -74,3 +74,8 @@ Jamendo permanece desactivado hasta que se configure su Client ID. YouTube y Spo
 5. Merge a \`main\` solo tras CI verde.
 6. Render despliega automáticamente desde \`main\`; luego se verifica \`/health\`, inicio de ambos bots y logs.
 7. Si falla el arranque o una regresión crítica, se revierte al commit estable sin modificar \`rollback/katherine-2.0\`.
+
+
+## ASTRA INTELLIGENCE
+
+La expansión opcional de IA, comandos, privacidad y límites está documentada en `docs/ASTRA_INTELLIGENCE.md`. Incluye Katherine AI Core, memoria contextual temporal, Teyvat AI, Guardian AI, AI Chat Analyst, Eclipse AI, Language AI y Astra Admin AI. CREATIVITY AI queda expresamente fuera de alcance.
