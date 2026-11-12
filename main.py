@@ -2525,13 +2525,15 @@ async def handle_command(event: dict, source: str):
 
         question = parts[0]
         options = parts[1:6]
-        poll_id = f"{source}:{thread}:{int(time.time()*1000)}"
+        poll_nonce = str(time.time_ns())[-15:]
+        poll_id = f"{source}:{thread}:{poll_nonce}"
 
         polls[poll_id] = {
             "question": question,
             "options": options,
             "votes": {},
             "source": source,
+            "thread": thread,
             "created_at": time.time(),
             "expires": time.time() + 86400
         }
@@ -2923,6 +2925,9 @@ async def handle_interaction(event: dict, source: str):
     )
 
     if not poll:
+        return
+
+    if poll.get("source") != source or str(event.get("threadId") or "") != poll.get("thread"):
         return
 
     index = int(match.group(2))
