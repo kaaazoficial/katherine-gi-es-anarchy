@@ -377,3 +377,41 @@ def test_admin_uid_can_run_privileged_system_status(monkeypatch, database):
     asyncio.run(katherine.handle_command(event, "community"))
 
     assert sent == ["ESTADO INTERNO AUTORIZADO"]
+
+
+
+def test_message_splitting_respects_utf16_api_limit_with_emoji():
+    message = "😀" * 2401
+    parts = katherine.split_message_content(message)
+    assert len(parts) > 1
+    assert all(katherine.utf16_length(part) <= 1800 for part in parts)
+    assert "".join(parts) == message
+
+
+def test_message_splitting_respects_utf16_limit_for_mixed_text():
+    message = ("Katherine informa: " + "🛰️" * 220 + " estado operativo.\n") * 8
+    parts = katherine.split_message_content(message)
+    assert len(parts) > 1
+    assert all(katherine.utf16_length(part) <= 1800 for part in parts)
+
+
+def test_genshin_helper_tree_negative_cache_suppresses_repeated_403(monkeypatch):
+    class ForbiddenResponse:
+        status_code = 403
+
+    calls = 0
+
+    async def fake_external_request(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return ForbiddenResponse()
+
+    monkeypatch.setattr(katherine, "external_request", fake_external_request)
+    monkeypatch.setattr(katherine, "cache", {})
+
+    first = asyncio.run(katherine.get_helper_build_tree())
+    second = asyncio.run(katherine.get_helper_build_tree())
+
+    assert first is None
+    assert second is None
+    assert calls == 1
