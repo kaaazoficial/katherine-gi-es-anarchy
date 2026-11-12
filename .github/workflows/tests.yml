@@ -6,6 +6,7 @@ on:
       - "main.py"
       - "requirements.txt"
       - "katherine_nexus.py"
+      - "katherine_astra.py"
       - "tests/**"
       - "requirements-test.txt"
       - ".github/workflows/tests.yml"
