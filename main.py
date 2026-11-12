@@ -309,6 +309,10 @@ send_history_chat = defaultdict(deque)
 
 cache: dict[str, tuple[float, Any]] = {}
 polls: dict[str, dict] = {}
+
+EXTERNAL_GLOBAL_LIMIT = asyncio.Semaphore(10)
+EXTERNAL_HOST_LIMITS = {}
+SOURCE_HEALTH = {}
 poll_button_map: dict[str, str] = {}
 
 # Contadores del proceso actual. Se reinician cuando Render reinicia el servicio.
@@ -643,11 +647,77 @@ def clean_text(value: Any) -> str:
 
 
 async def external_request(method: str, url: str, **kwargs):
-    """Reutiliza conexiones HTTP durante la vida del proceso."""
-    if HTTP_CLIENT is not None:
-        return await HTTP_CLIENT.request(method, url, **kwargs)
-    async with httpx.AsyncClient(timeout=20) as temporary_client:
-        return await temporary_client.request(method, url, **kwargs)
+    """HTTP compartido con concurrencia limitada, telemetría y reintentos seguros."""
+    host_match = re.match(r"https?://([^/:]+)", str(url), flags=re.I)
+    host = host_match.group(1).lower() if host_match else "unknown"
+    host_semaphore = EXTERNAL_HOST_LIMITS.setdefault(host, asyncio.Semaphore(3))
+    safe_retry = str(method).upper() in ("GET", "HEAD")
+    attempts = 3 if safe_retry else 1
+    last_error = None
+
+    async with EXTERNAL_GLOBAL_LIMIT:
+        async with host_semaphore:
+            for attempt in range(attempts):
+                started = time.perf_counter()
+                try:
+                    if HTTP_CLIENT is not None and not HTTP_CLIENT.is_closed:
+                        response = await HTTP_CLIENT.request(method, url, **kwargs)
+                    else:
+                        async with httpx.AsyncClient(timeout=20) as temporary_client:
+                            response = await temporary_client.request(method, url, **kwargs)
+
+                    elapsed_ms = (time.perf_counter() - started) * 1000
+                    state = SOURCE_HEALTH.setdefault(host, {
+                        "requests": 0, "successes": 0, "failures": 0,
+                        "last_status": None, "last_latency_ms": 0.0,
+                        "last_success_at": None, "last_error": None
+                    })
+                    state["requests"] += 1
+                    state["last_status"] = response.status_code
+                    state["last_latency_ms"] = elapsed_ms
+
+                    if response.is_success:
+                        state["successes"] += 1
+                        state["last_success_at"] = time.time()
+                        state["last_error"] = None
+                        return response
+
+                    state["failures"] += 1
+                    state["last_error"] = f"HTTP {response.status_code}"
+
+                    if (
+                        safe_retry
+                        and response.status_code in (429, 500, 502, 503, 504)
+                        and attempt + 1 < attempts
+                    ):
+                        retry_after = response.headers.get("Retry-After", "")
+                        try:
+                            delay = min(3.0, max(0.4, float(retry_after)))
+                        except (TypeError, ValueError):
+                            delay = 0.45 * (attempt + 1)
+                        await asyncio.sleep(delay)
+                        continue
+
+                    return response
+
+                except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+                    last_error = exc
+                    state = SOURCE_HEALTH.setdefault(host, {
+                        "requests": 0, "successes": 0, "failures": 0,
+                        "last_status": None, "last_latency_ms": 0.0,
+                        "last_success_at": None, "last_error": None
+                    })
+                    state["requests"] += 1
+                    state["failures"] += 1
+                    state["last_latency_ms"] = (time.perf_counter() - started) * 1000
+                    state["last_error"] = type(exc).__name__
+                    if not safe_retry or attempt + 1 >= attempts:
+                        raise
+                    await asyncio.sleep(0.35 * (attempt + 1))
+
+    if last_error:
+        raise last_error
+    raise httpx.RequestError("Solicitud externa no completada", request=None)
 
 
 
@@ -7984,7 +8054,7 @@ async def fetch_kqm_teams(character: dict | None, query: str, name: str, key: st
         elif slug == "sangonomiya-kokomi":
             candidates.append("kokomi")
 
-    for slug in candidates[:4]:
+    for slug in candidates[:2]:
         url = f"{KQM_QUICKGUIDE_BASE}{slug}-quickguide/"
         key_cache = f"kqm-teams:{slug}"
         cached = cache.get(key_cache)
@@ -8099,21 +8169,24 @@ class CommunityGuideHTMLParser(HTMLParser):
             "artifacts": [],
             "stats": [],
             "talents": [],
-            "teams": []
+            "teams": [],
+            "rotation": []
         }
         self.headings = {
             "weapons": [],
             "artifacts": [],
             "stats": [],
             "talents": [],
-            "teams": []
+            "teams": [],
+            "rotation": []
         }
         self.anchors = {
             "weapons": [],
             "artifacts": [],
             "stats": [],
             "talents": [],
-            "teams": []
+            "teams": [],
+            "rotation": []
         }
 
     @staticmethod
@@ -8121,21 +8194,30 @@ class CommunityGuideHTMLParser(HTMLParser):
         title = re.sub(r"\s+", " ", str(value or "")).casefold()
         if "teammate" in title or "team mate" in title:
             return None
-        if "weapon" in title:
+        if any(word in title for word in ("rotation", "combo", "rotacion", "rotación")):
+            return "rotation"
+        if any(word in title for word in ("weapon", "arma recomendada", "armas recomendadas", "mejores armas")):
             return "weapons"
-        if "artifact" in title or "artefact" in title:
-            if any(word in title for word in ("stat", "main", "substat")):
+        if any(word in title for word in ("artifact", "artefact", "set de artefactos", "artefactos recomendados", "mejores artefactos")):
+            if any(word in title for word in ("stat", "main", "substat", "estadística", "estadistica")):
                 return "stats"
             return "artifacts"
         if any(word in title for word in (
-            "team", "teambuild", "composition", "compositions"
+            "team", "teambuild", "composition", "compositions",
+            "equipo", "equipos", "composición", "composicion"
         )):
             return "teams"
-        if "talent" in title and any(word in title for word in (
-            "priority", "talents", "prioridad"
+        if any(word in title for word in (
+            "talent priority", "talents priority", "prioridad de talentos",
+            "prioridad de talento"
         )):
             return "talents"
-        if "stat priority" in title or "best stats" in title:
+        if any(word in title for word in (
+            "stat priority", "best stats", "stats recomendadas",
+            "estadísticas recomendadas", "estadisticas recomendadas",
+            "estadísticas principales", "estadisticas principales",
+            "substats priorizadas"
+        )):
             return "stats"
         return None
 
@@ -8263,6 +8345,12 @@ def community_guide_stats(parser: CommunityGuideHTMLParser):
 
     value = re.sub(r"\s+", " ", " ".join(values)).strip()
     value = re.sub(r"(?i)\bSands(?: of Eon)?\s*:", "Reloj:", value)
+    value = re.sub(r"(?i)\bCaliz\s*[-:]?", "Copa:", value)
+    value = re.sub(r"(?i)\bTiara\s*[-:]?", "Corona:", value)
+    value = re.sub(r"(?i)\bStats principales\s*:", "Estadísticas principales:", value)
+    value = re.sub(r"(?i)\bSubstats priorizadas\s*:", "Subestadísticas prioritarias:", value)
+    value = re.sub(r"(?i)\bProb\. Crit\b", "Prob. CRIT", value)
+    value = re.sub(r"(?i)\bDano Crit\b", "Daño CRIT", value)
     value = re.sub(r"(?i)\bGoblet(?: of Eonothem)?\s*:", "Copa:", value)
     value = re.sub(r"(?i)\bCirclet(?: of Logos)?\s*:", "Corona:", value)
     value = re.sub(r"(?i)\bSubstats?(?: Priority)?\s*:", "Substats:", value)
@@ -8329,6 +8417,9 @@ def parse_community_guide_page(page_html: str, url: str,
     talents_raw = " ".join(parser.sections.get("talents", []))
     talents_raw = re.sub(r"\s+", " ", talents_raw).strip()
     talents = game_excerpt(talents_raw, 480) if talents_raw else None
+    rotation_raw = " ".join(parser.sections.get("rotation", []))
+    rotation_raw = re.sub(r"\s+", " ", rotation_raw).strip()
+    rotation = game_excerpt(rotation_raw, 700) if rotation_raw else None
 
     return {
         "weapons": weapons,
@@ -8338,8 +8429,25 @@ def parse_community_guide_page(page_html: str, url: str,
         "teams": community_guide_team_groups(
             parser, target_slugs or set()
         ),
+        "rotation": rotation,
         "url": url
     }
+
+
+
+def extract_guide_update_label(page_text: str):
+    text = html.unescape(re.sub(r"<[^>]+>", " ", str(page_text or "")))
+    text = re.sub(r"\s+", " ", text)
+    patterns = (
+        r"(?i)(?:last\s+updated|updated\s+on|updated|actualizado(?:\s+el)?|actualizada(?:\s+el)?)\s*[:\-]?\s*((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4})",
+        r"(?i)(?:versión|version)\s*(\d+(?:\.\d+){1,2})",
+        r"(?i)(?:updated\s+for|actualizado\s+para)\s+(?:version|versión)\s*(\d+(?:\.\d+){1,2})"
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return re.sub(r"\s+", " ", match.group(1)).strip()
+    return None
 
 
 async def fetch_community_guide_url(url: str, cache_key: str,
@@ -8366,9 +8474,11 @@ async def fetch_community_guide_url(url: str, cache_key: str,
         parsed = parse_community_guide_page(
             response.text, str(response.url), target_slugs
         )
+        parsed["source_updated"] = extract_guide_update_label(response.text)
+        parsed["fetched_at"] = time.time()
         if not parsed or not any(
             parsed.get(field)
-            for field in ("weapons", "artifacts", "stats", "talents", "teams")
+            for field in ("weapons", "artifacts", "stats", "talents", "teams", "rotation")
         ):
             cache[cache_key] = (time.time() + 1800, None)
             return None
