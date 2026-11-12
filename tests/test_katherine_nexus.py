@@ -179,3 +179,16 @@ def test_unrelated_topics_never_route_to_genshin_tools(utterance):
 def test_genshin_entity_names_still_route_to_teyvat():
     assert interpret_natural_request("Katherine, quién es Cyno") == "enciclopedia cyno"
     assert interpret_natural_request("Katherine, dame una guía de Nahida") == "guia nahida"
+
+
+@pytest.mark.parametrize(
+    ("utterance", "expected"),
+    [
+        ("Katherine, investiga novedades de Python 3.14", "investigar novedades de python 3.14"),
+        ("Katherine, busca información sobre ciberseguridad", "investigar ciberseguridad"),
+        ("Katherine, analiza este enlace https://example.com/articulo", "enlace https://example.com/articulo"),
+        ("Katherine, resume https://example.com/noticia", "enlace https://example.com/noticia"),
+    ],
+)
+def test_public_research_requests_route_to_research_tools(utterance, expected):
+    assert interpret_natural_request(utterance) == expected

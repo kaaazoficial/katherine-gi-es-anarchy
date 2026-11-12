@@ -317,9 +317,9 @@ async def test_unrelated_question_cannot_execute_genshin_tool(monkeypatch):
         requests.append(kwargs)
         return responses.pop(0)
 
-    result = await ai.assist("qué es Anarchy Apps", "room:user", fake_request)
+    result = await ai.assist("qué ofrece el ecosistema comunitario de esta aplicación", "room:user", fake_request)
     assert result["kind"] == "answer"
-    assert "Anarchy Apps" in result["answer"]
+    assert "anarchy apps" in result["answer"].casefold()
     assert len(requests) == 2
     assert "No invoques ninguna herramienta de Genshin" in requests[1]["json"]["instructions"]
 
@@ -344,7 +344,7 @@ async def test_unrelated_direct_answer_cannot_drift_to_genshin(monkeypatch):
     async def fake_request(method, url, **kwargs):
         return responses.pop(0)
 
-    result = await ai.assist("qué es Anarchy Apps", "room:user", fake_request)
+    result = await ai.assist("explícame qué hace esta plataforma comunitaria", "room:user", fake_request)
     assert result["kind"] == "answer"
     assert "plataforma" in result["answer"]
     assert "Genshin" not in result["answer"]
@@ -402,4 +402,147 @@ async def test_katherine_identity_faq_works_without_ai_credentials(monkeypatch):
 
     result = await ai.assist("¿Quién eres?", "room:verified-user", unexpected_request)
     assert "bot de entretenimiento" in result["answer"]
-    assert "bot de soporte de Anarchy Apps" in result["answer"]
+    assert "no soy un bot de ayuda ni de soporte" in result["answer"].casefold()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("Katherine, preséntate", "bot de entretenimiento"),
+        ("Katherine, ¿quién eres?", "bot de entretenimiento"),
+        ("Katherine, ¿quién es tu creador?", "Mi creador es Sinner."),
+        ("Katherine, ¿quién es su creador?", "Mi creador es Sinner."),
+        ("¿Quién es el creador de Katherine?", "Mi creador es Sinner."),
+    ],
+)
+async def test_katherine_identity_questions_with_name_prefix(monkeypatch, question, expected):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+
+    async def unexpected_request(*args, **kwargs):
+        raise AssertionError("La identidad canónica no debe depender del proveedor.")
+
+    result = await ai.assist(question, "room:verified-user", unexpected_request)
+    assert result["kind"] == "answer"
+    if expected == "bot de entretenimiento":
+        assert expected in result["answer"]
+    else:
+        assert result["answer"] == expected
+
+
+def test_research_tools_are_allowed_and_validated():
+    assert validate_ai_tool_call("investigar", "cambios recientes de Python") == (
+        "investigar cambios recientes de Python"
+    )
+    assert validate_ai_tool_call("enlace", "https://example.com/articulo") == (
+        "enlace https://example.com/articulo"
+    )
+    assert validate_ai_tool_call("enlace", "http://example.com") is None
+    assert validate_ai_tool_call("enlace", "https://127.0.0.1/admin") is None
+    assert validate_ai_tool_call("investigar", "https://example.com") is None
+
+
+def test_research_sanitizer_extracts_page_text_and_rejects_unsafe_urls():
+    from katherine_research import extract_page_content, is_safe_public_url, normalize_public_url
+    title, text = extract_page_content(
+        "<html><head><title>Artículo útil</title></head><body>"
+        "<nav>Menú ignorado</nav><h1>Información</h1>"
+        "<p>Contenido de prueba suficientemente extenso para evaluar una página.</p>"
+        "<script>no ejecutar esto</script></body></html>"
+    )
+    assert title == "Artículo útil"
+    assert "Información" in text
+    assert "Menú ignorado" not in text
+    assert "no ejecutar esto" not in text
+    assert is_safe_public_url("https://example.com/noticia")
+    assert not is_safe_public_url("http://example.com")
+    assert not is_safe_public_url("https://localhost/admin")
+    assert not is_safe_public_url("https://127.0.0.1/admin")
+    assert not is_safe_public_url("https://example.com:8443/")
+    assert normalize_public_url("https://EXAMPLE.com/noticia#section") == (
+        "https://example.com/noticia"
+    )
+
+
+def test_research_search_parser_deduplicates_domains_and_unwraps_results():
+    from urllib.parse import quote
+    from katherine_research import parse_search_results
+    one = quote("https://example.com/a", safe="")
+    two = quote("https://example.com/b", safe="")
+    three = quote("https://another.example.org/b", safe="")
+    markup = (
+        '<a class="result__a" href="https://duckduckgo.com/l/?uddg=' + one + '">Primera fuente</a>'
+        '<div class="result__snippet">Extracto uno con datos</div>'
+        '<a class="result__a" href="https://duckduckgo.com/l/?uddg=' + two + '">Duplicada</a>'
+        '<div class="result__snippet">Extracto duplicado</div>'
+        '<a class="result__a" href="https://duckduckgo.com/l/?uddg=' + three + '">Segunda fuente</a>'
+    )
+    results = parse_search_results(markup, limit=5)
+    assert len(results) == 2
+    assert results[0]["url"] == "https://example.com/a"
+    assert results[1]["domain"] == "another.example.org"
+
+
+@pytest.mark.asyncio
+async def test_ai_plan_validates_all_steps_before_returning_plan(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+
+    async def fake_request(method, url, **kwargs):
+        return FakeResponse(response_payload({
+            "kind": "plan",
+            "answer": "",
+            "command": "",
+            "args": "",
+            "steps": [
+                {"command": "investigar", "args": "cambios recientes de Python"},
+                {"command": "enlace", "args": "https://example.com/articulo"},
+            ],
+        }))
+
+    result = await ai.assist(
+        "investiga los cambios de Python y analiza este artículo",
+        "room:user",
+        fake_request,
+    )
+    assert result["kind"] == "plan"
+    assert result["steps"] == [
+        "investigar cambios recientes de Python",
+        "enlace https://example.com/articulo",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ai_plan_rejects_entire_sequence_if_one_step_is_forbidden(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+
+    async def fake_request(method, url, **kwargs):
+        return FakeResponse(response_payload({
+            "kind": "plan",
+            "answer": "",
+            "command": "",
+            "args": "",
+            "steps": [
+                {"command": "investigar", "args": "cambios recientes de Python"},
+                {"command": "admin", "args": "eliminar mensajes"},
+            ],
+        }))
+
+    result = await ai.assist(
+        "investiga y luego elimina mensajes",
+        "room:user",
+        fake_request,
+    )
+    assert result["kind"] == "answer"
+    assert result["fallback"] is True
+    assert "No ejecutaré una secuencia parcial" in result["answer"]
+
+
+def test_structured_ai_schema_requires_bounded_steps_array():
+    assert "steps" in ACTION_SCHEMA["required"]
+    assert ACTION_SCHEMA["properties"]["steps"]["maxItems"] == 3
+    assert ACTION_SCHEMA["properties"]["steps"]["items"]["required"] == [
+        "command", "args"
+    ]

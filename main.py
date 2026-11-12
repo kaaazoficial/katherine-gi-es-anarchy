@@ -68,6 +68,7 @@ from katherine_astra import (
 from katherine_ai import (
     KatherineAI, build_ai_session_key, is_bot_author, validate_ai_tool_call
 )
+from katherine_research import search_web, fetch_public_page, build_source_context
 
 AI_CORE = KatherineAI()
 AI_TOOL_OUTPUT_CAPTURE: ContextVar[list[str] | None] = ContextVar(
@@ -12617,6 +12618,28 @@ async def execute_ai_tool(
     )
 
 
+async def execute_ai_plan(
+    event: dict, source: str, session_key: str, steps: list
+) -> bool:
+    """Validate the entire bounded plan before executing any step in order."""
+    if not isinstance(steps, list) or not 1 <= len(steps) <= 3:
+        return False
+    validated = []
+    for step in steps:
+        if not isinstance(step, str):
+            return False
+        parts = step.split(maxsplit=1)
+        invocation = validate_ai_tool_call(
+            parts[0] if parts else "", parts[1] if len(parts) > 1 else ""
+        )
+        if not invocation:
+            return False
+        validated.append(invocation)
+    for invocation in validated:
+        await execute_ai_tool(event, source, session_key, invocation)
+    return True
+
+
 async def handle_command(event: dict, source: str):
     global LAST_EVENT_AT, LAST_COMMAND_AT, LAST_COMMAND_NAME, LAST_COMMAND_USER
     LAST_EVENT_AT = time.time()
@@ -12692,7 +12715,7 @@ async def handle_command(event: dict, source: str):
         else:
             await send_message(
                 thread,
-                f"Tu UID de Anarchy Apps es: {admin_uid}\\n"
+                f"Tu UID de Anarchy Apps es: {admin_uid}\n"
                 "Copia este identificador y configúralo en Render en ADMIN_UIDS.",
                 source,
                 reply
@@ -12711,11 +12734,20 @@ async def handle_command(event: dict, source: str):
         has_deterministic_fallback = bool(
             fallback_command and not fallback_command.startswith("asistente ")
         )
-        if has_deterministic_fallback and ai_result.get("kind") != "command":
+        if has_deterministic_fallback and ai_result.get("kind") not in {"command", "plan"}:
             logging.warning(
                 "[NEXUS] IA sin herramienta válida; se ejecuta la ruta determinista."
             )
             await execute_ai_tool(event, source, session_key, fallback_command)
+            return
+        if ai_result.get("kind") == "plan":
+            if await execute_ai_plan(event, source, session_key, ai_result.get("steps") or []):
+                return
+            await send_message(
+                thread,
+                "No pude validar la secuencia completa. No ejecuté ningún paso.",
+                source, reply
+            )
             return
         if ai_result.get("kind") == "command":
             invocation = validate_ai_tool_call(
@@ -12734,6 +12766,71 @@ async def handle_command(event: dict, source: str):
         await send_message(thread, ai_result.get("answer") or "No pude completar tu solicitud.", source, reply)
         return
 
+    if command in ("!investigar", "!investiga", "!investigacion"):
+        research_query = query.strip()
+        if not research_query:
+            await send_message(thread, "Uso: !investigar <tema o pregunta>. Consultaré varias fuentes públicas y separaré hechos de dudas.", source, reply)
+            return
+        try:
+            sources = await search_web(research_query, external_request, limit=5)
+            if not sources:
+                answer = "No encontré fuentes públicas suficientes para esa consulta. Prueba con términos más concretos."
+            else:
+                context = build_source_context(research_query, sources)
+                try:
+                    summary = await AI_CORE.summarize_research(
+                        research_query, context, external_request,
+                        rate_key=build_ai_session_key(source, thread, author, message_id)
+                    )
+                except Exception:
+                    logging.exception("[RESEARCH] No se pudo sintetizar; se mostrarán extractos.")
+                    summary = "No pude generar una síntesis con IA; estos son los extractos recuperados para que puedas revisarlos."
+                refs = ["FUENTES CONSULTADAS"]
+                for index, item in enumerate(sources[:3], 1):
+                    refs.append(f"[{index}] {item.get('title') or 'Página sin título'} · {item.get('domain') or 'dominio desconocido'}")
+                    excerpt = item.get("excerpt") or item.get("snippet") or ""
+                    if excerpt:
+                        refs.append("   " + excerpt[:420])
+                answer = "INVESTIGACIÓN · " + research_query + "\n\n" + summary + "\n\n" + "\n".join(refs) + "\n\nLa búsqueda puede omitir páginas bloqueadas o no indexadas; verifica los datos importantes en las fuentes originales."
+        except Exception as exc:
+            logging.warning("[RESEARCH] Falló investigación pública: %s", type(exc).__name__)
+            answer = "No pude completar la investigación web en este momento. Los comandos clásicos siguen disponibles."
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command in ("!enlace", "!analizarenlace", "!leerweb"):
+        target_url = query.strip()
+        if not target_url:
+            await send_message(thread, "Uso: !enlace https://sitio-publico.com/articulo", source, reply)
+            return
+        try:
+            page = await fetch_public_page(target_url, external_request)
+            context = build_source_context(
+                "Analiza esta página: " + page["title"],
+                [page]
+            )
+            try:
+                summary = await AI_CORE.summarize_research(
+                    "Resume y analiza esta página, distingue afirmaciones, datos y posibles sesgos.",
+                    context, external_request,
+                    rate_key=build_ai_session_key(source, thread, author, message_id)
+                )
+            except Exception:
+                logging.exception("[RESEARCH] Falló análisis IA del enlace")
+                summary = page.get("excerpt", "")[:2500]
+            answer = (
+                f"ANÁLISIS DE ENLACE\n{page['title']}\nDominio: {page['domain']}\n\n"
+                f"{summary}\n\nFuente: {page['domain']}\n"
+                "El contenido de la página se trató como material externo no confiable."
+            )
+        except ValueError as exc:
+            answer = str(exc)
+        except Exception as exc:
+            logging.warning("[RESEARCH] No se pudo leer enlace: %s", type(exc).__name__)
+            answer = "No pude leer esa página. Puede estar bloqueada, requerir acceso o no ofrecer contenido HTML público."
+        await send_message(thread, answer, source, reply)
+        return
+
     if command == "!ia":
         sub = args[0].casefold() if args else "ayuda"
         rest = " ".join(args[1:]).strip()
@@ -12741,6 +12838,7 @@ async def handle_command(event: dict, source: str):
         if sub in ("ayuda", "help"):
             await send_message(thread,
                 "ASTRA INTELLIGENCE\n!ia estado / probar / olvidar / preguntar <consulta> / genshin <consulta>\n"
+                "!ia investigar <tema> / enlace <URL> — investigación web y análisis de páginas públicas.\n"
                 "!ia musica <descripción> / traducir idioma | texto\n"
                 "!ia guardian revisar <texto> (administradores)\n"
                 "!ia analista activar|resumen|limpiar|desactivar (administradores)\n"
@@ -12781,12 +12879,41 @@ async def handle_command(event: dict, source: str):
                 return
             prompt = ("Consulta de Genshin Impact. Usa la enciclopedia o guías existentes para verificar. " if sub == "genshin" else "") + rest
             result = await AI_CORE.assist(prompt, session_key, external_request)
+            if result.get("kind") == "plan":
+                if await execute_ai_plan(event, source, session_key, result.get("steps") or []):
+                    return
+                await send_message(
+                    thread,
+                    "No pude validar la secuencia completa. No ejecuté ningún paso.",
+                    source, reply
+                )
+                return
             if result.get("kind") == "command":
                 invocation = validate_ai_tool_call(result.get("command", ""), result.get("args", ""))
                 if invocation:
                     await execute_ai_tool(event, source, session_key, invocation)
                     return
             await send_message(thread, result.get("answer") or "No pude responder.", source, reply)
+            return
+        if sub in ("investigar", "investigacion", "investigación"):
+            if not rest:
+                await send_message(thread, "Uso: !ia investigar <tema o pregunta>.", source, reply)
+                return
+            routed_event = dict(event)
+            routed_message = dict(msg)
+            routed_message["content"] = f"{PREFIX}investigar {rest}"
+            routed_event["message"] = routed_message
+            await handle_command(routed_event, source)
+            return
+        if sub in ("enlace", "analizar", "analizarenlace"):
+            if not rest:
+                await send_message(thread, "Uso: !ia enlace https://sitio-publico.com/articulo", source, reply)
+                return
+            routed_event = dict(event)
+            routed_message = dict(msg)
+            routed_message["content"] = f"{PREFIX}enlace {rest}"
+            routed_event["message"] = routed_message
+            await handle_command(routed_event, source)
             return
         if sub == "musica":
             if not rest:
@@ -13039,10 +13166,13 @@ async def handle_command(event: dict, source: str):
     if command in ("!ayuda", "!comandos"):
         help_sections = [
             ("00 · INICIO RÁPIDO", [
+                f"{PREFIX}investigar <tema> — investiga en varias fuentes públicas y compara la información.",
+                f"{PREFIX}enlace <URL> — analiza y resume una página HTTPS pública.",
+                f"{PREFIX}asistente <petición> — combina conversación y herramientas disponibles; puede ejecutar pasos compatibles en secuencia.",
                 "También puedes dirigirte a Katherine: «Katherine, ...». La mención aislada no activa el bot.",
                 f"{PREFIX}ayuda / comandos — muestra este catálogo.",
                 f"{PREFIX}miuid / mi-id / mi_uid — muestra tu UID real de Anarchy Apps.",
-                f"{PREFIX}asistente <consulta> — consulta el núcleo conversacional de Katherine.",
+                f"{PREFIX}asistente <consulta> — consulta el núcleo conversacional y ejecuta hasta tres pasos compatibles en orden.",
             ]),
             ("01 · GENSHIN IMPACT · GUÍAS Y ARCHIVO", [
                 f"{PREFIX}guia <personaje> — guía de build, armas, artefactos, talentos y equipos.",
@@ -13123,6 +13253,8 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}salas — consulta salas en vivo.",
             ]),
             ("07 · UTILIDADES Y HERRAMIENTAS", [
+                f"{PREFIX}investigar <tema> — búsqueda web en varias fuentes, síntesis y referencias por dominio.",
+                f"{PREFIX}enlace <URL> — lectura y análisis de páginas públicas HTTPS; no abre archivos privados.",
                 f"{PREFIX}fecha — fecha y hora de Chile.",
                 f"{PREFIX}zona <Area/Ciudad> — hora de otra zona horaria.",
                 f"{PREFIX}menu / menú — abre el menú interactivo.",

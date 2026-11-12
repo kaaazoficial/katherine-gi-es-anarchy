@@ -107,6 +107,9 @@ def interpret_natural_request(value: str) -> str | None:
             zone = match.group(1).strip()
             return f"zona {zone}" if re.fullmatch(r"[a-z0-9_+/-]{2,64}", zone) else None
     subjects = (
+        (r"^(?:investiga|investigar|haz una investigacion sobre|busca informacion sobre|investiga en internet) (.+)$", "investigar"),
+        (r"^(?:analiza|resume|lee) (?:este )?(?:enlace|link|articulo) (https://\S+)$", "enlace"),
+        (r"^(?:resume|analiza) (https://\S+)$", "enlace"),
         (r"^(?:dame|muestra|busca)?\s*(?:una )?guia (?:de |del )?(.+)$", "guia"),
         (r"^(?:como armo|como construir|build de|build para|equipa) (.+)$", "guia"),
         (r"^(?:que equipos hay para|equipos para|equipo de|composiciones para) (.+)$", "equipos"),
