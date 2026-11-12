@@ -163,12 +163,16 @@ def test_antispam_configuration_applies_safe_bounds(database):
     database.set_chat_setting("room-1", "antispam_max_messages", "999")
     database.set_chat_setting("room-1", "antispam_window_seconds", "1")
     database.set_chat_setting("room-1", "antispam_repeat_limit", "99")
+    database.set_chat_setting("room-1", "antispam_max_links", "99")
+    database.set_chat_setting("room-1", "antispam_max_mentions", "1")
 
     config = database.anti_spam_configuration("room-1")
     assert config["enabled"] is False
     assert config["max_messages"] == 20
     assert config["window_seconds"] == 3
     assert config["repeat_limit"] == 10
+    assert config["max_links"] == 12
+    assert config["max_mentions"] == 3
 
 
 def test_volume_controls_handle_limits_and_restore():
