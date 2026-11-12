@@ -12799,7 +12799,7 @@ async def handle_command(event: dict, source: str):
         )
         return
 
-    if command in ("!pausa", "!reanudar", "!saltar", "!cola", "!dj"):
+    if command in ("!pausa", "!pausar", "!reanudar", "!continuar", "!saltar", "!cola", "!dj"):
         subcommand = args[0].lower() if args else ""
         if command == "!dj" and subcommand in (
             "pausa", "pausar", "reanudar", "continuar", "saltar", "skip",
@@ -12807,8 +12807,11 @@ async def handle_command(event: dict, source: str):
         ):
             action = subcommand
         elif command != "!dj":
-            action = {"!pausa": "pausa", "!reanudar": "reanudar",
-                      "!saltar": "saltar", "!cola": "cola"}[command]
+            action = {
+                "!pausa": "pausa", "!pausar": "pausa",
+                "!reanudar": "reanudar", "!continuar": "reanudar",
+                "!saltar": "saltar", "!cola": "cola"
+            }[command]
         else:
             action = ""
 
