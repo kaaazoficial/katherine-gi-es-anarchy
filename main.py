@@ -15,7 +15,7 @@ import sqlite3
 import sys
 import unicodedata
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 try:
@@ -223,6 +223,47 @@ def init_db():
             FOREIGN KEY(playlist_id) REFERENCES dj_playlists(id) ON DELETE CASCADE
         )""")
         db.execute("CREATE INDEX IF NOT EXISTS idx_playlist_tracks ON dj_playlist_tracks(playlist_id,id)")
+
+        db.execute("""CREATE TABLE IF NOT EXISTS chat_activity_daily (
+            thread_id TEXT NOT NULL,
+            uid TEXT NOT NULL,
+            nickname TEXT NOT NULL,
+            day_key TEXT NOT NULL,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(thread_id, uid, day_key)
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_activity_daily_day ON chat_activity_daily(thread_id,day_key)")
+        db.execute("""CREATE TABLE IF NOT EXISTS chat_activity_hourly (
+            thread_id TEXT NOT NULL,
+            day_key TEXT NOT NULL,
+            hour_of_day INTEGER NOT NULL,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(thread_id, day_key, hour_of_day)
+        )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS admin_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id TEXT NOT NULL,
+            actor_uid TEXT NOT NULL,
+            actor_name TEXT NOT NULL,
+            action TEXT NOT NULL,
+            details TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_admin_audit_thread ON admin_audit_log(thread_id,id DESC)")
+        db.execute("""CREATE TABLE IF NOT EXISTS auto_reply_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id TEXT NOT NULL,
+            trigger_phrase TEXT NOT NULL,
+            response_text TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_by TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            UNIQUE(thread_id, trigger_phrase)
+        )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS translation_daily_usage (
+            day_key TEXT PRIMARY KEY,
+            characters_used INTEGER NOT NULL DEFAULT 0
+        )""")
 
 
 def record_user(uid: str, nickname: str, count_message: bool = False):
@@ -674,6 +715,8 @@ send_history_chat = defaultdict(deque)
 
 cache: dict[str, tuple[float, Any]] = {}
 polls: dict[str, dict] = {}
+AUTO_REPLY_CHAT_COOLDOWN: dict[str, float] = {}
+AUTO_REPLY_USER_COOLDOWN: dict[tuple[str, str], float] = {}
 
 EXTERNAL_GLOBAL_LIMIT = asyncio.Semaphore(10)
 EXTERNAL_HOST_LIMITS = {}
@@ -11149,6 +11192,525 @@ async def resolve_avatar_image(source_url: str) -> tuple[bytes, str]:
     raise ValueError(last_problem)
 
 
+
+
+def record_chat_activity(thread_id: str, uid: str, nickname: str):
+    local_now = datetime.now(ZoneInfo("America/Santiago"))
+    day_key = local_now.strftime("%Y-%m-%d")
+    hour = int(local_now.hour)
+    with db_session() as db:
+        db.execute(
+            """INSERT INTO chat_activity_daily(thread_id,uid,nickname,day_key,message_count)
+               VALUES(?,?,?,?,1)
+               ON CONFLICT(thread_id,uid,day_key) DO UPDATE SET
+               nickname=excluded.nickname,
+               message_count=chat_activity_daily.message_count+1""",
+            (str(thread_id), str(uid), str(nickname)[:80], day_key)
+        )
+        db.execute(
+            """INSERT INTO chat_activity_hourly(thread_id,day_key,hour_of_day,message_count)
+               VALUES(?,?,?,1)
+               ON CONFLICT(thread_id,day_key,hour_of_day) DO UPDATE SET
+               message_count=chat_activity_hourly.message_count+1""",
+            (str(thread_id), day_key, hour)
+        )
+
+
+def build_activity_report(thread_id: str, period: str = "semana") -> str:
+    local_now = datetime.now(ZoneInfo("America/Santiago"))
+    today = local_now.date()
+    start_date = today if period == "hoy" else today - timedelta(days=6)
+    start_key = start_date.strftime("%Y-%m-%d")
+    with db_session() as db:
+        totals = db.execute(
+            """SELECT COALESCE(SUM(message_count),0) AS total,
+                      COUNT(DISTINCT uid) AS users
+               FROM chat_activity_daily WHERE thread_id=? AND day_key>=?""",
+            (str(thread_id), start_key)
+        ).fetchone()
+        top = db.execute(
+            """SELECT uid, MAX(nickname) AS nickname, SUM(message_count) AS total
+               FROM chat_activity_daily
+               WHERE thread_id=? AND day_key>=?
+               GROUP BY uid ORDER BY total DESC LIMIT 5""",
+            (str(thread_id), start_key)
+        ).fetchall()
+        peak = db.execute(
+            """SELECT hour_of_day, SUM(message_count) AS total
+               FROM chat_activity_hourly
+               WHERE thread_id=? AND day_key>=?
+               GROUP BY hour_of_day ORDER BY total DESC LIMIT 1""",
+            (str(thread_id), start_key)
+        ).fetchone()
+        days = db.execute(
+            """SELECT day_key, SUM(message_count) AS total
+               FROM chat_activity_daily
+               WHERE thread_id=? AND day_key>=?
+               GROUP BY day_key ORDER BY day_key DESC LIMIT 7""",
+            (str(thread_id), start_key)
+        ).fetchall()
+
+    period_label = "hoy" if period == "hoy" else "últimos 7 días"
+    lines = [
+        f"ACTIVIDAD DEL CHAT · {period_label.upper()}",
+        f"Mensajes registrados: {int(totals['total'] or 0)}",
+        f"Usuarios activos: {int(totals['users'] or 0)}"
+    ]
+    if peak and int(peak["total"] or 0) > 0:
+        lines.append(
+            f"Hora de mayor actividad: {int(peak['hour_of_day']):02d}:00 "
+            f"({int(peak['total'])} mensajes)"
+        )
+    if top:
+        lines.append("\nUSUARIOS MÁS ACTIVOS")
+        lines.extend(
+            f"{index}. {row['nickname']} — {int(row['total'])} mensajes"
+            for index, row in enumerate(top, 1)
+        )
+    else:
+        lines.append("\nAún no hay actividad registrada desde esta actualización.")
+    if days:
+        lines.append("\nACTIVIDAD POR DÍA")
+        lines.extend(
+            f"{row['day_key']} — {int(row['total'])} mensajes"
+            for row in days
+        )
+    return "\n".join(lines)
+
+
+def log_admin_action(
+    thread_id: str, actor_uid: str, actor_name: str,
+    action: str, details: str = ""
+):
+    with db_session() as db:
+        db.execute(
+            """INSERT INTO admin_audit_log
+               (thread_id,actor_uid,actor_name,action,details,created_at)
+               VALUES(?,?,?,?,?,?)""",
+            (
+                str(thread_id), str(actor_uid), str(actor_name)[:80],
+                str(action)[:50], str(details or "")[:240], time.time()
+            )
+        )
+
+
+def get_admin_audit(thread_id: str, limit: int = 10):
+    with db_session() as db:
+        rows = db.execute(
+            """SELECT actor_name,action,details,created_at
+               FROM admin_audit_log WHERE thread_id=?
+               ORDER BY id DESC LIMIT ?""",
+            (str(thread_id), max(1, min(20, int(limit))))
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_recent_chat_warnings(thread_id: str, limit: int = 10):
+    with db_session() as db:
+        rows = db.execute(
+            """SELECT id,target_name,moderator_name,reason,automatic,active,created_at
+               FROM moderation_warnings WHERE thread_id=?
+               ORDER BY id DESC LIMIT ?""",
+            (str(thread_id), max(1, min(20, int(limit))))
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def add_auto_reply_rule(thread_id: str, trigger_phrase: str, response_text: str, created_by: str) -> int:
+    phrase = re.sub(r"\s+", " ", str(trigger_phrase or "")).strip().casefold()
+    response = str(response_text or "").strip()
+    if not phrase or len(phrase) > 50 or not response or len(response) > 450:
+        raise ValueError("La palabra o frase debe tener hasta 50 caracteres y la respuesta hasta 450.")
+    with db_session() as db:
+        db.execute(
+            """INSERT INTO auto_reply_rules
+               (thread_id,trigger_phrase,response_text,enabled,created_by,created_at)
+               VALUES(?,?,?,1,?,?)
+               ON CONFLICT(thread_id,trigger_phrase) DO UPDATE SET
+               response_text=excluded.response_text,enabled=1,
+               created_by=excluded.created_by,created_at=excluded.created_at""",
+            (str(thread_id), phrase, response, str(created_by), time.time())
+        )
+        row = db.execute(
+            "SELECT id FROM auto_reply_rules WHERE thread_id=? AND trigger_phrase=?",
+            (str(thread_id), phrase)
+        ).fetchone()
+        return int(row["id"])
+
+
+def remove_auto_reply_rule(thread_id: str, rule_id: int) -> bool:
+    with db_session() as db:
+        cursor = db.execute(
+            "DELETE FROM auto_reply_rules WHERE thread_id=? AND id=?",
+            (str(thread_id), int(rule_id))
+        )
+        return cursor.rowcount > 0
+
+
+def list_auto_reply_rules(thread_id: str):
+    with db_session() as db:
+        rows = db.execute(
+            """SELECT id,trigger_phrase,response_text,enabled
+               FROM auto_reply_rules WHERE thread_id=? ORDER BY id DESC LIMIT 30""",
+            (str(thread_id),)
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+async def maybe_send_auto_reply(thread_id: str, uid: str, nickname: str, content: str):
+    if get_chat_setting(thread_id, "auto_replies_enabled", "0") != "1":
+        return
+    now = time.time()
+    if AUTO_REPLY_CHAT_COOLDOWN.get(str(thread_id), 0) > now:
+        return
+    if AUTO_REPLY_USER_COOLDOWN.get((str(thread_id), str(uid)), 0) > now:
+        return
+    normalized = re.sub(r"\s+", " ", str(content or "")).strip().casefold()
+    if not normalized or len(normalized) > 800:
+        return
+    rules = list_auto_reply_rules(thread_id)
+    for rule in sorted(rules, key=lambda item: len(item["trigger_phrase"]), reverse=True):
+        phrase = str(rule["trigger_phrase"] or "").strip().casefold()
+        if not phrase or not rule["enabled"]:
+            continue
+        pattern = r"(?<!\w)" + re.escape(phrase) + r"(?!\w)"
+        if re.search(pattern, normalized, flags=re.UNICODE):
+            response = str(rule["response_text"]).replace("{usuario}", str(nickname)[:80])
+            AUTO_REPLY_CHAT_COOLDOWN[str(thread_id)] = now + 4
+            AUTO_REPLY_USER_COOLDOWN[(str(thread_id), str(uid))] = now + 30
+            metrics["auto_replies_sent"] += 1
+            await send_message(thread_id, response, "developer")
+            return
+
+
+def format_poll_results(poll: dict) -> str:
+    options = poll.get("options") or []
+    votes = poll.get("votes") or {}
+    total = len(votes)
+    lines = [
+        f"RESULTADOS DE ENCUESTA · {poll.get('code', '------')}",
+        str(poll.get("question") or "Encuesta"),
+        f"Votos registrados: {total}"
+    ]
+    for index, option in enumerate(options):
+        count = sum(1 for value in votes.values() if value == index)
+        percent = (count / total * 100) if total else 0
+        lines.append(f"{option}: {count} ({percent:.1f}%)")
+    if poll.get("anonymous"):
+        lines.append("Votación anónima: no se muestran identidades.")
+    return "\n".join(lines)
+
+
+
+
+LANGUAGE_ALIASES = {
+    "es": "es", "español": "es", "spanish": "es",
+    "en": "en", "ingles": "en", "inglés": "en", "english": "en",
+    "pt": "pt", "portugues": "pt", "portugués": "pt", "portuguese": "pt",
+    "fr": "fr", "frances": "fr", "francés": "fr", "french": "fr",
+    "de": "de", "aleman": "de", "alemán": "de", "german": "de", "deutsch": "de",
+    "it": "it", "italiano": "it", "italian": "it",
+    "ja": "ja", "japones": "ja", "japonés": "ja", "japanese": "ja",
+    "ko": "ko", "coreano": "ko", "korean": "ko",
+    "zh": "zh", "chino": "zh", "chinese": "zh",
+    "ru": "ru", "ruso": "ru", "russian": "ru",
+    "ar": "ar", "arabe": "ar", "árabe": "ar", "arabic": "ar"
+}
+LANGUAGE_NAMES = {
+    "es": "español", "en": "inglés", "pt": "portugués", "fr": "francés",
+    "de": "alemán", "it": "italiano", "ja": "japonés", "ko": "coreano",
+    "zh": "chino", "ru": "ruso", "ar": "árabe"
+}
+
+
+def normalize_language_code(value: str) -> str | None:
+    key = unicodedata.normalize("NFC", str(value or "")).strip().casefold()
+    return LANGUAGE_ALIASES.get(key)
+
+
+def detect_language_code(text: str) -> str:
+    value = str(text or "")
+    if re.search(r"[\u3040-\u30ff]", value):
+        return "ja"
+    if re.search(r"[\uac00-\ud7af]", value):
+        return "ko"
+    if re.search(r"[\u4e00-\u9fff]", value):
+        return "zh"
+    if re.search(r"[\u0600-\u06ff]", value):
+        return "ar"
+    if re.search(r"[\u0400-\u04ff]", value):
+        return "ru"
+    words = re.findall(r"[a-záéíóúàèìòùâêîôûãõçäöüßñ]+", value.casefold())
+    dictionaries = {
+        "es": {"hola", "gracias", "como", "cómo", "que", "qué", "por", "para", "buenos", "buenas", "estoy", "tengo", "una", "los", "las", "del", "con", "pero"},
+        "en": {"hello", "thanks", "thank", "you", "the", "and", "with", "what", "how", "are", "is", "this", "that", "please", "good", "morning"},
+        "pt": {"olá", "obrigado", "obrigada", "você", "voce", "que", "uma", "não", "nao", "com", "para", "bom", "boa", "estou"},
+        "fr": {"bonjour", "merci", "avec", "pour", "vous", "nous", "est", "une", "des", "les", "comment", "salut"},
+        "de": {"hallo", "danke", "und", "der", "die", "das", "ist", "nicht", "mit", "ich", "guten", "morgen"},
+        "it": {"ciao", "grazie", "buongiorno", "come", "per", "con", "una", "che", "sono", "non", "del"}
+    }
+    scores = {
+        language: sum(1 for word in words if word in vocab)
+        for language, vocab in dictionaries.items()
+    }
+    best = max(scores, key=scores.get)
+    if scores[best] > 0:
+        return best
+    if any(char in value for char in "¿¡ñáéíóú"):
+        return "es"
+    return "en"
+
+
+async def translate_text(text: str, target_language: str) -> str:
+    content = str(text or "").strip()
+    target = normalize_language_code(target_language)
+    if not target:
+        raise ValueError("Idioma no reconocido. Usa español, inglés, portugués, francés, alemán, italiano, japonés, coreano, chino, ruso o árabe.")
+    if not content:
+        raise ValueError("Escribe el texto que quieres traducir.")
+    if len(content.encode("utf-8")) > 500:
+        raise ValueError("MyMemory permite hasta 500 bytes por fragmento. Divide el texto y vuelve a intentarlo.")
+    source = detect_language_code(content)
+    if source == target:
+        return f"El texto parece estar ya en {LANGUAGE_NAMES[target]}."
+    day_key = datetime.now(ZoneInfo("America/Santiago")).strftime("%Y-%m-%d")
+    chars = len(content)
+    with db_session() as db:
+        row = db.execute(
+            "SELECT characters_used FROM translation_daily_usage WHERE day_key=?",
+            (day_key,)
+        ).fetchone()
+        used = int(row["characters_used"]) if row else 0
+        if used + chars > 4500:
+            raise RuntimeError("Se alcanzó el límite diario preventivo de traducción gratuita de Katherine. Inténtalo mañana.")
+        db.execute(
+            """INSERT INTO translation_daily_usage(day_key,characters_used)
+               VALUES(?,?) ON CONFLICT(day_key) DO UPDATE SET
+               characters_used=translation_daily_usage.characters_used+excluded.characters_used""",
+            (day_key, chars)
+        )
+    response = await external_request(
+        "GET",
+        "https://api.mymemory.translated.net/get",
+        params={"q": content, "langpair": f"{source}|{target}", "mt": "1"},
+        timeout=18
+    )
+    if not response.is_success:
+        raise RuntimeError(f"El servicio de traducción respondió HTTP {response.status_code}.")
+    payload = response.json()
+    translated = (payload.get("responseData") or {}).get("translatedText")
+    if not translated:
+        detail = clean_text(payload.get("responseDetails") or "No se recibió una traducción.")
+        raise RuntimeError(detail[:220])
+    translated = html.unescape(str(translated))
+    return (
+        f"TRADUCCIÓN · {LANGUAGE_NAMES.get(source, source)} → {LANGUAGE_NAMES[target]}\n"
+        f"{translated}\n\n"
+        "El idioma de origen se estimó automáticamente; revisa el resultado si el texto es importante."
+    )
+
+
+async def search_multimedia(kind: str, query: str, limit: int = 5) -> str:
+    search_text = re.sub(r"\s+", " ", str(query or "")).strip()
+    if not search_text or len(search_text) > 120:
+        raise ValueError("La búsqueda debe tener entre 1 y 120 caracteres.")
+    kind = str(kind or "").casefold()
+    if kind == "imagen":
+        response = await external_request(
+            "GET",
+            "https://commons.wikimedia.org/w/api.php",
+            params={
+                "action": "query",
+                "generator": "search",
+                "gsrsearch": search_text,
+                "gsrnamespace": 6,
+                "gsrlimit": max(1, min(5, int(limit))),
+                "prop": "imageinfo",
+                "iiprop": "url|extmetadata",
+                "iiextmetadatafilter": "LicenseShortName|Artist",
+                "format": "json",
+                "formatversion": 2
+            },
+            timeout=18,
+            headers={"User-Agent": "Katherine-AnarchyBot/3.1 (Wikimedia Commons search)"}
+        )
+        if not response.is_success:
+            raise RuntimeError(f"Wikimedia Commons respondió HTTP {response.status_code}.")
+        data = response.json()
+        pages = ((data.get("query") or {}).get("pages") or [])
+        if not pages:
+            return f"No encontré imágenes para «{search_text}» en Wikimedia Commons."
+        lines = [f"IMÁGENES · WIKIMEDIA COMMONS · {search_text}"]
+        for index, page in enumerate(pages[:limit], 1):
+            info = (page.get("imageinfo") or [{}])[0]
+            url = info.get("descriptionurl") or info.get("url") or ""
+            metadata = info.get("extmetadata") or {}
+            license_data = metadata.get("LicenseShortName") or {}
+            artist_data = metadata.get("Artist") or {}
+            license_name = re.sub(r"<[^>]+>", "", str(license_data.get("value") or "Licencia no indicada"))
+            artist = re.sub(r"<[^>]+>", "", str(artist_data.get("value") or ""))
+            title = str(page.get("title") or "Archivo")
+            line = f"{index}. {title}\n{url}"
+            if license_name:
+                line += f"\nLicencia: {html.unescape(license_name)[:90]}"
+            if artist:
+                line += f" · Autor: {html.unescape(artist)[:90]}"
+            lines.append(line)
+        lines.append("Comprueba la licencia y las condiciones de atribución en cada ficha antes de reutilizar una imagen.")
+        return "\n\n".join(lines)
+
+    archive_type = {"video": "movies", "audio": "audio"}.get(kind)
+    if not archive_type:
+        raise ValueError("Tipos disponibles: imagen, video o audio.")
+    terms = re.findall(r"[\wÀ-ÿ]+", search_text, flags=re.UNICODE)[:6]
+    safe_terms = [term for term in terms if term]
+    if not safe_terms:
+        raise ValueError("No encontré términos válidos para esa búsqueda.")
+    archive_query = f"mediatype:{archive_type} AND " + " AND ".join(safe_terms)
+    response = await external_request(
+        "GET",
+        "https://archive.org/advancedsearch.php",
+        params={
+            "q": archive_query,
+            "fl[]": ["identifier", "title", "creator", "year"],
+            "rows": max(1, min(5, int(limit))),
+            "page": 1,
+            "output": "json"
+        },
+        timeout=18
+    )
+    if not response.is_success:
+        raise RuntimeError(f"Internet Archive respondió HTTP {response.status_code}.")
+    data = response.json()
+    docs = ((data.get("response") or {}).get("docs") or [])
+    if not docs:
+        return f"No encontré resultados de {kind} para «{search_text}» en Internet Archive."
+    lines = [f"{kind.upper()} · INTERNET ARCHIVE · {search_text}"]
+    for index, item in enumerate(docs[:limit], 1):
+        identifier = str(item.get("identifier") or "").strip()
+        if not identifier:
+            continue
+        title = clean_text(item.get("title") or identifier)[:150]
+        creator = clean_text(item.get("creator") or "")[:80]
+        year = clean_text(item.get("year") or "")[:12]
+        details = " · ".join(value for value in (creator, year) if value)
+        lines.append(
+            f"{index}. {title}" + (f"\n{details}" if details else "")
+            + f"\nhttps://archive.org/details/{quote(identifier)}"
+        )
+    if kind == "audio":
+        lines.append("La búsqueda muestra páginas de origen; revisa derechos y licencia. Para reproducir audio con licencia compatible usa !dj buscar.")
+    return "\n\n".join(lines)
+
+
+async def send_admin_panel(
+    thread_id: str, source: str, raw_uid: str,
+    category: str | None = None, reply_id: str | None = None
+):
+    if not is_admin_uid(raw_uid):
+        await send_message(thread_id, "No tienes permisos para abrir el panel de administración.", source, reply_id)
+        return
+    if category is None:
+        buttons = register_buttons(
+            source, thread_id, "admin_panel",
+            [
+                {"label": "Resumen", "value": "summary"},
+                {"label": "Actividad", "value": "activity"},
+                {"label": "Antispam", "value": "antispam"},
+                {"label": "Moderación", "value": "warnings"},
+                {"label": "Auditoría", "value": "audit"}
+            ],
+            ttl=1200
+        )
+        await send_message(
+            thread_id,
+            "KATHERINE · PANEL DE ADMINISTRACIÓN\nSelecciona el módulo que quieres consultar:",
+            source, reply_id, buttons
+        )
+        return
+
+    if category == "summary":
+        with db_session() as db:
+            users = db.execute(
+                "SELECT COUNT(*) AS total FROM users WHERE uid LIKE ?",
+                (f"{source}:{thread_id}:%",)
+            ).fetchone()["total"]
+            rules = db.execute(
+                "SELECT COUNT(*) AS total FROM auto_reply_rules WHERE thread_id=?",
+                (str(thread_id),)
+            ).fetchone()["total"]
+            active_warnings = db.execute(
+                "SELECT COUNT(*) AS total FROM moderation_warnings WHERE thread_id=? AND active=1",
+                (str(thread_id),)
+            ).fetchone()["total"]
+            daily = db.execute(
+                "SELECT COALESCE(SUM(message_count),0) AS total FROM chat_activity_daily WHERE thread_id=? AND day_key=?",
+                (str(thread_id), datetime.now(ZoneInfo("America/Santiago")).strftime("%Y-%m-%d"))
+            ).fetchone()["total"]
+        antispam = anti_spam_configuration(thread_id)
+        answer = (
+            "RESUMEN DE ADMINISTRACIÓN\n"
+            f"Perfiles registrados: {int(users)}\n"
+            f"Mensajes de hoy: {int(daily)}\n"
+            f"Advertencias activas: {int(active_warnings)}\n"
+            f"Reglas de respuesta: {int(rules)}\n"
+            f"Antispam: {'activado' if antispam['enabled'] else 'desactivado'}\n"
+            f"Respuestas automáticas: {'activadas' if get_chat_setting(thread_id, 'auto_replies_enabled', '0') == '1' else 'desactivadas'}"
+        )
+        await send_message(thread_id, answer, source, reply_id)
+        return
+
+    if category == "activity":
+        await send_message(thread_id, build_activity_report(thread_id, "semana"), source, reply_id)
+        return
+
+    if category == "antispam":
+        current = anti_spam_configuration(thread_id)
+        enabled = get_chat_setting(thread_id, "antispam_enabled", "1") == "1"
+        buttons = register_buttons(
+            source, thread_id, "admin_antispam",
+            [{"label": "Activar", "value": "on"}, {"label": "Desactivar", "value": "off"}],
+            ttl=900
+        )
+        await send_message(
+            thread_id,
+            "CONFIGURACIÓN ANTISPAM\n"
+            f"Estado: {'activado' if enabled else 'desactivado'}\n"
+            f"Límite: {current['max_messages']} mensajes / {current['window_seconds']} s\n"
+            f"Repeticiones: {current['repeat_limit']}",
+            source, reply_id, buttons
+        )
+        return
+
+    if category == "warnings":
+        warnings = get_recent_chat_warnings(thread_id, 10)
+        lines = ["MODERACIÓN · ÚLTIMAS ADVERTENCIAS"]
+        if not warnings:
+            lines.append("No hay advertencias registradas.")
+        for item in warnings:
+            status = "activa" if item["active"] else "retirada"
+            automatic = " · automática" if item["automatic"] else ""
+            lines.append(
+                f"#{item['id']} · {item['target_name']} · {status}{automatic}\n"
+                f"{item['reason']} · por {item['moderator_name']}"
+            )
+        await send_message(thread_id, "\n".join(lines), source, reply_id)
+        return
+
+    if category == "audit":
+        entries = get_admin_audit(thread_id, 12)
+        lines = ["AUDITORÍA · CAMBIOS DE ADMINISTRACIÓN"]
+        if not entries:
+            lines.append("Todavía no hay cambios registrados.")
+        for item in entries:
+            stamp = datetime.fromtimestamp(item["created_at"], ZoneInfo("America/Santiago")).strftime("%d/%m %H:%M")
+            lines.append(
+                f"{stamp} · {item['actor_name']} · {item['action']}"
+                + (f"\n{item['details']}" if item["details"] else "")
+            )
+        await send_message(thread_id, "\n".join(lines), source, reply_id)
+
+
 async def handle_command(event: dict, source: str):
     global LAST_EVENT_AT, LAST_COMMAND_AT, LAST_COMMAND_NAME, LAST_COMMAND_USER
     LAST_EVENT_AT = time.time()
@@ -11170,10 +11732,12 @@ async def handle_command(event: dict, source: str):
     message_id = msg.get("messageId")
 
     record_user(uid, nickname, count_message=True)
+    record_chat_activity(thread, uid, nickname)
 
     prefix_candidates = sorted({PREFIX, "!", "-"}, key=len, reverse=True)
     used_prefix = next((p for p in prefix_candidates if content.startswith(p)), None)
     if not used_prefix:
+        await maybe_send_auto_reply(thread, raw_uid, nickname, content)
         return
 
     metrics["commands_received"] += 1
@@ -11212,6 +11776,134 @@ async def handle_command(event: dict, source: str):
             source,
             reply
         )
+        return
+
+
+    if command in ("!admin", "!paneladmin"):
+        if not is_admin_uid(raw_uid):
+            await send_message(thread, "No tienes permisos de administración.", source, reply)
+            return
+        category = None
+        if args:
+            category = {
+                "resumen": "summary", "actividad": "activity",
+                "antispam": "antispam", "avisos": "warnings",
+                "advertencias": "warnings", "historial": "audit",
+                "auditoria": "audit", "auditoría": "audit"
+            }.get(args[0].casefold())
+        if args and category is None:
+            await send_message(thread, "Uso: !admin [resumen|actividad|antispam|avisos|historial].", source, reply)
+            return
+        await send_admin_panel(thread, source, raw_uid, category, reply)
+        return
+
+    if command == "!respuestas":
+        if not is_admin_uid(raw_uid):
+            await send_message(thread, "Solo un administrador puede configurar respuestas automáticas.", source, reply)
+            return
+        sub = args[0].casefold() if args else "estado"
+        if sub in ("on", "activar", "off", "desactivar"):
+            enabled = sub in ("on", "activar")
+            set_chat_setting(thread, "auto_replies_enabled", "1" if enabled else "0")
+            log_admin_action(thread, raw_uid, nickname, "respuestas", "activadas" if enabled else "desactivadas")
+            answer = f"Respuestas automáticas {'activadas' if enabled else 'desactivadas'}."
+        elif sub in ("estado", "status"):
+            enabled = get_chat_setting(thread, "auto_replies_enabled", "0") == "1"
+            answer = (
+                f"Respuestas automáticas: {'activadas' if enabled else 'desactivadas'}.\n"
+                "Configura reglas con !respuesta añadir palabra | respuesta."
+            )
+        else:
+            answer = "Uso: !respuestas on/off/estado."
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!respuesta":
+        if not is_admin_uid(raw_uid):
+            await send_message(thread, "Solo un administrador puede gestionar reglas de respuesta.", source, reply)
+            return
+        parts = query.split(maxsplit=1)
+        sub = parts[0].casefold() if parts else "ayuda"
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        if sub in ("añadir", "agregar", "crear"):
+            pair = rest.split("|", 1)
+            if len(pair) != 2:
+                answer = "Uso: !respuesta añadir palabra o frase | texto de respuesta. Puedes usar {usuario} para insertar el nombre."
+            else:
+                try:
+                    rule_id = add_auto_reply_rule(thread, pair[0], pair[1], raw_uid)
+                    log_admin_action(thread, raw_uid, nickname, "respuesta_creada", pair[0][:80])
+                    answer = f"Regla #{rule_id} guardada. Activa el sistema con !respuestas on."
+                except ValueError as exc:
+                    answer = str(exc)
+        elif sub in ("eliminar", "borrar", "quitar"):
+            try:
+                rule_id = int(rest)
+                removed = remove_auto_reply_rule(thread, rule_id)
+            except ValueError:
+                removed = False
+                rule_id = 0
+            if removed:
+                log_admin_action(thread, raw_uid, nickname, "respuesta_eliminada", f"Regla #{rule_id}")
+            answer = "Regla eliminada." if removed else "No encontré esa regla. Uso: !respuesta eliminar ID."
+        elif sub in ("lista", "listar"):
+            rules = list_auto_reply_rules(thread)
+            lines = ["REGLAS DE RESPUESTA"]
+            lines.extend(
+                f"#{item['id']} · {item['trigger_phrase']} → {item['response_text'][:120]}"
+                for item in rules
+            )
+            answer = "\n".join(lines) if rules else "No hay reglas. Crea una con !respuesta añadir palabra | respuesta."
+        else:
+            answer = (
+                "RESPUESTAS INTELIGENTES\n"
+                "!respuestas on/off/estado — activa o pausa el sistema.\n"
+                "!respuesta añadir palabra | respuesta — crea o actualiza una regla.\n"
+                "!respuesta lista — muestra reglas.\n"
+                "!respuesta eliminar ID — borra una regla.\n"
+                "Usa {usuario} en una respuesta para mencionar el nombre."
+            )
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!traducir":
+        pair = query.split("|", 1)
+        if len(pair) != 2:
+            await send_message(
+                thread,
+                "Uso: !traducir idioma_destino | texto. Ejemplo: !traducir inglés | Buenos días, ¿cómo estás?",
+                source, reply
+            )
+            return
+        try:
+            answer = await translate_text(pair[1].strip(), pair[0].strip())
+        except Exception as exc:
+            answer = f"No pude traducir el texto: {str(exc)[:260]}"
+        await send_message(thread, answer, source, reply)
+        return
+
+    media_aliases = {
+        "!imagen": "imagen", "!video": "video", "!audio": "audio"
+    }
+    if command in ("!multimedia", "!media") or command in media_aliases:
+        if command in media_aliases:
+            media_kind = media_aliases[command]
+            media_query = query
+        else:
+            media_kind = args[0].casefold() if args else ""
+            media_query = " ".join(args[1:]).strip()
+        if not media_kind or not media_query:
+            await send_message(
+                thread,
+                "Uso: !multimedia imagen|video|audio <búsqueda>. También puedes usar !imagen, !video o !audio.",
+                source, reply
+            )
+            return
+        try:
+            answer = await search_multimedia(media_kind, media_query, 5)
+        except Exception as exc:
+            answer = f"No pude completar la búsqueda multimedia: {str(exc)[:240]}"
+        await send_message(thread, answer, source, reply)
         return
 
     # -----------------------------------------------------------------------
@@ -11260,7 +11952,7 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}amistad @usuario — alias de afinidad.",
                 f"{PREFIX}regalo @usuario [mensaje] — envía un regalo simbólico.",
                 f"{PREFIX}muro — muestra los regalos recibidos.",
-                f"{PREFIX}actividad — ranking de actividad del chat.",
+                f"{PREFIX}actividad [hoy|semana] — actividad por periodo, horas pico y usuarios activos.",
                 f"{PREFIX}interaccion @usuario — abre acciones sociales con botones.",
                 f"{PREFIX}diario — reclama la recompensa diaria.",
                 f"{PREFIX}trabajar — gana puntos con cooldown.",
@@ -11311,7 +12003,8 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}reputacion — alias de puntos.",
                 f"{PREFIX}ranking — ranking de puntos.",
                 f"{PREFIX}top — alias de ranking.",
-                f"{PREFIX}encuesta pregunta | opción 1 | opción 2 — crea una encuesta.",
+                f"{PREFIX}encuesta pregunta | opción 1 | opción 2 [| duracion=15m | anonima] — crea una encuesta configurable.",
+                f"{PREFIX}encuesta resultados <ID> / cerrar <ID> — consulta o cierra una encuesta.",
                 f"{PREFIX}elige opción 1 | opción 2 — elige aleatoriamente.",
                 f"{PREFIX}duelo @usuario — reto con botones para aceptar o rechazar.",
                 f"{PREFIX}ship <usuario 1> <usuario 2> — compatibilidad ficticia.",
@@ -11361,7 +12054,13 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}economia — muestra el sistema de puntos.",
                 f"{PREFIX}perfilbot <Nombre> | <Estado> — modifica el perfil (administradores).",
                 f"{PREFIX}avatarbot <URL|eliminar> — cambia o retira el avatar con una imagen o artículo (administradores).",
-                f"{PREFIX}autotest — pruebas internas de Katherine."
+                f"{PREFIX}autotest — pruebas internas de Katherine.",
+                f"{PREFIX}admin — abre el panel de control de administradores.",
+                f"{PREFIX}traducir idioma | texto — traduce con detección aproximada del idioma de origen.",
+                f"{PREFIX}multimedia imagen|video|audio <consulta> — busca recursos públicos y sus fuentes.",
+                f"{PREFIX}imagen / video / audio <consulta> — accesos directos al buscador multimedia.",
+                f"{PREFIX}respuestas on/off — activa o pausa respuestas contextuales.",
+                f"{PREFIX}respuesta añadir/lista/eliminar — administra reglas de respuesta automática."
             ]
         ]
         for section in help_sections:
@@ -11728,17 +12427,11 @@ async def handle_command(event: dict, source: str):
         return
 
     if command == "!actividad":
-        top = get_top_users("message_count", 10, scope_key)
-
-        answer = "ACTIVIDAD DEL CHAT\n\n" + (
-            "\n".join(
-                f"{i}. {name} — {count} mensajes vistos"
-                for i, (name, count) in enumerate(top, 1)
-            )
-            or "Aún no hay actividad registrada."
-        )
-
-        await send_message(thread, answer, source, reply)
+        period = args[0].casefold() if args else "semana"
+        if period not in ("hoy", "semana"):
+            await send_message(thread, "Uso: !actividad [hoy|semana].", source, reply)
+            return
+        await send_message(thread, build_activity_report(thread, period), source, reply)
         return
 
     # -----------------------------------------------------------------------
@@ -12629,10 +13322,109 @@ async def handle_command(event: dict, source: str):
         )
         return
 
-    # -----------------------------------------------------------------------
-    # ENCUESTAS
-    # -----------------------------------------------------------------------
+
     if command == "!encuesta":
+        sub = args[0].casefold() if args else ""
+        if sub in ("resultados", "cerrar"):
+            if len(args) < 2 or not args[1].isdigit():
+                await send_message(thread, "Uso: !encuesta resultados ID o !encuesta cerrar ID.", source, reply)
+                return
+            code = args[1]
+            selected = next(
+                (
+                    item for item in polls.values()
+                    if item.get("code") == code
+                    and item.get("source") == source
+                    and item.get("thread") == thread
+                ),
+                None
+            )
+            if not selected:
+                await send_message(thread, "No encontré esa encuesta en esta sala; pudo haber caducado o Katherine reinició.", source, reply)
+                return
+            if sub == "cerrar":
+                if selected.get("creator_uid") != raw_uid and not is_admin_uid(raw_uid):
+                    await send_message(thread, "Solo quien creó la encuesta o un administrador puede cerrarla.", source, reply)
+                    return
+                selected["closed"] = True
+                await send_message(thread, "Encuesta cerrada.\n\n" + format_poll_results(selected), source, reply)
+            else:
+                await send_message(thread, format_poll_results(selected), source, reply)
+            return
+
+        parts = [value.strip() for value in query.split("|") if value.strip()]
+        if len(parts) < 3:
+            await send_message(
+                thread,
+                "Uso: !encuesta pregunta | opción 1 | opción 2 [| duracion=15m | anonima]. Duración de 1 minuto a 7 días.",
+                source, reply
+            )
+            return
+        question = parts[0][:180]
+        options = []
+        duration_seconds = 86400
+        anonymous = False
+        for value in parts[1:]:
+            lowered = value.casefold().strip()
+            duration_match = re.fullmatch(r"(?:duracion\s*=\s*)?(\d{1,4})\s*([mhd])", lowered)
+            if lowered in ("anonima", "anónima", "anonymous"):
+                anonymous = True
+            elif duration_match:
+                amount = int(duration_match.group(1))
+                unit = duration_match.group(2)
+                duration_seconds = amount * {"m": 60, "h": 3600, "d": 86400}[unit]
+            else:
+                options.append(value[:40])
+        if len(options) < 2:
+            await send_message(thread, "Una encuesta necesita al menos dos opciones válidas.", source, reply)
+            return
+        options = options[:5]
+        if not 60 <= duration_seconds <= 604800:
+            await send_message(thread, "La duración debe estar entre 1 minuto y 7 días.", source, reply)
+            return
+
+        created_at = time.time()
+        closes_at = created_at + duration_seconds
+        poll_nonce = str(time.time_ns())[-15:]
+        poll_id = f"{source}:{thread}:{poll_nonce}"
+        poll_code = str(secrets.randbelow(900000) + 100000)
+        while any(item.get("code") == poll_code for item in polls.values()):
+            poll_code = str(secrets.randbelow(900000) + 100000)
+        polls[poll_id] = {
+            "code": poll_code,
+            "question": question,
+            "options": options,
+            "votes": {},
+            "source": source,
+            "thread": thread,
+            "creator_uid": raw_uid,
+            "creator_name": nickname,
+            "anonymous": anonymous,
+            "closed": False,
+            "created_at": created_at,
+            "closes_at": closes_at,
+            "expires": closes_at + 86400
+        }
+        if len(polls) > 500:
+            oldest_id = min(polls, key=lambda key: polls[key].get("created_at", 0))
+            polls.pop(oldest_id, None)
+
+        buttons = [
+            {"id": f"p{poll_nonce}_{index}", "label": option}
+            for index, option in enumerate(options)
+        ]
+        poll_button_map[poll_nonce] = poll_id
+        minutes = max(1, int(duration_seconds // 60))
+        mode = "anónima" if anonymous else "pública"
+        await send_message(
+            thread,
+            f"ENCUESTA · ID {poll_code}\n{question}\n"
+            f"Modalidad: {mode} · Cierre: {minutes} min.\n"
+            "Selecciona una opción. Puedes cambiar tu voto antes del cierre.",
+            source, reply, buttons
+        )
+        return
+
         parts = [
             x.strip()
             for x in query.split("|")
@@ -13478,6 +14270,7 @@ async def handle_command(event: dict, source: str):
             if sub in ("on", "activar", "off", "desactivar"):
                 enabled = sub in ("on", "activar")
                 set_chat_setting(thread, "antispam_enabled", "1" if enabled else "0")
+                log_admin_action(thread, raw_uid, nickname, "antispam", "activado" if enabled else "desactivado")
                 answer = f"Antispam {'activado' if enabled else 'desactivado'}."
             elif sub in ("limite", "ventana", "repeticiones") and len(args) > 1:
                 try:
@@ -13491,6 +14284,7 @@ async def handle_command(event: dict, source: str):
                         "repeticiones": "antispam_repeat_limit"
                     }[sub]
                     set_chat_setting(thread, key, str(number))
+                    log_admin_action(thread, raw_uid, nickname, "antispam_config", f"{sub}={number}")
                     answer = f"Antispam: {sub} ajustado a {number}."
                 except ValueError:
                     answer = "Valor fuera de rango."
@@ -13506,6 +14300,8 @@ async def handle_command(event: dict, source: str):
                 await send_message(thread, "Uso: !quitaradvertencia <id>.", source, reply)
                 return
             removed = revoke_moderation_warning(thread, warning_id, raw_uid)
+            if removed:
+                log_admin_action(thread, raw_uid, nickname, "advertencia_retirada", f"ID #{warning_id}")
             await send_message(thread, "Advertencia retirada." if removed else "No encontré una advertencia activa con ese ID.", source, reply)
             return
 
@@ -13526,6 +14322,7 @@ async def handle_command(event: dict, source: str):
                 thread, target_uid, target_name or "Usuario",
                 raw_uid, nickname, reason or "Sin motivo indicado", automatic=False
             )
+            log_admin_action(thread, raw_uid, nickname, "advertencia_creada", f"ID #{warning_id} · {target_name}: {reason or 'Sin motivo indicado'}")
             active_count = sum(
                 1 for item in get_moderation_warnings(thread, target_uid, 30)
                 if item["active"]
@@ -13741,7 +14538,7 @@ async def handle_interaction(event: dict, source: str):
     user_name = str(user_data.get("nickname") or "Viajero")
     scoped_user_uid = scoped_uid(f"{source}:{thread_id}", raw_user_uid)
 
-    # Las encuestas usan su propio mapa para permitir votos de varias personas.
+    # Las encuestas permiten cambiar el voto hasta el cierre.
     match = re.fullmatch(r"p(\d+)_(\d+)", button_id)
     if match:
         poll = polls.get(poll_button_map.get(match.group(1), ""))
@@ -13752,23 +14549,25 @@ async def handle_interaction(event: dict, source: str):
             or str(event.get("threadId") or "") != poll.get("thread")
         ):
             return
+        if poll.get("closed") or float(poll.get("closes_at", 0)) <= time.time():
+            poll["closed"] = True
+            await remove_pressed_buttons(event, source, remove=True)
+            await send_message(
+                thread_id,
+                f"La encuesta {poll.get('code')} ya está cerrada.\n\n" + format_poll_results(poll),
+                source
+            )
+            return
 
         index = int(match.group(2))
         if index >= len(poll["options"]):
             return
-        poll["votes"][raw_user_uid] = index
-        counts = [
-            sum(v == i for v in poll["votes"].values())
-            for i in range(len(poll["options"]))
-        ]
-        result = (
-            "RESULTADOS — " + poll["question"] + "\n"
-            + "\n".join(
-                f"{option}: {counts[i]} voto(s)"
-                for i, option in enumerate(poll["options"])
-            )
+        voter_key = (
+            hashlib.sha256(f"{poll.get('code')}:{raw_user_uid}".encode("utf-8")).hexdigest()
+            if poll.get("anonymous") else raw_user_uid
         )
-        await send_message(thread_id, result, source)
+        poll["votes"][voter_key] = index
+        await send_message(thread_id, format_poll_results(poll), source)
         return
 
     action = BUTTON_ACTIONS.get(button_id)
@@ -13794,6 +14593,35 @@ async def handle_interaction(event: dict, source: str):
     action_type = action.get("type")
     payload = action.get("payload") or {}
     choice = payload.get("value")
+
+
+    if action_type == "admin_panel":
+        BUTTON_ACTIONS.pop(button_id, None)
+        await remove_pressed_buttons(event, source, remove=[button_id])
+        if not is_admin_uid(raw_user_uid):
+            await send_message(thread_id, "No tienes permisos de administración.", source)
+            return
+        section = str(choice or "")
+        log_admin_action(thread_id, raw_user_uid, user_name, "panel_consulta", section)
+        await send_admin_panel(thread_id, source, raw_user_uid, section)
+        return
+
+    if action_type == "admin_antispam":
+        BUTTON_ACTIONS.pop(button_id, None)
+        await remove_pressed_buttons(event, source, remove=[button_id])
+        if not is_admin_uid(raw_user_uid):
+            await send_message(thread_id, "No tienes permisos de administración.", source)
+            return
+        enabled = str(choice or "") == "on"
+        set_chat_setting(thread_id, "antispam_enabled", "1" if enabled else "0")
+        log_admin_action(thread_id, raw_user_uid, user_name, "antispam", "activado" if enabled else "desactivado")
+        await send_message(
+            thread_id,
+            f"Antispam {'activado' if enabled else 'desactivado'} desde el panel.",
+            source
+        )
+        await send_admin_panel(thread_id, source, raw_user_uid, "antispam")
+        return
 
     if action_type == "menu_category":
         BUTTON_ACTIONS.pop(button_id, None)
