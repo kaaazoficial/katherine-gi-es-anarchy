@@ -618,6 +618,12 @@ async def build_status_message(source: str, nickname: str) -> str:
         f"• Caché: {len(cache)} entradas",
         f"• Eventos recientes: {len(seen_events)}",
         "",
+        "🌐 FUENTES EXTERNAS",
+        f"• Dominios consultados: {len(SOURCE_HEALTH)}",
+        f"• Fuentes con fallos registrados: {sum(1 for item in SOURCE_HEALTH.values() if item.get('failures', 0) and not item.get('last_success_at'))}",
+        f"• Solicitudes externas: {sum(item.get('requests', 0) for item in SOURCE_HEALTH.values())}",
+        f"• Errores externos: {sum(item.get('failures', 0) for item in SOURCE_HEALTH.values())}",
+        "",
         "🌐 API Y RENDIMIENTO",
         f"• Solicitudes API: {metrics['api_requests']}",
         f"• Errores API: {metrics['api_errors']}",
@@ -8508,6 +8514,45 @@ async def fetch_first_community_guide(base_urls, candidates, cache_prefix,
     return None
 
 
+
+# Fuentes adicionales de guías. Se prueban de forma independiente y sin publicar URLs.
+EXTRA_CHARACTER_GUIDE_SOURCES = {
+    "genshin_guides": [
+        "https://genshinguides.com/characters/{slug}/",
+        "https://genshinguides.com/character/{slug}/"
+    ],
+    "genshin_build": [
+        "https://genshin-build.com/characters/{slug}/",
+        "https://genshin-build.com/character/{slug}/"
+    ],
+    "genshin_guide": [
+        "https://genshinguide.com/characters/{slug}/",
+        "https://genshinguide.com/character/{slug}/"
+    ],
+    "game8": [
+        "https://game8.co/games/Genshin-Impact/archives/{slug}"
+    ]
+}
+
+
+async def fetch_extra_character_guides(candidates, target_slugs):
+    async def fetch_source(source_name, templates):
+        return await fetch_first_community_guide(
+            templates, candidates, f"extra-guide:{source_name}", target_slugs
+        )
+
+    names = list(EXTRA_CHARACTER_GUIDE_SOURCES.items())
+    results = await asyncio.gather(
+        *(fetch_source(name, urls) for name, urls in names),
+        return_exceptions=True
+    )
+    return {
+        name: result
+        for (name, _), result in zip(names, results)
+        if isinstance(result, dict)
+    }
+
+
 async def fetch_community_character_guide(
     character: dict | None,
     query: str,
@@ -8566,6 +8611,9 @@ async def fetch_community_character_guide(
             )
         ])
 
+    extra_sources = await fetch_extra_character_guides(candidates, target_slugs)
+    sources.update(extra_sources)
+
     if needs.get("teams"):
         builds_teams_data = await fetch_genshin_builds_guide(candidates)
         if builds_teams_data and builds_teams_data.get("teams"):
@@ -8594,6 +8642,9 @@ async def fetch_community_character_guide(
         "stats": None,
         "talents": None,
         "teams": None,
+        "rotation": None,
+        "source_updated": None,
+        "fetched_at": None,
         "sources": [],
         "field_sources": {}
     }
@@ -8601,13 +8652,17 @@ async def fetch_community_character_guide(
         ("weapons", "weapons"),
         ("artifacts", "artifacts"),
         ("stats", "stats"),
-        ("talents", "talents")
+        ("talents", "talents"),
+        ("rotation", "rotation")
     )
 
     for field, source_field in field_sources:
         if not needs.get(field):
             continue
-        for source_name in ("genshin_builds", "kqm", "genshin_gg", "icy_veins"):
+        for source_name in (
+            "genshin_builds", "genshin_guides", "genshin_build",
+            "genshin_guide", "kqm", "genshin_gg", "icy_veins", "game8"
+        ):
             data = sources.get(source_name) or {}
             value = data.get(source_field)
             if value:
@@ -8621,27 +8676,49 @@ async def fetch_community_character_guide(
                 merged["sources"].append(source_name)
                 merged["field_sources"][field] = source_name
                 merged[field + "_url"] = data.get("url")
+                merged["source_updated"] = merged.get("source_updated") or data.get("source_updated")
+                merged["fetched_at"] = max(
+                    merged.get("fetched_at") or 0, data.get("fetched_at") or 0
+                ) or None
                 break
 
     if needs.get("teams"):
-        data = sources.get("genshin_builds_teams") or sources.get("icy_veins_teams") or {}
+        data = next((
+            sources.get(source_name) for source_name in (
+                "genshin_builds_teams", "genshin_guides", "genshin_build",
+                "genshin_guide", "kqm", "icy_veins_teams", "game8"
+            ) if (sources.get(source_name) or {}).get("teams")
+        ), {})
         if data.get("teams"):
             merged["teams"] = "\n".join(
                 f"{index}. {item}"
                 for index, item in enumerate(data["teams"], 1)
             )
             merged["teams_url"] = data.get("url")
-            team_source = "genshin_builds_teams" if sources.get("genshin_builds_teams") else "icy_veins_teams"
+            team_source = next((
+                source_name for source_name in (
+                    "genshin_builds_teams", "genshin_guides", "genshin_build",
+                    "genshin_guide", "kqm", "icy_veins_teams", "game8"
+                ) if (sources.get(source_name) or {}).get("teams")
+            ), "unknown")
             merged["sources"].append(team_source)
             merged["field_sources"]["teams"] = team_source
 
     source_labels = {
         "genshin_builds": "Genshin-Builds (español)",
         "genshin_builds_teams": "Genshin-Builds (español) · equipos",
+        "genshin_guides": "Genshin Guides",
+        "genshin_build": "Genshin Build",
+        "genshin_guide": "Genshin Guide",
+        "game8": "Game8",
         "kqm": "KeqingMains",
         "genshin_gg": "Genshin.gg",
         "icy_veins": "Icy Veins",
-        "icy_veins_teams": "Icy Veins · equipos"
+        "icy_veins_teams": "Icy Veins · equipos",
+    "genshin_guides": "Genshin Guides",
+    "genshin_build": "Genshin Build",
+    "genshin_guide": "Genshin Guide",
+    "game8": "Game8"
     }
     merged["source_labels"] = list(dict.fromkeys(
         source_labels[source] for source in merged["sources"]
@@ -8842,8 +8919,35 @@ async def collect_character_guide_data(query: str):
         "team": team,
         "helper_data": helper_data,
         "kqm_data": kqm_data,
-        "community_data": community_data
+        "community_data": community_data,
+        "rotation": (community_data or {}).get("rotation"),
+        "source_updated": (community_data or {}).get("source_updated"),
+        "fetched_at": (community_data or {}).get("fetched_at")
     }
+
+
+
+async def get_character_material_summary(query: str):
+    data, stats = await asyncio.gather(get_character(query), character_stats(query))
+    if not isinstance(data, dict):
+        return None
+    costs = aggregate_material_costs(data.get("costs"))
+    if not costs:
+        return None
+    name = clean_game_text(data.get("name") or query)
+    lines = [f"MATERIALES · {name.upper()}"]
+    for material, amount in sorted(costs.items(), key=lambda item: item[0].casefold()):
+        lines.append(f"• {material}: {amount}")
+    return "\n".join(lines)
+
+
+def get_team_suggestions(character_key: str, community_data: dict | None):
+    teams = BUILD_TEAMS.get(character_key)
+    if teams:
+        return teams if isinstance(teams, list) else [str(teams)]
+    if community_data and community_data.get("teams"):
+        return str(community_data["teams"]).splitlines()
+    return []
 
 
 def build_character_guide_coverage(data: dict):
@@ -9032,6 +9136,23 @@ def build_character_guide_coverage(data: dict):
         }
     ]
 
+    # Calidad real: valida contenido mínimo, no solo que exista un título.
+    for row in rows:
+        if row["ok"] and row["source"] == "Sin fuente":
+            row["ok"] = False
+    if community.get("rotation"):
+        rows.append({
+            "label": "Rotación / combos",
+            "ok": True,
+            "source": source_for("rotation", "Fuente comunitaria")
+        })
+    else:
+        rows.append({
+            "label": "Rotación / combos",
+            "ok": False,
+            "source": "Sin fuente"
+        })
+
     total = len(rows)
     found = sum(1 for row in rows if row["ok"])
     missing = total - found
@@ -9143,6 +9264,13 @@ async def handle_command(event: dict, source: str):
                 "GENSHIN IMPACT · GUÍA Y CONSULTAS",
                 f"{PREFIX}guia <personaje> — guía completa: estadísticas, sets, stats principales, substats, armas, equipos, talentos, constelaciones y materiales.",
                 f"{PREFIX}cobertura <personaje> — muestra qué apartados de su guía están disponibles, cuáles faltan y sus fuentes.",
+                f"{PREFIX}equipos <personaje> — composiciones publicadas para el personaje.",
+                f"{PREFIX}rotacion <personaje> — rotaciones y combos cuando la guía los documenta.",
+                f"{PREFIX}sinergia <personaje 1>, <personaje 2> — busca equipos publicados que incluyan a ambos.",
+                f"{PREFIX}materiales <personaje> — materiales de ascensión y talentos disponibles en la base.",
+                f"{PREFIX}jefes — lista de jefes reconocidos por la base de datos.",
+                f"{PREFIX}banner — disponibilidad de banners cuando exista una fuente oficial verificable.",
+                f"{PREFIX}calendario — eventos y fechas solo cuando se puedan verificar.",
                 f"{PREFIX}buscargenshin <texto> — busca personajes y objetos.",
                 f"{PREFIX}lista <categoría> [página] — lista personajes, armas, enemigos y otros datos.",
                 f"{PREFIX}enemigo <nombre> — ficha de enemigo o jefe.",
@@ -9229,6 +9357,7 @@ async def handle_command(event: dict, source: str):
             ],
             [
                 "SISTEMA Y KATHERINE",
+                f"{PREFIX}estado — panel único con API, latencia, CPU/RAM, procesos, errores, caché, SQLite, conexiones y salud de fuentes.",
                 f"{PREFIX}estado — panel unificado: API, latencia, RAM, CPU, actividad, procesos, tareas, caché, SQLite, conexiones y configuración.",
                 f"{PREFIX}fecha — fecha y hora de Chile.",
                 f"{PREFIX}zona <Area/Ciudad> — hora de una zona.",
@@ -9573,6 +9702,106 @@ async def handle_command(event: dict, source: str):
     # -----------------------------------------------------------------------
     # GUÍAS, ESTADÍSTICAS Y BÚSQUEDA AMPLIADA DE GENSHIN
     # -----------------------------------------------------------------------
+    if command == "!materiales":
+        if not query:
+            await send_message(thread, f"Uso: {PREFIX}materiales personaje", source, reply)
+            return
+        answer = await get_character_material_summary(query)
+        await send_message(
+            thread,
+            answer or f"No encontré materiales de ascensión para «{query}» en la base consultada.",
+            source, reply
+        )
+        return
+
+    if command == "!equipos":
+        if not query:
+            await send_message(thread, f"Uso: {PREFIX}equipos personaje", source, reply)
+            return
+        data = await collect_character_guide_data(query)
+        teams = get_team_suggestions(data["key"], data.get("community_data"))
+        answer = (
+            f"EQUIPOS RECOMENDADOS · {data['name'].upper()}\n\n"
+            + "\n".join(f"{i}. {team}" for i, team in enumerate(teams[:8], 1))
+            if teams else f"No encontré composiciones verificables para {data['name']}."
+        )
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!rotacion":
+        if not query:
+            await send_message(thread, f"Uso: {PREFIX}rotacion personaje", source, reply)
+            return
+        data = await collect_character_guide_data(query)
+        rotation = data.get("rotation")
+        answer = (
+            f"ROTACIÓN · {data['name'].upper()}\n\n{rotation}"
+            if rotation else f"No encontré una rotación publicada y verificable para {data['name']}. No voy a inventar una."
+        )
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!sinergia":
+        names = [part.strip() for part in re.split(r"[,;+]", query) if part.strip()]
+        if len(names) < 2:
+            await send_message(thread, f"Uso: {PREFIX}sinergia personaje 1, personaje 2", source, reply)
+            return
+        if len(names) > 4:
+            await send_message(thread, "Analizo un máximo de cuatro personajes por consulta.", source, reply)
+            return
+        datasets = await asyncio.gather(*(collect_character_guide_data(name) for name in names))
+        keys = {item["key"] for item in datasets}
+        shared_teams = []
+        for item in datasets:
+            for team in get_team_suggestions(item["key"], item.get("community_data")):
+                folded = str(team).casefold()
+                if all(name.casefold() in folded for name in names):
+                    shared_teams.append(str(team))
+        if shared_teams:
+            answer = "SINERGIA · " + " + ".join(item["name"] for item in datasets) + "\n\n"
+            answer += "Composiciones encontradas que incluyen a todos:\n"
+            answer += "\n".join(f"• {team}" for team in dict.fromkeys(shared_teams)[:6])
+            answer += "\n\nEstas coincidencias provienen de equipos publicados; no son una simulación de daño."
+        else:
+            answer = (
+                "SINERGIA · " + " + ".join(item["name"] for item in datasets)
+                + "\n\nNo encontré un equipo publicado que incluya a todos los personajes. "
+                "No voy a afirmar que tienen sinergia solo por sus elementos."
+            )
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!jefes":
+        names = await game_data("enemies", "names")
+        if isinstance(names, dict):
+            names = names.get("names") or names.get("result") or []
+        if isinstance(names, list):
+            values = []
+            for item in names:
+                if isinstance(item, dict):
+                    value = item.get("name") or item.get("Name")
+                else:
+                    value = item
+                if value and any(word in str(value).casefold() for word in (
+                    "boss", "weekly", "world", "jefe", "semanal"
+                )):
+                    values.append(str(value))
+            answer = "JEFES REGISTRADOS\n\n" + "\n".join(f"• {v}" for v in values[:45]) if values else "La API no devolvió una lista clasificable de jefes."
+        else:
+            answer = "No pude consultar la lista de jefes en este momento."
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command in ("!banner", "!calendario"):
+        await send_message(
+            thread,
+            "La API de personajes consultada no ofrece un calendario de banners/eventos en tiempo real. "
+            "No mostraré banners ni fechas estimadas como si fueran oficiales. "
+            "Cuando exista una fuente pública verificable, este comando podrá devolver el calendario actualizado.",
+            source, reply
+        )
+        return
+
     if command == "!cobertura":
         if not query:
             await send_message(
@@ -9831,6 +10060,10 @@ async def handle_command(event: dict, source: str):
                     + "\n".join(dict.fromkeys(source_lines))
                 )
 
+        if community_data and community_data.get("rotation"):
+            sections.append("ROTACIÓN Y COMBOS\n" + game_excerpt(community_data["rotation"], 700))
+        if community_data and community_data.get("source_updated"):
+            sections.append("VIGENCIA DE LA FUENTE\nActualización indicada por la página: " + str(community_data["source_updated"]))
         sections.append(format_character_guide_coverage(guide_data))
         sections.append(
             "RECOMENDACIÓN FINAL\n"
@@ -9957,33 +10190,15 @@ async def handle_command(event: dict, source: str):
         categories = {
             "personajes": "characters",
             "personaje": "characters",
-            "armas": "weapons",
-            "arma": "weapons",
-            "artefactos": "artifacts",
-            "artefacto": "artifacts",
             "enemigos": "enemies",
-            "enemigo": "enemies",
-            "dominios": "domains",
-            "dominio": "domains",
-            "comidas": "foods",
-            "comida": "foods",
-            "materiales": "materials",
-            "material": "materials",
-            "talentos": "talents",
-            "talento": "talents",
-            "animales": "animals",
-            "atuendos": "outfits",
-            "tarjetas": "namecards",
-            "planeadores": "windgliders",
-            "elementos": "elements",
-            "fabricaciones": "crafts"
+            "enemigo": "enemies"
         }
 
         args_list = query.split()
         if not args_list or args_list[0].casefold() not in categories:
             await send_message(
                 thread,
-                f"Uso: {PREFIX}lista categoría [página]. Categorías: personajes, armas, artefactos, enemigos, dominios, comidas, materiales, talentos, animales, atuendos, tarjetas, planeadores, elementos o fabricaciones.",
+                f"Uso: {PREFIX}lista categoría [página]. Categorías: personajes o enemigos.",
                 source,
                 reply
             )
@@ -10529,16 +10744,7 @@ async def handle_command(event: dict, source: str):
     # -----------------------------------------------------------------------
     # SISTEMA Y ESTADO DEL BOT
     # -----------------------------------------------------------------------
-    if command in ("!estado", "!statsbot"):
-        answer = await build_status_message(source, nickname)
-        await send_message(thread, answer, source, reply)
-        return
-
-    if command in (
-        "!diagnostico", "!version", "!estadisticas", "!tareas",
-        "!cache", "!limpiarcache", "!conexiones", "!configbot",
-        "!ping", "!latencia", "!memoria", "!uptime"
-    ):
+    if command == "!estado":
         answer = await build_status_message(source, nickname)
         await send_message(thread, answer, source, reply)
         return
