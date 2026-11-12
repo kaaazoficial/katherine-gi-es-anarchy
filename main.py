@@ -1098,7 +1098,7 @@ def cleanup_expired_state():
     monotonic_now = time.monotonic()
     for store in (AUTO_REPLY_CHAT_COOLDOWN, AUTO_REPLY_USER_COOLDOWN, USER_SPAM_WARNED_UNTIL):
         for key, expiry in list(store.items()):
-            if float(expiry or 0) <= monotonic_now:
+            if float(expiry or 0) <= now:
                 store.pop(key, None)
     for key, activity in list(USER_MESSAGE_ACTIVITY.items()):
         while activity and activity[0][0] < now - 60:
