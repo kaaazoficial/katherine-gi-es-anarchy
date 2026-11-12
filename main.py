@@ -14,6 +14,7 @@ import logging
 import sqlite3
 import sys
 import unicodedata
+import tempfile
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -32,6 +33,13 @@ except Exception as exc:
     np = None
     livekit_rtc = None
     DJ_IMPORT_ERROR = str(exc)
+
+try:
+    import edge_tts
+    TTS_IMPORT_ERROR = ""
+except Exception as exc:
+    edge_tts = None
+    TTS_IMPORT_ERROR = str(exc)
 
 from contextlib import contextmanager
 from pathlib import Path
@@ -381,6 +389,9 @@ poll_button_map: dict[str, str] = {}
 BUTTON_ACTIONS: dict[str, dict] = {}
 DJ_ROOMS: dict[str, dict] = {}
 DJ_READY_EVENTS: dict[str, asyncio.Event] = {}
+VOICE_CONNECT_LOCKS: dict[str, asyncio.Lock] = {}
+BOT_IDENTITIES: dict[str, dict] = {}
+TTS_VOICE = os.getenv("TTS_VOICE", "es-CL-CatalinaNeural").strip() or "es-CL-CatalinaNeural"
 DJ_MUSIC_DIR = Path(os.getenv("DJ_MUSIC_DIR", "music")).resolve()
 DJ_AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".opus"}
 DJ_SEARCH_RESULTS: dict[str, dict] = {}
@@ -1438,41 +1449,340 @@ async def search_archive_audio(query: str, limit: int = 5) -> list[dict]:
     return tracks[:limit]
 
 
+async def ensure_voice_room(thread_id: str):
+    """Conecta a Katherine a la llamada asociada al hilo y publica su pista de micrófono."""
+    thread_id = str(thread_id)
+    if not thread_id:
+        return False, "No pude identificar la sala de esta conversación."
+    if not COMMUNITY_TOKEN:
+        return False, "Falta COMMUNITY_BOT_TOKEN en las variables de Render."
+    if livekit_rtc is None:
+        return False, "LiveKit no está disponible en Render. Revisa las dependencias."
+
+    lock = VOICE_CONNECT_LOCKS.setdefault(thread_id, asyncio.Lock())
+    async with lock:
+        if thread_id in DJ_ROOMS:
+            return True, "Katherine ya está dentro de la llamada."
+
+        ready = asyncio.Event()
+        DJ_READY_EVENTS[thread_id] = ready
+        room = None
+        joined_api = False
+        try:
+            result = await api("POST", f"/live-rooms/{thread_id}/join", "community")
+            if not result.get("ok"):
+                data = result.get("data") or {}
+                if not isinstance(data, dict):
+                    data = {"message": str(data)}
+                reason = (
+                    data.get("anarchy:error")
+                    or data.get("error")
+                    or data.get("message")
+                )
+                return False, (
+                    f"No pude entrar a la llamada (HTTP {result.get('status')}): "
+                    f"{reason or 'Anarchy Apps rechazó la solicitud'}."
+                )
+
+            joined_api = True
+            grant = result.get("data") or {}
+            room_url = grant.get("url")
+            room_token = grant.get("token")
+            if not room_url or not room_token:
+                return False, "Anarchy no devolvió las credenciales temporales de LiveKit."
+
+            room = livekit_rtc.Room()
+            await room.connect(room_url, room_token)
+            await asyncio.wait_for(ready.wait(), timeout=20)
+
+            audio_source = livekit_rtc.AudioSource(48000, 1)
+            audio_track = livekit_rtc.LocalAudioTrack.create_audio_track(
+                "katherine-voice",
+                audio_source
+            )
+            await room.local_participant.publish_track(
+                audio_track,
+                livekit_rtc.TrackPublishOptions(
+                    source=livekit_rtc.TrackSource.SOURCE_MICROPHONE
+                )
+            )
+
+            DJ_ROOMS[thread_id] = {
+                "room": room,
+                "audio_source": audio_source,
+                "audio_track": audio_track,
+                "stop_event": asyncio.Event(),
+                "playback_stop_event": asyncio.Event(),
+                "task": None,
+                "speech_task": None,
+                "speech_queue": asyncio.Queue(maxsize=20),
+                "reading_enabled": False,
+                "speaking": asyncio.Event(),
+                "filename": None,
+                "track": None,
+                "looping": False,
+                "started_at": time.time()
+            }
+            logging.info("[VOZ] Katherine conectada a la llamada %s", thread_id)
+            return True, "Katherine se unió a la llamada."
+        except asyncio.TimeoutError:
+            if room is not None:
+                try:
+                    await room.disconnect()
+                except Exception:
+                    pass
+            if joined_api:
+                await api("POST", f"/live-rooms/{thread_id}/leave", "community")
+            return False, "La sala no confirmó que Katherine pudiera publicar audio."
+        except Exception as exc:
+            if room is not None:
+                try:
+                    await room.disconnect()
+                except Exception:
+                    pass
+            if joined_api:
+                await api("POST", f"/live-rooms/{thread_id}/leave", "community")
+            logging.exception("[VOZ] No se pudo conectar a LiveKit")
+            return False, f"No pude conectarme a la llamada ({type(exc).__name__})."
+        finally:
+            DJ_READY_EVENTS.pop(thread_id, None)
+            if not DJ_ROOMS.get(thread_id):
+                VOICE_CONNECT_LOCKS.pop(thread_id, None)
+
+
 async def stop_dj_room(
     thread_id: str,
     request_leave: bool = True,
     cancel_playback: bool = True
 ):
-    state = DJ_ROOMS.pop(str(thread_id), None)
+    thread_id = str(thread_id)
+    state = DJ_ROOMS.pop(thread_id, None)
     if state:
-        stop_event = state.get("stop_event")
-        if stop_event:
-            stop_event.set()
+        for event_name in ("stop_event", "playback_stop_event"):
+            event = state.get(event_name)
+            if event:
+                event.set()
 
-        task = state.get("task")
-        if (
-            cancel_playback
-            and task
-            and task is not asyncio.current_task()
-            and not task.done()
-        ):
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                logging.exception("[DJ] Error deteniendo reproducción")
+        current_task = asyncio.current_task()
+        for task_name in ("task", "speech_task"):
+            task = state.get(task_name)
+            if (
+                task
+                and task is not current_task
+                and not task.done()
+                and (cancel_playback or task_name == "speech_task")
+            ):
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logging.exception("[VOZ] Error deteniendo %s", task_name)
 
         room = state.get("room")
         if room is not None:
             try:
                 await room.disconnect()
             except Exception:
-                logging.exception("[DJ] Error cerrando LiveKit")
+                logging.exception("[VOZ] Error cerrando LiveKit")
 
     if request_leave:
         await api("POST", f"/live-rooms/{thread_id}/leave", "community")
+
+
+def clean_speech_text(content: str) -> str:
+    """Limpia formato y enlaces antes de enviar el texto al servicio de voz."""
+    text = html.unescape(str(content or ""))
+    text = re.sub(r"https?://\S+", " ", text, flags=re.I)
+    text = re.sub(r"<@!?[^>]+>", " ", text)
+    text = re.sub(r"[*_~`>#|]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:700]
+
+
+async def stream_speech_file(thread_id: str, file_path: str):
+    state = DJ_ROOMS.get(str(thread_id))
+    if not state or pyav is None or np is None:
+        return
+    container = pyav.open(file_path, mode="r")
+    try:
+        audio_stream = next(
+            (stream for stream in container.streams if stream.type == "audio"),
+            None
+        )
+        if audio_stream is None:
+            raise ValueError("El audio TTS no contiene una pista de sonido.")
+        resampler = pyav.AudioResampler(
+            format="s16",
+            layout="mono",
+            rate=48000
+        )
+        for decoded in container.decode(audio_stream):
+            if (
+                DJ_ROOMS.get(str(thread_id)) is not state
+                or state["stop_event"].is_set()
+                or not state.get("reading_enabled")
+            ):
+                break
+            for frame in resampler.resample(decoded):
+                samples = np.asarray(frame.to_ndarray(), dtype=np.int16).reshape(-1)
+                for offset in range(0, len(samples), 480):
+                    if (
+                        DJ_ROOMS.get(str(thread_id)) is not state
+                        or state["stop_event"].is_set()
+                        or not state.get("reading_enabled")
+                    ):
+                        return
+                    chunk = samples[offset:offset + 480]
+                    if not len(chunk):
+                        continue
+                    audio_frame = livekit_rtc.AudioFrame.create(
+                        48000, 1, len(chunk)
+                    )
+                    destination = np.frombuffer(audio_frame.data, dtype=np.int16)
+                    destination[:len(chunk)] = chunk
+                    await state["audio_source"].capture_frame(audio_frame)
+    finally:
+        container.close()
+
+
+async def speech_queue_worker(thread_id: str):
+    state = DJ_ROOMS.get(str(thread_id))
+    if not state or edge_tts is None:
+        return
+    queue = state["speech_queue"]
+    while not state["stop_event"].is_set():
+        try:
+            text_to_read = await asyncio.wait_for(queue.get(), timeout=1.0)
+        except asyncio.TimeoutError:
+            continue
+
+        temp_path = None
+        try:
+            if not state.get("reading_enabled") or not text_to_read:
+                continue
+            fd, temp_path = tempfile.mkstemp(
+                prefix="katherine-tts-",
+                suffix=".mp3"
+            )
+            os.close(fd)
+            communicate = edge_tts.Communicate(
+                text_to_read,
+                TTS_VOICE
+            )
+            await communicate.save(temp_path)
+
+            if (
+                DJ_ROOMS.get(str(thread_id)) is state
+                and state.get("reading_enabled")
+                and not state["stop_event"].is_set()
+            ):
+                state["speaking"].set()
+                await stream_speech_file(thread_id, temp_path)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.exception("[TTS] No se pudo leer un mensaje en %s", thread_id)
+        finally:
+            state["speaking"].clear()
+            if temp_path:
+                try:
+                    Path(temp_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            queue.task_done()
+
+
+async def enable_room_reading(thread_id: str):
+    if edge_tts is None:
+        return False, "Falta edge-tts en Render; revisa la instalación de requirements.txt."
+    if pyav is None or np is None or livekit_rtc is None:
+        return False, "Faltan las dependencias de audio para activar la lectura."
+    ok, message = await ensure_voice_room(thread_id)
+    if not ok:
+        return False, message
+
+    state = DJ_ROOMS[str(thread_id)]
+    state["reading_enabled"] = True
+    task = state.get("speech_task")
+    if task is None or task.done():
+        state["speech_task"] = asyncio.create_task(
+            speech_queue_worker(str(thread_id))
+        )
+    return True, "Lectura en voz alta activada. Leeré los mensajes de texto de esta sala."
+
+
+async def disable_room_reading(thread_id: str):
+    state = DJ_ROOMS.get(str(thread_id))
+    if not state:
+        return True, "La lectura ya está desactivada; Katherine no está conectada a esta sala."
+    state["reading_enabled"] = False
+    queue = state.get("speech_queue")
+    if queue:
+        while not queue.empty():
+            try:
+                queue.get_nowait()
+                queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+
+    task = state.get("speech_task")
+    state["speech_task"] = None
+    if task and task is not asyncio.current_task() and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    state["speaking"].clear()
+    return True, "Lectura en voz alta desactivada. Katherine seguirá dentro de la llamada."
+
+
+async def enqueue_message_for_speech(event: dict, source: str):
+    thread_id = str(event.get("threadId") or "")
+    state = DJ_ROOMS.get(thread_id)
+    if not state or not state.get("reading_enabled"):
+        return
+
+    message = event.get("message") or {}
+    author = message.get("author") or {}
+    if not isinstance(author, dict):
+        return
+    if any(
+        str(author.get(key, "")).lower() in ("true", "1", "yes")
+        for key in ("bot", "isBot", "is_bot")
+    ):
+        return
+
+    author_uid = str(author.get("uid") or author.get("userId") or "")
+    identity = BOT_IDENTITIES.get(source) or {}
+    bot_uid = str(identity.get("uid") or "")
+    bot_name = str(identity.get("name") or "")
+    author_name = str(author.get("nickname") or author.get("name") or "")
+    if bot_uid and author_uid and author_uid == bot_uid:
+        return
+    if bot_name and author_name and author_name.casefold() == bot_name.casefold():
+        return
+
+    content = str(message.get("content") or "").strip()
+    if not content or content.startswith(("!", "-", PREFIX)):
+        return
+    speech_text = clean_speech_text(content)
+    if len(speech_text) < 2:
+        return
+
+    queue = state["speech_queue"]
+    if queue.full():
+        try:
+            queue.get_nowait()
+            queue.task_done()
+        except asyncio.QueueEmpty:
+            pass
+    try:
+        queue.put_nowait(speech_text)
+    except asyncio.QueueFull:
+        logging.warning("[TTS] Cola llena; se omitió un mensaje en %s", thread_id)
 
 
 async def dj_playback_loop(
@@ -1485,14 +1795,15 @@ async def dj_playback_loop(
     state = DJ_ROOMS.get(str(thread_id))
     if not state:
         return
-    stop_event = state["stop_event"]
+    playback_stop = state["playback_stop_event"]
+    session_stop = state["stop_event"]
     audio_source_url = str(file_path)
     track_label = display_name or (
         file_path.name if isinstance(file_path, Path) else "audio remoto"
     )
 
     try:
-        while not stop_event.is_set():
+        while not playback_stop.is_set() and not session_stop.is_set():
             container = pyav.open(audio_source_url, mode="r", options={
                 "rw_timeout": "15000000",
                 "reconnect": "1",
@@ -1513,12 +1824,16 @@ async def dj_playback_loop(
                     rate=48000
                 )
                 for decoded in container.decode(audio_stream):
-                    if stop_event.is_set():
+                    if playback_stop.is_set() or session_stop.is_set():
                         break
                     for frame in resampler.resample(decoded):
                         samples = np.asarray(frame.to_ndarray(), dtype=np.int16).reshape(-1)
                         for offset in range(0, len(samples), 480):
-                            if stop_event.is_set():
+                            if playback_stop.is_set() or session_stop.is_set():
+                                break
+                            while state["speaking"].is_set() and not playback_stop.is_set() and not session_stop.is_set():
+                                await asyncio.sleep(0.02)
+                            if playback_stop.is_set() or session_stop.is_set():
                                 break
                             chunk = samples[offset:offset + 480]
                             if not len(chunk):
@@ -1531,7 +1846,7 @@ async def dj_playback_loop(
                             )
                             destination[:len(chunk)] = chunk
                             await audio_source.capture_frame(audio_frame)
-                    if stop_event.is_set():
+                    if playback_stop.is_set() or session_stop.is_set():
                         break
             finally:
                 container.close()
@@ -1544,12 +1859,14 @@ async def dj_playback_loop(
     except Exception:
         logging.exception("[DJ] Falló la reproducción de %s", track_label)
     finally:
-        if DJ_ROOMS.get(str(thread_id)) is state:
-            await stop_dj_room(
-                str(thread_id),
-                request_leave=True,
-                cancel_playback=False
-            )
+        if DJ_ROOMS.get(str(thread_id)) is state and state.get("task") is asyncio.current_task():
+            state["task"] = None
+            if not state.get("reading_enabled") and not session_stop.is_set():
+                await stop_dj_room(
+                    str(thread_id),
+                    request_leave=True,
+                    cancel_playback=False
+                )
 
 
 async def start_dj_room(
@@ -1558,90 +1875,44 @@ async def start_dj_room(
     looping: bool,
     track_metadata: dict | None = None
 ):
-    if not COMMUNITY_TOKEN:
-        return False, "Falta COMMUNITY_BOT_TOKEN en Render."
-    if livekit_rtc is None or pyav is None or np is None:
+    if pyav is None or livekit_rtc is None or np is None:
         return False, "Faltan dependencias de LiveKit, PyAV o NumPy en Render."
-    if str(thread_id) in DJ_ROOMS:
-        await stop_dj_room(str(thread_id), request_leave=True)
+    ok, message = await ensure_voice_room(str(thread_id))
+    if not ok:
+        return False, message
 
-    ready = asyncio.Event()
-    DJ_READY_EVENTS[str(thread_id)] = ready
-    result = await api("POST", f"/live-rooms/{thread_id}/join", "community")
-    if not result.get("ok"):
-        DJ_READY_EVENTS.pop(str(thread_id), None)
-        data = result.get("data") or {}
-        reason = data.get("anarchy:error") or data.get("error") or data.get("message")
-        return False, (
-            f"No pude entrar a la sala (HTTP {result.get('status')}): "
-            f"{reason or 'Error de Anarchy Apps'}."
-        )
-
-    grant = result.get("data") or {}
-    room_url = grant.get("url")
-    room_token = grant.get("token")
-    if not room_url or not room_token:
-        DJ_READY_EVENTS.pop(str(thread_id), None)
-        return False, "Anarchy no devolvió credenciales temporales de LiveKit."
-
-    room = livekit_rtc.Room()
-    try:
-        await room.connect(room_url, room_token)
-        await asyncio.wait_for(ready.wait(), timeout=20)
-        audio_source = livekit_rtc.AudioSource(48000, 1)
-        audio_track = livekit_rtc.LocalAudioTrack.create_audio_track(
-            "katherine-dj",
-            audio_source
-        )
-        await room.local_participant.publish_track(
-            audio_track,
-            livekit_rtc.TrackPublishOptions(
-                source=livekit_rtc.TrackSource.SOURCE_MICROPHONE
-            )
-        )
-        display_name = (
-            (track_metadata or {}).get("title")
-            or (file_path.name if isinstance(file_path, Path) else "Audio remoto")
-        )
-        state = {
-            "room": room,
-            "audio_source": audio_source,
-            "audio_track": audio_track,
-            "stop_event": asyncio.Event(),
-            "task": None,
-            "filename": display_name,
-            "track": track_metadata,
-            "looping": looping,
-            "started_at": time.time()
-        }
-        DJ_ROOMS[str(thread_id)] = state
-        state["task"] = asyncio.create_task(
-            dj_playback_loop(
-                str(thread_id),
-                file_path,
-                looping,
-                audio_source,
-                display_name
-            )
-        )
-        return True, "Reproducción iniciada."
-    except asyncio.TimeoutError:
+    state = DJ_ROOMS[str(thread_id)]
+    previous_task = state.get("task")
+    if previous_task and not previous_task.done():
+        state["task"] = None
+        state["playback_stop_event"].set()
+        previous_task.cancel()
         try:
-            await room.disconnect()
-        except Exception:
+            await previous_task
+        except asyncio.CancelledError:
             pass
-        await api("POST", f"/live-rooms/{thread_id}/leave", "community")
-        return False, "La sala no confirmó que Katherine pudiera publicar audio."
-    except Exception as exc:
-        try:
-            await room.disconnect()
         except Exception:
-            pass
-        await api("POST", f"/live-rooms/{thread_id}/leave", "community")
-        logging.exception("[DJ] No se pudo conectar a LiveKit")
-        return False, f"No pude iniciar el reproductor: {type(exc).__name__}."
-    finally:
-        DJ_READY_EVENTS.pop(str(thread_id), None)
+            logging.exception("[DJ] Error reemplazando la pista anterior")
+
+    state["playback_stop_event"] = asyncio.Event()
+    display_name = (
+        (track_metadata or {}).get("title")
+        or (file_path.name if isinstance(file_path, Path) else "Audio remoto")
+    )
+    state["filename"] = display_name
+    state["track"] = track_metadata
+    state["looping"] = looping
+    state["task"] = asyncio.create_task(
+        dj_playback_loop(
+            str(thread_id),
+            file_path,
+            looping,
+            state["audio_source"],
+            display_name
+        )
+    )
+    return True, "Reproducción iniciada."
+
 
 # ---------------------------------------------------------------------------
 # GENSHIN DATABASE API
@@ -10206,6 +10477,10 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}fecha — fecha y hora de Chile.",
                 f"{PREFIX}zona <Area/Ciudad> — hora de una zona.",
                 f"{PREFIX}salas — consulta salas en vivo.",
+                f"{PREFIX}join — entra en la llamada asociada a esta sala.",
+                f"{PREFIX}leer — activa la lectura en voz alta de mensajes de texto.",
+                f"{PREFIX}noleer — desactiva la lectura sin salir de la llamada.",
+                f"{PREFIX}salirsala — desconecta a Katherine de la llamada.",
                 f"{PREFIX}dj lista — muestra audios locales e instrucciones.",
                 f"{PREFIX}dj buscar <tema> — busca música pública y licenciada.",
                 f"{PREFIX}buscar <tema> — alias rápido de {PREFIX}dj buscar.",
@@ -11832,6 +12107,36 @@ async def handle_command(event: dict, source: str):
         )
         return
 
+    if command == "!join":
+        ok, message = await ensure_voice_room(thread)
+        await send_message(
+            thread,
+            f"🎙️ {message}" if ok else f"Voz: {message}",
+            source,
+            reply
+        )
+        return
+
+    if command == "!leer":
+        ok, message = await enable_room_reading(thread)
+        await send_message(
+            thread,
+            f"🔊 {message}" if ok else f"Lectura: {message}",
+            source,
+            reply
+        )
+        return
+
+    if command == "!noleer":
+        ok, message = await disable_room_reading(thread)
+        await send_message(
+            thread,
+            f"🔇 {message}" if ok else f"Lectura: {message}",
+            source,
+            reply
+        )
+        return
+
     if command in ("!dj", "!reproducir"):
         dj_source = source
         if not COMMUNITY_TOKEN:
@@ -11982,10 +12287,10 @@ async def handle_command(event: dict, source: str):
 
     if command in ("!djdetener", "!djstop", "!salirsala"):
         if thread not in DJ_ROOMS:
-            await send_message(thread, "Katherine no está reproduciendo audio en esta sala.", source, reply)
+            await send_message(thread, "Katherine no está conectada a una llamada en esta sala.", source, reply)
             return
         await stop_dj_room(thread, request_leave=True)
-        await send_message(thread, "⏹️ Katherine salió de la sala y detuvo la reproducción.", source, reply)
+        await send_message(thread, "⏹️ Katherine salió de la llamada y detuvo cualquier audio.", source, reply)
         return
 
     if command == "!salas":
@@ -12281,6 +12586,7 @@ async def dispatch(event: dict, source: str):
     kind = event.get("type")
 
     if kind == "message":
+        await enqueue_message_for_speech(event, source)
         await handle_command(event, source)
 
     elif kind == "interaction":
@@ -12490,11 +12796,16 @@ async def startup():
 
             if me["ok"]:
                 bot = me["data"].get("bot", {})
+                if isinstance(bot, dict):
+                    BOT_IDENTITIES[source] = {
+                        "uid": str(bot.get("uid") or bot.get("id") or bot.get("userId") or ""),
+                        "name": str(bot.get("name") or "")
+                    }
 
                 logging.info(
                     "[BOT %s] %s | chats: %s",
                     source.upper(),
-                    bot.get("name"),
+                    bot.get("name") if isinstance(bot, dict) else "Katherine",
                     me["data"].get("threadIds", [])
                 )
 
