@@ -164,7 +164,7 @@ class KatherineAI:
 
     @property
     def model(self) -> str:
-        return (os.getenv("KATHERINE_AI_MODEL") or "gpt-6-luna").strip()
+        return (os.getenv("KATHERINE_AI_MODEL") or "gpt-4.1-mini").strip()
 
     @property
     def is_enabled(self) -> bool:
