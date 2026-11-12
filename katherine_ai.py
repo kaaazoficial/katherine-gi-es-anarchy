@@ -9,7 +9,7 @@ import time
 from collections import deque
 from typing import Any, Awaitable, Callable
 
-from katherine_topics import is_genshin_related_request
+from katherine_topics import is_genshin_related_request, normalize_topic_text
 from urllib.parse import urlsplit
 
 RequestFunc = Callable[..., Awaitable[Any]]
