@@ -413,6 +413,50 @@ def anti_spam_configuration(thread_id: str) -> dict:
     }
 
 
+def calculate_volume_target(values: list[str], current: int, last: int) -> int | None:
+    """Interpreta controles de volumen comunes en porcentaje (0-100)."""
+    if not values:
+        return None
+    action = str(values[0]).strip().lower()
+    extra = values[1].strip() if len(values) > 1 else ""
+
+    if action in ("subir", "up", "+"):
+        amount = abs(int(extra)) if extra else 10
+        target = current + amount
+    elif action in ("bajar", "down", "-"):
+        amount = abs(int(extra)) if extra else 10
+        target = current - amount
+    elif action in ("mute", "silencio", "silenciar", "mudo", "0"):
+        target = 0
+    elif action in ("max", "máximo", "maximo"):
+        target = 100
+    elif action in ("restaurar", "normal", "unmute"):
+        target = last
+    elif action.startswith(("+", "-")):
+        target = current + int(action)
+    else:
+        target = int(action.replace("%", ""))
+
+    if not 0 <= target <= 100:
+        raise ValueError("El volumen debe estar entre 0 y 100.")
+    return target
+
+
+def update_tts_volume(thread_id: str, state: dict, target: int) -> int:
+    """Actualiza y persiste el volumen TTS sin modificar el volumen musical."""
+    target = max(0, min(100, int(target)))
+    if target > 0:
+        state["last_tts_volume"] = target / 100.0
+    state["tts_volume"] = target / 100.0
+    set_chat_setting(thread_id, "tts_volume", str(target))
+    set_chat_setting(
+        thread_id,
+        "tts_last_volume",
+        str(round(float(state.get("last_tts_volume", 0.75)) * 100))
+    )
+    return target
+
+
 def check_antispam_message(event: dict, source: str):
     if source != "developer":
         return False, None
@@ -1013,6 +1057,7 @@ async def build_status_message(source: str, nickname: str, thread_id: str | None
             f"• Volumen: {round(float(audio_state.get('volume', 0.75))*100)}%",
             f"• Lectura TTS: {'activa' if audio_state.get('reading_enabled') else 'inactiva'}",
             f"• Cola TTS: {audio_state['speech_queue'].qsize()}",
+            f"• Volumen TTS: {round(float(audio_state.get('tts_volume', 0.75))*100)}%",
             f"• Voz TTS: {audio_state.get('tts_voice', TTS_VOICE)} ({audio_state.get('tts_rate', '+0%')})"
         ])
     else:
@@ -1816,6 +1861,8 @@ async def ensure_voice_room(thread_id: str):
                 "skip_requested": False,
                 "tts_voice": TTS_VOICE,
                 "tts_rate": "+0%",
+                "tts_volume": 0.75,
+                "last_tts_volume": 0.75,
                 "tts_read_links": False,
                 "tts_read_mentions": False,
                 "started_at": time.time()
@@ -1823,6 +1870,20 @@ async def ensure_voice_room(thread_id: str):
             room_state = DJ_ROOMS[thread_id]
             room_state["tts_voice"] = get_chat_setting(thread_id, "tts_voice", TTS_VOICE)
             room_state["tts_rate"] = get_chat_setting(thread_id, "tts_rate", "+0%")
+            try:
+                saved_tts_volume = float(get_chat_setting(thread_id, "tts_volume", "75"))
+            except (TypeError, ValueError):
+                saved_tts_volume = 75.0
+            try:
+                saved_tts_last_volume = float(
+                    get_chat_setting(thread_id, "tts_last_volume", str(saved_tts_volume))
+                )
+            except (TypeError, ValueError):
+                saved_tts_last_volume = saved_tts_volume
+            room_state["tts_volume"] = max(0.0, min(100.0, saved_tts_volume)) / 100.0
+            room_state["last_tts_volume"] = max(
+                0.0, min(100.0, saved_tts_last_volume)
+            ) / 100.0
             room_state["tts_read_links"] = get_chat_setting(thread_id, "tts_read_links", "0") == "1"
             room_state["tts_read_mentions"] = get_chat_setting(thread_id, "tts_read_mentions", "0") == "1"
             logging.info("[VOZ] Katherine conectada a la llamada %s", thread_id)
@@ -1957,6 +2018,18 @@ async def stream_speech_file(thread_id: str, file_path: str):
                     chunk = samples[offset:offset + 480]
                     if not len(chunk):
                         continue
+                    # Volumen independiente para TTS; se lee en cada bloque para
+                    # permitir cambios en tiempo real mientras Katherine habla.
+                    tts_volume = max(
+                        0.0, min(1.0, float(state.get("tts_volume", 0.75)))
+                    )
+                    if tts_volume <= 0:
+                        chunk = np.zeros_like(chunk)
+                    elif tts_volume < 1:
+                        chunk = np.clip(
+                            chunk.astype(np.float32) * tts_volume,
+                            -32768, 32767
+                        ).astype(np.int16)
                     audio_frame = livekit_rtc.AudioFrame.create(
                         48000, 1, len(chunk)
                     )
@@ -11064,6 +11137,8 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}noleer — desactiva la lectura sin salir de la llamada.",
                 f"{PREFIX}tts ajustes — consulta voz, velocidad y filtros de lectura.",
                 f"{PREFIX}tts voz <nombre> / velocidad <-50 a 100> — configura la lectura.",
+                f"{PREFIX}tts volumen <0-100> — ajusta el volumen de voz de Katherine.",
+                f"{PREFIX}volumenlectura / subirvolumenlectura / bajarvolumenlectura — controles de volumen TTS.",
                 f"{PREFIX}tts enlaces on/off y menciones on/off — elige qué leer.",
                 f"{PREFIX}dj pausa / reanudar / saltar / cola — controles de reproducción.",
                 f"{PREFIX}dj añadir <archivo> — agrega una pista local a la cola.",
@@ -12724,6 +12799,58 @@ async def handle_command(event: dict, source: str):
         )
         return
 
+    if command in (
+        "!volumenlectura", "!subirvolumenlectura",
+        "!bajarvolumenlectura", "!silenciolectura"
+    ):
+        state = DJ_ROOMS.get(thread)
+        if not state:
+            await send_message(
+                thread,
+                "No hay una llamada activa. Usa !join o !leer para configurar el volumen de lectura.",
+                source, reply
+            )
+            return
+        current = int(round(float(state.get("tts_volume", 0.75)) * 100))
+        last = int(round(float(state.get("last_tts_volume", 0.75)) * 100))
+        if command == "!silenciolectura":
+            values = ["mute"]
+        elif command == "!subirvolumenlectura":
+            values = ["subir"] + args
+        elif command == "!bajarvolumenlectura":
+            values = ["bajar"] + args
+        else:
+            values = args
+        if not values:
+            await send_message(
+                thread,
+                f"🔊 Volumen de lectura actual: {current}%\n"
+                "Usa !volumenlectura 0-100, !subirvolumenlectura [cantidad], "
+                "!bajarvolumenlectura [cantidad] o !silenciolectura.",
+                source, reply
+            )
+            return
+        try:
+            target = calculate_volume_target(values, current, last)
+        except (TypeError, ValueError):
+            await send_message(
+                thread,
+                "Volumen de lectura inválido. Usa un valor entre 0 y 100 o un ajuste +10/-10.",
+                source, reply
+            )
+            return
+        if target is None:
+            await send_message(thread, f"Volumen de lectura actual: {current}%.", source, reply)
+            return
+        target = update_tts_volume(thread, state, target)
+        await send_message(
+            thread,
+            f"🔊 Volumen de lectura ajustado a {target}%."
+            + (" Silencio de lectura activado." if target == 0 else ""),
+            source, reply
+        )
+        return
+
     if command in ("!volumen", "!volume", "!subirvolumen", "!bajarvolumen", "!silencio"):
         state = DJ_ROOMS.get(thread)
         if not state:
@@ -12872,20 +12999,57 @@ async def handle_command(event: dict, source: str):
                 "🔊 AJUSTES DE LECTURA\n"
                 f"Voz: {state.get('tts_voice', TTS_VOICE)}\n"
                 f"Velocidad: {state.get('tts_rate', '+0%')}\n"
+                f"Volumen de lectura: {round(float(state.get('tts_volume', 0.75))*100)}%\n"
                 f"Leer enlaces: {'sí' if state.get('tts_read_links') else 'no'}\n"
                 f"Leer menciones: {'sí' if state.get('tts_read_mentions') else 'no'}\n"
                 f"En cola: {state['speech_queue'].qsize()}\n"
                 "Usos: !tts voz <nombre>, !tts velocidad <-50 a 100>, "
+                "!tts volumen <0-100/+10/-10/mute/restaurar>, "
                 "!tts enlaces on/off, !tts menciones on/off, !tts voces.",
                 source, reply
             )
             return
         setting = args[0].lower()
+        if setting in ("volumen", "volume"):
+            current = int(round(float(state.get("tts_volume", 0.75)) * 100))
+            last = int(round(float(state.get("last_tts_volume", 0.75)) * 100))
+            if len(args) < 2:
+                await send_message(
+                    thread,
+                    f"🔊 Volumen de lectura actual: {current}%\n"
+                    "Usa !tts volumen 0-100, +10, -10, subir, bajar, mute o restaurar.",
+                    source, reply
+                )
+                return
+            try:
+                target = calculate_volume_target(args[1:], current, last)
+            except (TypeError, ValueError):
+                await send_message(
+                    thread,
+                    "Volumen de lectura inválido. Usa 0-100, +10, -10, subir, bajar, mute o restaurar.",
+                    source, reply
+                )
+                return
+            if target is None:
+                await send_message(thread, f"Volumen de lectura actual: {current}%.", source, reply)
+                return
+            target = update_tts_volume(thread, state, target)
+            await send_message(
+                thread,
+                f"🔊 Volumen de lectura ajustado a {target}%."
+                + (" Silencio de lectura activado." if target == 0 else " Se aplica en tiempo real."),
+                source, reply
+            )
+            return
         if setting == "voces":
             await send_message(thread, "Voces disponibles: " + ", ".join(TTS_VOICE_OPTIONS.keys()), source, reply)
             return
         if len(args) < 2:
-            await send_message(thread, "Uso: !tts voz <nombre> | velocidad <porcentaje> | enlaces on/off | menciones on/off", source, reply)
+            await send_message(
+                thread,
+                "Uso: !tts voz <nombre> | velocidad <porcentaje> | volumen <0-100> | enlaces on/off | menciones on/off",
+                source, reply
+            )
             return
         value = " ".join(args[1:]).strip().lower()
         if setting == "voz":
