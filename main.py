@@ -47,6 +47,14 @@ from collections import defaultdict, deque
 from typing import Any
 from html.parser import HTMLParser
 from urllib.parse import urljoin, quote, urlparse
+from katherine_dj_sources import (
+    YTDLP_AVAILABLE,
+    download_external_music_audio,
+    is_supported_music_url,
+    music_source_label,
+    normalize_search_provider,
+    search_external_music_sources,
+)
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
@@ -749,7 +757,7 @@ TTS_VOICE_OPTIONS = {
 USER_MESSAGE_ACTIVITY = defaultdict(deque)
 USER_SPAM_WARNED_UNTIL = {}
 DJ_MUSIC_DIR = Path(os.getenv("DJ_MUSIC_DIR", "music")).resolve()
-DJ_AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".opus"}
+DJ_AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".opus", ".webm", ".mka", ".mkv", ".mp4", ".oga"}
 DJ_SEARCH_RESULTS: dict[str, dict] = {}
 DJ_ARCHIVE_CACHE: dict[str, dict] = {}
 IA_BASE = "https://archive.org"
@@ -1986,7 +1994,8 @@ async def archive_item_details(identifier: str) -> dict | None:
         "license_url": str(license_url),
         "item_url": item_url,
         "url": audio_url,
-        "filename": filename
+        "filename": filename,
+        "source": "Internet Archive"
     }
     DJ_ARCHIVE_CACHE[identifier] = {
         "track": track,
@@ -2498,18 +2507,47 @@ async def enqueue_message_for_speech(event: dict, source: str):
 
 
 async def download_dj_audio(url: str) -> Path:
-    """Descarga una pista pública de Internet Archive a un archivo temporal local."""
+    """Descarga y valida una pista pública desde Archive o un proveedor compatible."""
     parsed = urlparse(str(url))
     host = (parsed.hostname or "").lower()
-    if (
-        parsed.scheme != "https"
-        or not (host == "archive.org" or host.endswith(".archive.org"))
-    ):
-        raise ValueError("La fuente de música no pertenece a Internet Archive.")
-
+    is_archive = host == "archive.org" or host.endswith(".archive.org")
     suffix = Path(parsed.path).suffix.lower()
+
+    if not is_archive:
+        if not is_supported_music_url(url):
+            raise ValueError("La URL no pertenece a una fuente musical compatible.")
+        temp_path = await download_external_music_audio(url)
+        try:
+            container = pyav.open(str(temp_path), mode="r")
+            try:
+                audio_stream = next(
+                    (stream for stream in container.streams if stream.type == "audio"),
+                    None
+                )
+                if audio_stream is None or next(container.decode(audio_stream), None) is None:
+                    raise RuntimeError("La pista descargada no contiene audio decodificable.")
+            finally:
+                container.close()
+            logging.info(
+                "[DJ] Audio de %s descargado y validado | %.2f MB | %s",
+                music_source_label(url),
+                temp_path.stat().st_size / (1024 * 1024),
+                suffix or temp_path.suffix.lower()
+            )
+            return temp_path
+        except Exception:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+    # Internet Archive se conserva como ruta especial: las búsquedas del bot
+    # solo ofrecen elementos con una licencia permitida y enlace directo al audio.
     if suffix not in DJ_AUDIO_EXTENSIONS:
-        raise ValueError("El enlace no tiene un formato de audio compatible.")
+        raise ValueError(
+            "En Internet Archive usa !dj buscar para validar la licencia antes de reproducir."
+        )
 
     fd, temp_name = tempfile.mkstemp(prefix="katherine-dj-", suffix=suffix)
     temp_path = Path(temp_name)
@@ -2572,7 +2610,7 @@ async def download_dj_audio(url: str) -> Path:
             container.close()
 
         logging.info(
-            "[DJ] Audio descargado y validado | %.2f MB | %s",
+            "[DJ] Audio de Internet Archive descargado y validado | %.2f MB | %s",
             total_bytes / (1024 * 1024),
             suffix
         )
@@ -14626,31 +14664,98 @@ async def handle_command(event: dict, source: str):
                 "KATHERINE DJ\n"
                 + ("Archivos locales:\n" + "\n".join(f"• {name}" for name in tracks)
                    if tracks else "No hay audios locales.")
-                + "\n\nPara buscar música pública: !dj buscar <tema>\n"
-                "Ejemplos: !dj buscar jazz, !dj buscar piano, !dj buscar ambient.\n"
-                "También puedes reproducir archivos locales con !dj archivo.mp3.",
+                + "\n\nBúsqueda combinada: !dj buscar <tema>\n"
+                "Fuentes de búsqueda: YouTube, SoundCloud e Internet Archive.\n"
+                "También acepta enlaces públicos de Bandcamp, Mixcloud, Audius, "
+                "Audiomack, BandLab, HearThis y Freesound.\n"
+                "Ejemplos: !dj buscar synthwave, !dj buscar soundcloud ambient.\n"
+                "Usa !dj fuentes para ver los proveedores.",
+                dj_source,
+                reply
+            )
+            return
+
+        if args[0].lower() in ("fuentes", "sources"):
+            await send_message(
+                thread,
+                "KATHERINE DJ · FUENTES\n\n"
+                "Búsqueda automática:\n"
+                "• YouTube\n• SoundCloud\n• Internet Archive (solo pistas con licencia permitida)\n\n"
+                "Enlaces directos compatibles:\n"
+                "• Bandcamp\n• Mixcloud\n• Audius\n• Audiomack\n• BandLab\n• HearThis\n• Freesound\n"
+                "• YouTube / YouTube Music\n• SoundCloud\n\n"
+                "Comandos: !dj buscar <tema>, !dj buscar youtube <tema>, "
+                "!dj buscar soundcloud <tema> o !dj buscar archive <tema>.\n"
+                "Para las demás plataformas, pega el enlace público con !dj <URL>. "
+                "Solo se admiten páginas públicas reproducibles; no se omiten cuentas, "
+                "suscripciones, DRM ni restricciones del proveedor. Spotify y Apple Music "
+                "no entregan una pista reproducible mediante este sistema.",
                 dj_source,
                 reply
             )
             return
 
         if args[0].lower() in ("buscar", "search"):
-            search_term = " ".join(args[1:]).strip()
+            search_args = list(args[1:])
+            requested_provider = None
+            if search_args:
+                requested_provider = normalize_search_provider(search_args[0])
+            if requested_provider:
+                search_args = search_args[1:]
+            search_term = " ".join(search_args).strip()
             if not search_term:
                 await send_message(
                     thread,
-                    "Uso: !dj buscar <tema o género>. Ejemplos: jazz, piano, ambient, clásica.",
+                    "Uso: !dj buscar <tema>, !dj buscar youtube <tema>, "
+                    "!dj buscar soundcloud <tema> o !dj buscar archive <tema>.",
                     dj_source,
                     reply
                 )
                 return
+
             try:
-                results = await search_archive_audio(search_term, limit=5)
+                if requested_provider == "archive":
+                    results = await search_archive_audio(search_term, limit=5)
+                elif requested_provider in ("youtube", "soundcloud"):
+                    results = await search_external_music_sources(
+                        search_term,
+                        limit=5,
+                        providers=(requested_provider,)
+                    )
+                else:
+                    archive_result, external_result = await asyncio.gather(
+                        search_archive_audio(search_term, limit=5),
+                        search_external_music_sources(search_term, limit=5),
+                        return_exceptions=True
+                    )
+                    archive_tracks = archive_result if isinstance(archive_result, list) else []
+                    external_tracks = external_result if isinstance(external_result, list) else []
+                    groups = [
+                        [track for track in external_tracks if track.get("source") == "YouTube"],
+                        [track for track in external_tracks if track.get("source") == "SoundCloud"],
+                        archive_tracks,
+                    ]
+                    results = []
+                    positions = [0] * len(groups)
+                    while len(results) < 5:
+                        added = False
+                        for index, group in enumerate(groups):
+                            if positions[index] < len(group):
+                                results.append(group[positions[index]])
+                                positions[index] += 1
+                                added = True
+                                if len(results) >= 5:
+                                    break
+                        if not added:
+                            break
+                    if not results and isinstance(archive_result, BaseException) and isinstance(external_result, BaseException):
+                        raise RuntimeError("Todas las fuentes de música fallaron.")
             except Exception as exc:
-                logging.exception("[DJ] Búsqueda en Internet Archive fallida")
+                logging.exception("[DJ] Falló la búsqueda musical")
                 await send_message(
                     thread,
-                    f"No pude consultar el catálogo musical ahora mismo ({type(exc).__name__}).",
+                    "No pude consultar las fuentes musicales ahora mismo "
+                    f"({type(exc).__name__}). Inténtalo de nuevo o pega un enlace público compatible.",
                     dj_source,
                     reply
                 )
@@ -14659,8 +14764,8 @@ async def handle_command(event: dict, source: str):
             if not results:
                 await send_message(
                     thread,
-                    "No encontré pistas reproducibles con licencias permitidas para esa búsqueda. "
-                    "Prueba con otro género o palabra.",
+                    "No encontré pistas para esa búsqueda en las fuentes disponibles. "
+                    "Prueba otro término o usa !dj fuentes para ver las opciones.",
                     dj_source,
                     reply
                 )
@@ -14683,19 +14788,27 @@ async def handle_command(event: dict, source: str):
                         "label": f"{index + 1}. {track['title']}"[:40],
                         "value": str(index)
                     }
-                    for index, track in enumerate(results)
+                    for index, track in enumerate(results[:5])
                 ],
                 ttl=900
             )
-            listing = "\n".join(
-                f"{index + 1}. {track['title']} — {track['creator']} "
-                f"({track['license']})"
-                for index, track in enumerate(results)
-            )
+            listing = []
+            for index, track in enumerate(results[:5], 1):
+                provider = track.get("source") or "Fuente externa"
+                detail = (
+                    f" · {track.get('license', 'Licencia no indicada')}"
+                    if provider == "Internet Archive"
+                    else f" · {provider}"
+                )
+                listing.append(
+                    f"{index}. {track['title']} — {track['creator']}{detail}"
+                )
             await send_message(
                 thread,
-                f"CATÁLOGO MUSICAL · INTERNET ARCHIVE\nBúsqueda: {search_term}\n\n"
-                f"{listing}\n\nSelecciona una pista para reproducirla en la sala:",
+                f"BÚSQUEDA MUSICAL · VARIAS FUENTES\nBúsqueda: {search_term}\n\n"
+                + "\n".join(listing)
+                + "\n\nSelecciona una pista para reproducirla en la sala. "
+                "Las licencias de YouTube y SoundCloud no se verifican automáticamente.",
                 dj_source,
                 reply,
                 buttons
@@ -14720,17 +14833,6 @@ async def handle_command(event: dict, source: str):
             )
             return
 
-        track_path = resolve_dj_track(args[0])
-        if not track_path:
-            await send_message(
-                thread,
-                "No encuentro ese archivo en music/. También puedes buscar audio público "
-                "con !dj buscar <tema>.",
-                dj_source,
-                reply
-            )
-            return
-
         looping = any(
             value.lower() in ("bucle", "loop", "repetir")
             for value in args[1:]
@@ -14738,6 +14840,58 @@ async def handle_command(event: dict, source: str):
         room_id = thread
         if len(args) > 1 and args[-1].isdigit():
             room_id = args[-1]
+
+        requested_url = str(args[0]).strip()
+        if requested_url.lower().startswith(("https://", "http://")):
+            if not is_supported_music_url(requested_url):
+                await send_message(
+                    thread,
+                    "No reconozco ese proveedor o el enlace no es HTTPS. Usa !dj fuentes "
+                    "para consultar las plataformas compatibles.",
+                    dj_source,
+                    reply
+                )
+                return
+            if (urlparse(requested_url).hostname or "").lower().endswith("archive.org") and Path(urlparse(requested_url).path).suffix.lower() not in DJ_AUDIO_EXTENSIONS:
+                await send_message(
+                    thread,
+                    "Para Internet Archive usa !dj buscar <tema>; así Katherine comprueba "
+                    "la licencia antes de reproducir.",
+                    dj_source,
+                    reply
+                )
+                return
+            provider = music_source_label(requested_url)
+            metadata = {
+                "title": f"Audio desde {provider}",
+                "creator": "Enlace público",
+                "source": provider,
+                "url": requested_url,
+            }
+            ok, message = await start_dj_room(
+                room_id,
+                requested_url,
+                looping,
+                track_metadata=metadata
+            )
+            await send_message(
+                thread,
+                f"🎧 {message}\nFuente: {provider}" if ok else f"DJ: {message}",
+                dj_source,
+                reply
+            )
+            return
+
+        track_path = resolve_dj_track(requested_url)
+        if not track_path:
+            await send_message(
+                thread,
+                "No encuentro ese archivo en music/. También puedes usar !dj buscar <tema> "
+                "o pegar un enlace público de !dj fuentes.",
+                dj_source,
+                reply
+            )
+            return
 
         ok, message = await start_dj_room(room_id, track_path, looping)
         await send_message(
