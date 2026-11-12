@@ -3,7 +3,6 @@
 import os
 import re
 import json
-import base64
 import time
 import hmac
 import hashlib
@@ -1213,6 +1212,75 @@ async def api(method: str, path: str, source="developer", body=None):
         )
         metrics["api_errors"] += 1
         logging.exception("Error de conexion con Anarchy")
+        return {
+            "ok": False,
+            "status": 500,
+            "data": {"error": str(exc)}
+        }
+
+
+async def api_upload_bytes(path: str, source: str, content: bytes, content_type: str):
+    """Envía bytes binarios a una ruta de carga de Anarchy Apps."""
+    token = token_for(source)
+    if not token:
+        return {
+            "ok": False,
+            "status": 500,
+            "data": {"error": f"Falta token {source}."}
+        }
+
+    headers = {
+        "Authorization": f"Bot {token}",
+        "Accept": "application/json",
+        "Content-Type": content_type
+    }
+
+    request_started = time.perf_counter()
+    try:
+        metrics["api_requests"] += 1
+        response = await external_request(
+            "PUT",
+            API + path,
+            headers=headers,
+            content=content,
+            timeout=20
+        )
+        elapsed_ms = (time.perf_counter() - request_started) * 1000
+        metrics["api_latency_last_ms"] = elapsed_ms
+        metrics["api_latency_total_ms"] += elapsed_ms
+        metrics["api_latency_max_ms"] = max(
+            metrics["api_latency_max_ms"], elapsed_ms
+        )
+
+        try:
+            data = response.json()
+        except Exception:
+            data = {"raw": response.text[:1000]}
+
+        logging.info(
+            "[ANARCHY] PUT %s -> %s",
+            path,
+            response.status_code
+        )
+        if not response.is_success:
+            metrics["api_errors"] += 1
+
+        return {
+            "ok": response.is_success,
+            "status": response.status_code,
+            "data": data,
+            "retry_after": response.headers.get("retry-after")
+        }
+
+    except Exception as exc:
+        elapsed_ms = (time.perf_counter() - request_started) * 1000
+        metrics["api_latency_last_ms"] = elapsed_ms
+        metrics["api_latency_total_ms"] += elapsed_ms
+        metrics["api_latency_max_ms"] = max(
+            metrics["api_latency_max_ms"], elapsed_ms
+        )
+        metrics["api_errors"] += 1
+        logging.exception("Error al subir el icono de Anarchy")
         return {
             "ok": False,
             "status": 500,
@@ -10963,28 +11031,13 @@ def normalize_character_guide_key(name: str) -> str:
     key = re.sub(r"\s+", " ", str(name).casefold().strip())
     return CHARACTER_GUIDE_ALIASES.get(key, key)
 
-AVATAR_MAX_BYTES = 5 * 1024 * 1024
+AVATAR_MAX_BYTES = 512 * 1024
 AVATAR_MIME_TYPES = {
     "image/png": "png",
     "image/jpeg": "jpg",
     "image/webp": "webp",
     "image/gif": "gif"
 }
-
-
-def avatar_fields_from_profile(value: Any, prefix: str = "", depth: int = 0) -> dict:
-    """Extrae solo campos de avatar/foto para verificar el perfil sin exponer otros datos."""
-    found = {}
-    if depth > 3 or not isinstance(value, dict):
-        return found
-    for key, item in value.items():
-        path = f"{prefix}.{key}" if prefix else str(key)
-        lowered = str(key).casefold()
-        if any(word in lowered for word in ("avatar", "picture", "photo", "profileimage", "profile_image")):
-            found[path] = item
-        elif isinstance(item, dict):
-            found.update(avatar_fields_from_profile(item, path, depth + 1))
-    return found
 
 
 def avatar_meta_image(markup: str) -> str | None:
@@ -11088,7 +11141,7 @@ async def resolve_avatar_image(source_url: str) -> tuple[bytes, str]:
             last_problem = "El archivo de imagen está vacío."
             continue
         if len(image_bytes) > AVATAR_MAX_BYTES:
-            last_problem = "La imagen supera el límite de 5 MB."
+            last_problem = "La imagen supera el límite de 512 KB que acepta Anarchy Apps."
             continue
 
         return image_bytes, mime
@@ -12932,31 +12985,20 @@ async def handle_command(event: dict, source: str):
             await send_message(
                 thread,
                 "Uso: !avatarbot URL_DE_IMAGEN_O_ARTICULO\n"
-                "Acepta una imagen HTTPS directa o una página de Namu Wiki.\n"
-                "Usa !avatarbot eliminar para retirar el avatar personalizado.",
+                "Acepta una imagen HTTPS directa o una página de Namu Wiki. "
+                "Formatos: PNG, JPG, WebP o GIF; máximo 512 KB.",
                 source,
                 reply
             )
             return
 
-        remove_avatar = avatar_value.casefold() in {
+        if avatar_value.casefold() in {
             "eliminar", "quitar", "borrar", "reset", "default"
-        }
-
-        if remove_avatar:
-            result = await api("PATCH", "/me", "community", {"avatar": None})
-            if not result.get("ok"):
-                await send_message(
-                    thread,
-                    f"No se pudo retirar el avatar. HTTP {result.get('status', '?')}.",
-                    source,
-                    reply
-                )
-                return
-
+        }:
             await send_message(
                 thread,
-                "La solicitud para retirar el avatar fue aceptada por Anarchy Apps.",
+                "La API permite cambiar el icono mediante PUT /me/icon, "
+                "pero no documenta una operación para eliminarlo. No realicé cambios.",
                 source,
                 reply
             )
@@ -12973,49 +13015,57 @@ async def handle_command(event: dict, source: str):
             )
             return
 
-        before = await api("GET", "/me", "community")
-        before_data = before.get("data") if before.get("ok") else {}
-        before_fields = avatar_fields_from_profile(before_data or {})
-
-        data_uri = (
-            f"data:{mime};base64,"
-            + base64.b64encode(image_bytes).decode("ascii")
-        )
-        result = await api(
-            "PATCH",
-            "/me",
+        result = await api_upload_bytes(
+            "/me/icon",
             "community",
-            {"avatar": data_uri}
+            image_bytes,
+            mime
         )
 
         if not result.get("ok"):
+            payload = result.get("data") or {}
+            api_error = (
+                payload.get("anarchy:error")
+                or payload.get("anarchy:message")
+                or payload.get("error")
+                if isinstance(payload, dict)
+                else None
+            )
+            detail = f" ({api_error})" if api_error else ""
             await send_message(
                 thread,
-                f"Anarchy Apps rechazó la imagen. HTTP {result.get('status', '?')}.",
+                f"No se pudo actualizar el avatar. HTTP {result.get('status', '?')}{detail}.",
                 source,
                 reply
             )
             return
 
-        after = await api("GET", "/me", "community")
-        after_data = after.get("data") if after.get("ok") else {}
-        after_fields = avatar_fields_from_profile(after_data or {})
+        payload = result.get("data") or {}
+        bot_data = payload.get("bot") if isinstance(payload, dict) else {}
+        icon_url = bot_data.get("icon") if isinstance(bot_data, dict) else None
 
-        changed = bool(after_fields) and after_fields != before_fields
-        if changed:
+        if not icon_url:
+            # La respuesta documentada incluye bot.icon; consultamos /me solo
+            # como respaldo para confirmar que el icono quedó asociado al bot.
+            check = await api("GET", "/me", "community")
+            check_data = check.get("data") if check.get("ok") else {}
+            check_bot = check_data.get("bot") if isinstance(check_data, dict) else {}
+            icon_url = check_bot.get("icon") if isinstance(check_bot, dict) else None
+
+        if icon_url:
             await send_message(
                 thread,
-                f"Avatar de Katherine actualizado y verificado ({len(image_bytes) // 1024} KB).",
+                f"Avatar de Katherine actualizado y confirmado por Anarchy Apps "
+                f"({len(image_bytes) // 1024} KB).",
                 source,
                 reply
             )
         else:
-            keys = ", ".join(after_fields.keys()) if after_fields else "la API no expone campos de avatar en /me"
             await send_message(
                 thread,
-                "Anarchy Apps aceptó la solicitud (HTTP 200), pero no confirmó el cambio "
-                f"al volver a consultar el perfil. Campos detectados: {keys}. "
-                "No marcaré el avatar como actualizado hasta poder verificarlo.",
+                "La carga fue aceptada por Anarchy Apps, pero no pude confirmar "
+                "el campo bot.icon en la respuesta ni en GET /me. "
+                "No marcaré el cambio como verificado.",
                 source,
                 reply
             )
