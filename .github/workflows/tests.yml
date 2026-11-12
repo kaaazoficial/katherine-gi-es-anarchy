@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - "main.py"
+      - "requirements.txt"
       - "katherine_nexus.py"
       - "tests/**"
       - "requirements-test.txt"
@@ -13,6 +14,7 @@ on:
       - main
     paths:
       - "main.py"
+      - "requirements.txt"
       - "tests/**"
       - "requirements-test.txt"
       - ".github/workflows/tests.yml"
