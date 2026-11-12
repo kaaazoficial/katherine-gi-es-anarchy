@@ -13043,7 +13043,7 @@ async def handle_command(event: dict, source: str):
             return
 
         if command == "!advertir":
-            reason = re.sub(r"@[^\\s,;]+", "", query, count=1).strip()
+            reason = re.sub(r"@[^\s,;]+", "", query, count=1).strip()
             warning_id = add_moderation_warning(
                 thread, target_uid, target_name or "Usuario",
                 raw_uid, nickname, reason or "Sin motivo indicado", automatic=False
