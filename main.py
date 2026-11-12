@@ -87,7 +87,7 @@ def parse_admin_uids(value: str | None) -> set[str]:
     """Parse trusted administrator UIDs from comma/semicolon/newline-separated config."""
     return {
         item.strip()
-        for item in re.split(r"[,;\\r\\n]+", str(value or ""))
+        for item in re.split(r"[,;\r\n]+", str(value or ""))
         if item.strip()
     }
 
