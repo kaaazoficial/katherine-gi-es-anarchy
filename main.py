@@ -8287,7 +8287,7 @@ async def handle_command(event: dict, source: str):
                 constellation_lines.append(f"C{index} · {title}")
                 if description:
                     constellation_lines.append(game_excerpt(description, 180))
-        sections.append("\\n".join(constellation_lines))
+        sections.append("\n".join(constellation_lines))
 
         totals = aggregate_material_costs(character.get("costs"))
         if totals:
@@ -8804,7 +8804,6 @@ async def handle_command(event: dict, source: str):
             "material": "materials",
             "talentos": "talents",
             "talento": "talents",
-            "logros": "achievements",
             "animales": "animals",
             "atuendos": "outfits",
             "tarjetas": "namecards",
@@ -8817,7 +8816,7 @@ async def handle_command(event: dict, source: str):
         if not args_list or args_list[0].casefold() not in categories:
             await send_message(
                 thread,
-                f"Uso: {PREFIX}lista categoría [página]. Categorías: personajes, armas, artefactos, enemigos, dominios, comidas, materiales, talentos, logros, animales, atuendos, tarjetas, planeadores, elementos o fabricaciones.",
+                f"Uso: {PREFIX}lista categoría [página]. Categorías: personajes, armas, artefactos, enemigos, dominios, comidas, materiales, talentos, animales, atuendos, tarjetas, planeadores, elementos o fabricaciones.",
                 source,
                 reply
             )
