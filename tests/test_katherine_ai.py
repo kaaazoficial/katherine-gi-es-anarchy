@@ -2,7 +2,10 @@
 import json
 import time
 import pytest
-from katherine_ai import ACTION_SCHEMA, KatherineAI, is_bot_author, validate_ai_tool_call
+from katherine_ai import (
+    ACTION_SCHEMA, KatherineAI, build_ai_session_key, is_bot_author,
+    validate_ai_tool_call,
+)
 
 class FakeResponse:
     def __init__(self, payload, status_code=200):
@@ -145,6 +148,7 @@ async def test_model_cannot_request_unapproved_tool(monkeypatch):
     result = await ai.assist("haz algo administrativo", "room:user", fake_request)
     assert result["kind"] == "answer"
     assert "no está disponible" in result["answer"]
+    assert result["fallback"] is True
 
 @pytest.mark.asyncio
 async def test_no_credentials_keeps_safe_fallback(monkeypatch):
@@ -219,3 +223,73 @@ async def test_provider_error_exposes_only_safe_error_fields(monkeypatch):
     assert "invalid_request_error" in message
     assert "The model is not available." in message
     assert "must-not-appear" not in message
+
+
+
+def test_tool_results_are_retained_for_follow_up_context():
+    ai = KatherineAI()
+    ai._append_history("room:uid:user-1", "user", "¿Qué materiales necesita Cyno?")
+    ai.remember_tool_result(
+        "room:uid:user-1", "materiales Cyno",
+        "Cyno necesita pergaminos, fruta del loto y materiales de jefe."
+    )
+    history = ai._history("room:uid:user-1")
+    assert history[-1]["role"] == "assistant"
+    assert "Resultado de herramienta" in history[-1]["content"]
+    assert "materiales de jefe" in history[-1]["content"]
+
+
+def test_ai_session_key_never_uses_nickname_as_persistent_identity():
+    first = build_ai_session_key(
+        "developer", "room", {"nickname": "Luna"}, "message-1"
+    )
+    second = build_ai_session_key(
+        "developer", "room", {"nickname": "Luna"}, "message-2"
+    )
+    assert first != second
+    stable_a = build_ai_session_key(
+        "developer", "room", {"uid": "verified-user"}, "message-1"
+    )
+    stable_b = build_ai_session_key(
+        "developer", "room", {"uid": "verified-user"}, "message-2"
+    )
+    assert stable_a == stable_b
+    assert "Luna" not in first
+
+
+@pytest.mark.asyncio
+async def test_chat_summary_sends_every_message_without_silent_truncation(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI(analyst_limit=200)
+    ai.set_analyst("room", True)
+    for index in range(100):
+        ai.record_chat_message(
+            "room", f"User{index:03d}", f"MARKER{index:03d} " + ("x" * 680)
+        )
+
+    captured = {}
+
+    async def fake_request(method, url, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse(response_payload({
+            "kind": "answer", "answer": "Resumen de los 100 mensajes.",
+            "command": "", "args": ""
+        }))
+
+    answer = await ai.summarize_chat("room", fake_request)
+    inputs = captured["json"]["input"]
+    all_input = "\n".join(item["content"] for item in inputs)
+    assert answer == "Resumen de los 100 mensajes."
+    assert len(inputs) > 1
+    assert all(len(item["content"]) <= 4000 for item in inputs)
+    assert all(f"MARKER{index:03d}" in all_input for index in range(100))
+
+
+def test_groq_status_does_not_claim_store_disabled(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    monkeypatch.setenv(
+        "KATHERINE_AI_API_URL", "https://api.groq.com/openai/v1/responses"
+    )
+    status = KatherineAI().status()
+    assert "no se envía el parámetro store" in status
+    assert "Almacenamiento de conversaciones: desactivado" not in status
