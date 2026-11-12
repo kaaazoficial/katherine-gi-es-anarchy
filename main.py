@@ -12093,7 +12093,8 @@ async def maybe_send_auto_reply(thread_id: str, uid: str, nickname: str, content
             AUTO_REPLY_USER_COOLDOWN[(str(thread_id), str(uid))] = now + 30
             metrics["auto_replies_sent"] += 1
             await send_message(thread_id, response, "developer")
-            return
+            return True
+    return False
 
 
 def format_poll_results(poll: dict) -> str:
@@ -12497,6 +12498,8 @@ async def handle_command(event: dict, source: str):
 
     if command == "!asistente":
         request_text = query.strip()
+        if request_text and await maybe_send_auto_reply(thread, raw_uid, nickname, request_text):
+            return
         answer = (
             f"Te escucho. Sobre «{request_text[:180]}», todavía no tengo una acción específica conectada.\\n"
             "Puedo consultar la enciclopedia de Genshin, buscar y reproducir música, "
@@ -15878,7 +15881,14 @@ async def dispatch(event: dict, source: str):
                 logging.info("[NEXUS] Solicitud dirigida a Katherine interpretada como %s", routed_command.split()[0])
                 await handle_command(routed_event, source)
             else:
-                # Conversación ordinaria: Katherine no responde si no la invocan.
+                # Conversación ordinaria: se mantienen estadísticas de actividad,
+                # pero no se activa el asistente ni las respuestas automáticas.
+                author = message_data.get("author") or {}
+                raw_uid = str(author.get("uid") or author.get("nickname") or "unknown")
+                nickname = author.get("nickname") or "Viajero"
+                scope_key = f"{source}:{event.get('threadId')}"
+                record_user(scoped_uid(scope_key, raw_uid), nickname, count_message=True)
+                record_chat_activity(str(event.get("threadId") or ""), scoped_uid(scope_key, raw_uid), nickname)
                 metrics["unaddressed_messages_ignored"] += 1
         else:
             # Los comandos clásicos con prefijo siguen funcionando.
