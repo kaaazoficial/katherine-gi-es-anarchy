@@ -8952,6 +8952,117 @@ async def collect_character_guide_data(query: str):
 
 
 
+
+# ---------------------------------------------------------------------------
+# NOTICIAS OFICIALES: BANNERS Y EVENTOS (FUENTE HOYOVERSE EN ESPAÑOL)
+# ---------------------------------------------------------------------------
+OFFICIAL_NEWS_INDEX = "https://genshin.hoyoverse.com/es/news"
+
+
+class OfficialNewsLinkParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.items = []
+        self.current = None
+        self.ignored = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style", "noscript"):
+            self.ignored += 1
+        if tag == "a" and not self.ignored:
+            href = dict(attrs).get("href")
+            if href and "/news/detail/" in href:
+                self.current = {"url": urljoin(OFFICIAL_NEWS_INDEX, href), "parts": []}
+
+    def handle_data(self, data):
+        if self.current and not self.ignored:
+            value = re.sub(r"\s+", " ", str(data or "")).strip()
+            if value:
+                self.current["parts"].append(value)
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style", "noscript") and self.ignored:
+            self.ignored -= 1
+        if tag == "a" and self.current:
+            title = re.sub(r"\s+", " ", " ".join(self.current["parts"])).strip()
+            if title:
+                self.current["title"] = title
+                self.items.append(self.current)
+            self.current = None
+
+
+async def fetch_official_news(category: str):
+    cache_key = f"official-news-es:{category}"
+    cached = cache.get(cache_key)
+    if cached and cached[0] > time.time():
+        return cached[1]
+
+    try:
+        response = await external_request(
+            "GET", OFFICIAL_NEWS_INDEX, timeout=18, follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 Katherine-AnarchyBot/4.0",
+                     "Accept": "text/html,application/xhtml+xml"}
+        )
+        if response.status_code != 200:
+            return []
+        parser = OfficialNewsLinkParser()
+        parser.feed(response.text)
+        parser.close()
+        candidates = []
+        for item in parser.items:
+            title = item["title"]
+            folded = title.casefold()
+            if category == "banner":
+                matched = any(term in folded for term in (
+                    "gachapón", "gachapon", "gachapones", "invocación",
+                    "invocacion", "event wish", "wish notice"
+                ))
+            else:
+                matched = any(term in folded for term in (
+                    "eventos", "evento", "event overview", "calendario"
+                ))
+            if matched and item["url"] not in {x["url"] for x in candidates}:
+                candidates.append(item)
+
+        results = []
+        for item in candidates[:8]:
+            detail = await external_request(
+                "GET", item["url"], timeout=16, follow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0 Katherine-AnarchyBot/4.0",
+                         "Accept": "text/html,application/xhtml+xml"}
+            )
+            if detail.status_code != 200:
+                continue
+            body = clean_game_text(detail.text)
+            body = re.sub(r"\s+", " ", body)
+            published = extract_guide_update_label(detail.text)
+            results.append({
+                "title": item["title"],
+                "body": game_excerpt(body, 900),
+                "published": published
+            })
+        cache[cache_key] = (time.time() + 1800, results)
+        return results
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        logging.warning("Noticias oficiales no disponibles (%s): %s", category, exc)
+        return []
+
+
+def format_official_news(items, heading: str, empty: str):
+    if not items:
+        return empty
+    lines = [heading]
+    for item in items[:6]:
+        lines.append("")
+        lines.append("• " + item["title"])
+        if item.get("published"):
+            lines.append("  Publicación/actualización: " + item["published"])
+        lines.append("  " + item["body"])
+    lines.append("")
+    lines.append("Información extraída de anuncios oficiales de HoYoverse. Las fechas futuras se muestran como anunciadas, no como eventos activos.")
+    return "\n".join(lines)
+
+
 async def get_character_material_summary(query: str):
     data, stats = await asyncio.gather(get_character(query), character_stats(query))
     if not isinstance(data, dict):
@@ -9814,13 +9925,15 @@ async def handle_command(event: dict, source: str):
         return
 
     if command in ("!banner", "!calendario"):
-        await send_message(
-            thread,
-            "La API de personajes consultada no ofrece un calendario de banners/eventos en tiempo real. "
-            "No mostraré banners ni fechas estimadas como si fueran oficiales. "
-            "Cuando exista una fuente pública verificable, este comando podrá devolver el calendario actualizado.",
-            source, reply
+        category = "banner" if command == "!banner" else "events"
+        items = await fetch_official_news(category)
+        answer = format_official_news(
+            items,
+            "GACHAPONES OFICIALES · GENSHIN IMPACT" if category == "banner"
+            else "EVENTOS OFICIALES · GENSHIN IMPACT",
+            "No encontré anuncios oficiales de esta categoría en la página pública en español. Inténtalo más tarde."
         )
+        await send_message(thread, answer, source, reply)
         return
 
     if command == "!cobertura":
