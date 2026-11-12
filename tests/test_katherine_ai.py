@@ -293,3 +293,74 @@ def test_groq_status_does_not_claim_store_disabled(monkeypatch):
     status = KatherineAI().status()
     assert "no se envía el parámetro store" in status
     assert "Almacenamiento de conversaciones: desactivado" not in status
+
+
+
+@pytest.mark.asyncio
+async def test_unrelated_question_cannot_execute_genshin_tool(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+    requests = []
+    responses = [
+        FakeResponse(response_payload({
+            "kind": "command", "answer": "", "command": "enciclopedia",
+            "args": "Anarchy Apps",
+        })),
+        FakeResponse(response_payload({
+            "kind": "answer",
+            "answer": "Anarchy Apps es la plataforma donde funciona esta comunidad.",
+            "command": "", "args": "",
+        })),
+    ]
+
+    async def fake_request(method, url, **kwargs):
+        requests.append(kwargs)
+        return responses.pop(0)
+
+    result = await ai.assist("qué es Anarchy Apps", "room:user", fake_request)
+    assert result["kind"] == "answer"
+    assert "Anarchy Apps" in result["answer"]
+    assert len(requests) == 2
+    assert "No invoques ninguna herramienta de Genshin" in requests[1]["json"]["instructions"]
+
+
+@pytest.mark.asyncio
+async def test_unrelated_direct_answer_cannot_drift_to_genshin(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+    responses = [
+        FakeResponse(response_payload({
+            "kind": "answer",
+            "answer": "Anarchy Apps es una comunidad de Genshin en Teyvat.",
+            "command": "", "args": "",
+        })),
+        FakeResponse(response_payload({
+            "kind": "answer",
+            "answer": "Anarchy Apps es la plataforma de la comunidad.",
+            "command": "", "args": "",
+        })),
+    ]
+
+    async def fake_request(method, url, **kwargs):
+        return responses.pop(0)
+
+    result = await ai.assist("qué es Anarchy Apps", "room:user", fake_request)
+    assert result["kind"] == "answer"
+    assert "plataforma" in result["answer"]
+    assert "Genshin" not in result["answer"]
+
+
+@pytest.mark.asyncio
+async def test_genshin_question_can_still_use_teyvat_tool(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+
+    async def fake_request(method, url, **kwargs):
+        return FakeResponse(response_payload({
+            "kind": "command", "answer": "", "command": "enciclopedia",
+            "args": "Nahida",
+        }))
+
+    result = await ai.assist("quién es Nahida", "room:user", fake_request)
+    assert result["kind"] == "command"
+    assert result["command"] == "enciclopedia"
