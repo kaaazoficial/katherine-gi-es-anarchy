@@ -2,7 +2,15 @@
 
 El catálogo de usuario se genera con `!ayuda` y `!comandos` en `main.py`. Debe mantenerse sincronizado con los manejadores reales.
 
-## Investigación y herramientas universales\n\n- `!investigar <tema>`: busca páginas públicas en varios resultados independientes, recupera extractos y solicita una síntesis basada en las fuentes.\n- `!enlace <URL>`: analiza una página HTML pública HTTPS; no sigue redirecciones ni acepta hosts locales/privados.\n- `!ia investigar <tema>` y `!ia enlace <URL>`: accesos desde el menú IA.\n- Katherine también reconoce peticiones explícitas como «Katherine, investiga…» y «Katherine, analiza este enlace…». La mención aislada sigue sin activar el bot.\n- La síntesis cita las fuentes por número y dominio; páginas bloqueadas, no HTML o sin texto suficiente pueden omitirse. La búsqueda no garantiza exhaustividad.\n\n## Administración por UID
+## Investigación y herramientas universales
+
+- `!investigar <tema>`: busca páginas públicas en varios resultados independientes, recupera extractos y solicita una síntesis basada en las fuentes.
+- `!enlace <URL>`: analiza una página HTML pública HTTPS; no sigue redirecciones ni acepta hosts locales/privados.
+- `!ia investigar <tema>` y `!ia enlace <URL>`: accesos desde el menú IA.
+- Katherine también reconoce peticiones explícitas como «Katherine, investiga…» y «Katherine, analiza este enlace…». La mención aislada sigue sin activar el bot.
+- La síntesis cita las fuentes por número y dominio; páginas bloqueadas, no HTML o sin texto suficiente pueden omitirse. La búsqueda no garantiza exhaustividad.
+
+## Administración por UID
 
 Los comandos marcados como `[ADMIN]` solo aceptan el UID entregado por Anarchy Apps en `message.author.uid`. No se usa el nickname como sustituto para otorgar permisos.
 
