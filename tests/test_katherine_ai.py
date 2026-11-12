@@ -317,7 +317,7 @@ async def test_unrelated_question_cannot_execute_genshin_tool(monkeypatch):
         requests.append(kwargs)
         return responses.pop(0)
 
-    result = await ai.assist("qué es Anarchy Apps", "room:user", fake_request)
+    result = await ai.assist("qué ofrece el ecosistema comunitario de esta aplicación", "room:user", fake_request)
     assert result["kind"] == "answer"
     assert "anarchy apps" in result["answer"].casefold()
     assert len(requests) == 2
@@ -344,7 +344,7 @@ async def test_unrelated_direct_answer_cannot_drift_to_genshin(monkeypatch):
     async def fake_request(method, url, **kwargs):
         return responses.pop(0)
 
-    result = await ai.assist("qué es Anarchy Apps", "room:user", fake_request)
+    result = await ai.assist("explícame qué hace esta plataforma comunitaria", "room:user", fake_request)
     assert result["kind"] == "answer"
     assert "red social" in result["answer"]
     assert "Genshin" not in result["answer"]
