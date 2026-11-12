@@ -7282,29 +7282,13 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}guia <personaje> — guía completa: estadísticas, sets, stats principales, substats, armas, equipos, talentos, constelaciones y materiales.",
                 f"{PREFIX}buscargenshin <texto> — busca personajes y objetos.",
                 f"{PREFIX}lista <categoría> [página] — lista personajes, armas, enemigos y otros datos.",
-                f"{PREFIX}comparar <personaje 1> | <personaje 2> — compara estadísticas base.",
-                f"{PREFIX}arma <nombre> — ficha de un arma.",
-                f"{PREFIX}artefacto <nombre> — ficha de un conjunto.",
                 f"{PREFIX}enemigo <nombre> — ficha de enemigo o jefe.",
-                f"{PREFIX}dominio <nombre> — información de dominios.",
-                f"{PREFIX}material <nombre> — información de materiales.",
-                f"{PREFIX}comida <nombre> — información de platos.",
-                f"{PREFIX}animal <nombre> — información de fauna.",
-                f"{PREFIX}tarjeta <nombre> — tarjetas de nombre.",
-                f"{PREFIX}atuendo <nombre> — atuendos de personajes.",
-                f"{PREFIX}planeador <nombre> — planeadores.",
-                f"{PREFIX}fabricacion <nombre> — objetos de fabricación.",
                 f"{PREFIX}geografia <nombre> — ubicaciones y regiones.",
                 f"{PREFIX}elemento <nombre> — información de elementos.",
-                f"{PREFIX}rangoaventura <nivel> — rangos de aventura.",
-                f"{PREFIX}talento <nombre> — materiales y libros de talentos.",
                 f"{PREFIX}curiosidad — muestra un dato de Genshin."
             ],
             [
                 "GENSHIN IMPACT · CÁLCULOS Y SIMULACIÓN",
-                f"{PREFIX}cv <CR> <CD> — calcula el valor crítico.",
-                f"{PREFIX}valorcritico <CR> <CD> — alias de cv.",
-                f"{PREFIX}daño <ATQ> <multiplicador%> <bono%> <CR> <CD> — estima daño normal, crítico y promedio.",
                 f"{PREFIX}reacciones <elemento> — muestra las reacciones de un elemento.",
                 f"{PREFIX}deseo — simulador de deseos con pity guardado.",
                 f"{PREFIX}pity — consulta el pity del simulador.",
@@ -7382,10 +7366,17 @@ async def handle_command(event: dict, source: str):
             ],
             [
                 "SISTEMA Y KATHERINE",
-                f"{PREFIX}estado — estado, recursos y actividad.",
-                f"{PREFIX}diagnostico — alias de estado.",
-                f"{PREFIX}statsbot — alias de estado.",
+                f"{PREFIX}estado — panel general de Katherine.",
+                f"{PREFIX}diagnostico — comprueba API, SQLite y tareas internas.",
+                f"{PREFIX}estadisticas — métricas del proceso y solicitudes.",
+                f"{PREFIX}tareas — tareas, juegos y encuestas activas.",
+                f"{PREFIX}cache — estado de la caché de Genshin.",
+                f"{PREFIX}cache limpiar — vacía la caché temporal.",
+                f"{PREFIX}conexiones — prueba los tokens y conexiones configurados.",
+                f"{PREFIX}configbot — muestra configuración segura del bot.",
+                f"{PREFIX}version — versión de código y despliegue.",
                 f"{PREFIX}ping — comprueba la conexión.",
+                f"{PREFIX}latencia — mide la respuesta de Anarchy.",
                 f"{PREFIX}memoria — uso de RAM y CPU.",
                 f"{PREFIX}uptime — tiempo activa.",
                 f"{PREFIX}fecha — fecha y hora de Chile.",
@@ -7729,84 +7720,6 @@ async def handle_command(event: dict, source: str):
         return
 
     # -----------------------------------------------------------------------
-    # GENSHIN IMPACT: COMPARAR PERSONAJES
-    # -----------------------------------------------------------------------
-    if command == "!comparar":
-        parts = [x.strip() for x in query.split("|") if x.strip()]
-
-        if len(parts) != 2:
-            await send_message(
-                thread,
-                "Uso: !comparar personaje 1 | personaje 2",
-                source,
-                reply
-            )
-            return
-
-        results = await asyncio.gather(
-            get_character(parts[0]),
-            get_character(parts[1]),
-            character_stats(parts[0]),
-            character_stats(parts[1])
-        )
-
-        a, b, sa, sb = results
-
-        if not isinstance(a, dict) or not isinstance(b, dict):
-            await send_message(
-                thread,
-                "No pude encontrar ambos personajes. Revisa los nombres.",
-                source,
-                reply
-            )
-            return
-
-        la, lb = get_level90(sa), get_level90(sb)
-
-        if not isinstance(la, dict) or not isinstance(lb, dict):
-            await send_message(
-                thread,
-                "No pude obtener las estadísticas de ambos personajes.",
-                source,
-                reply
-            )
-            return
-
-        lines = [
-            f"COMPARACIÓN — {a.get('name', parts[0])} / {b.get('name', parts[1])}"
-        ]
-
-        for key, label in (
-            ("hp", "Vida"),
-            ("attack", "ATQ"),
-            ("defense", "DEF")
-        ):
-            lines.append(
-                f"{label}: {format_number(la.get(key))} / {format_number(lb.get(key))}"
-            )
-
-        lines.append(
-            f"Rareza: {a.get('rarity', '?')}★ / {b.get('rarity', '?')}★"
-        )
-        lines.append(
-            f"Elemento: {a.get('elementText', '?')} / {b.get('elementText', '?')}"
-        )
-        lines.append(
-            "Valores base a nivel 90; no incluyen arma, artefactos ni bonificaciones."
-        )
-
-        await send_message(
-            thread,
-            "\n".join(lines),
-            source,
-            reply
-        )
-        return
-
-    # -----------------------------------------------------------------------
-    # GENSHIN IMPACT: CALCULADORA
-    # -----------------------------------------------------------------------
-    # -----------------------------------------------------------------------
     # GUÍAS, ESTADÍSTICAS Y BÚSQUEDA AMPLIADA DE GENSHIN
     # -----------------------------------------------------------------------
     if command == "!guia":
@@ -7923,71 +7836,6 @@ async def handle_command(event: dict, source: str):
             "Estas recomendaciones son orientativas, no una simulación de daño."
         )
         await send_message(thread, "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n".join(sections), source, reply)
-        return
-
-    if command in ("!cv", "!valorcritico"):
-        if len(args) != 2:
-            await send_message(thread, f"Uso: {PREFIX}cv 75 160", source, reply)
-            return
-        try:
-            cr, cd = parse_percent(args[0]), parse_percent(args[1])
-            if not 0 <= cr <= 100 or not 0 <= cd <= 500:
-                raise ValueError
-        except ValueError:
-            await send_message(thread, "Usa Prob. CRIT entre 0-100 y Daño CRIT entre 0-500.", source, reply)
-            return
-        await send_message(
-            thread,
-            f"VALOR CRÍTICO\nProb. CRIT: {cr:g}% · Daño CRIT: {cd:g}%\n"
-            f"CV = 2 × {cr:g} + {cd:g} = {2*cr+cd:.1f}",
-            source,
-            reply
-        )
-        return
-
-    if command == "!daño":
-        if len(args) != 5:
-            await send_message(
-                thread,
-                f"Uso: {PREFIX}daño ATQ multiplicador% bono% CR CD\n"
-                f"Ejemplo: {PREFIX}daño 1800 250 46 75 160",
-                source,
-                reply
-            )
-            return
-        try:
-            attack, multiplier, bonus, cr, cd = [parse_percent(x) for x in args]
-            if not (
-                attack > 0
-                and 0 <= multiplier <= 5000
-                and 0 <= bonus <= 1000
-                and 0 <= cr <= 100
-                and 0 <= cd <= 500
-            ):
-                raise ValueError
-        except ValueError:
-            await send_message(
-                thread,
-                "Valores inválidos. Revisa ATQ, multiplicador, bono, Prob. CRIT y Daño CRIT.",
-                source,
-                reply
-            )
-            return
-
-        raw_hit = attack * (multiplier / 100)
-        boosted_hit = raw_hit * (1 + bonus / 100)
-        critical_hit = boosted_hit * (1 + cd / 100)
-        average_hit = boosted_hit * (1 + (cr / 100) * (cd / 100))
-        await send_message(
-            thread,
-            "CALCULADORA DE DAÑO — ESTIMACIÓN\n"
-            f"Daño sin crítico: {format_number(boosted_hit)}\n"
-            f"Golpe crítico: {format_number(critical_hit)}\n"
-            f"Daño medio esperado: {format_number(average_hit)}\n"
-            "No aplica DEF, RES, reacción, reducción, buffs externos ni redondeos del juego.",
-            source,
-            reply
-        )
         return
 
     if command == "!reacciones":
@@ -8179,21 +8027,9 @@ async def handle_command(event: dict, source: str):
     # CONSULTAS DE OBJETOS DE GENSHIN
     # -----------------------------------------------------------------------
     object_commands = {
-        "!arma": "weapons",
-        "!artefacto": "artifacts",
-        "!dominio": "domains",
         "!enemigo": "enemies",
-        "!comida": "foods",
-        "!material": "materials",
-        "!talento": "talents",
-        "!animal": "animals",
-        "!tarjeta": "namecards",
-        "!atuendo": "outfits",
-        "!planeador": "windgliders",
-        "!fabricacion": "crafts",
         "!geografia": "geographies",
-        "!elemento": "elements",
-        "!rangoaventura": "adventureranks"
+        "!elemento": "elements"
     }
 
     if command in object_commands:
@@ -8686,9 +8522,194 @@ async def handle_command(event: dict, source: str):
     # -----------------------------------------------------------------------
     # SISTEMA Y ESTADO DEL BOT
     # -----------------------------------------------------------------------
-    if command in ("!estado", "!diagnostico", "!statsbot"):
+    if command in ("!estado", "!statsbot"):
         answer = await build_status_message(source, nickname)
         await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!diagnostico":
+        started_check = time.perf_counter()
+        api_result = await api("GET", "/me", source)
+        api_elapsed = (time.perf_counter() - started_check) * 1000
+
+        checks = []
+        checks.append((
+            "Token del bot",
+            "OK" if token_for(source) else "FALTA"
+        ))
+        checks.append((
+            "Cliente HTTP",
+            "OK" if HTTP_CLIENT is not None and not HTTP_CLIENT.is_closed else "NO DISPONIBLE"
+        ))
+        checks.append((
+            "API Anarchy",
+            f"OK · HTTP {api_result.get('status')} · {api_elapsed:.0f} ms"
+            if api_result.get("ok") else f"ERROR · HTTP {api_result.get('status')}"
+        ))
+
+        try:
+            with db_session() as db:
+                db.execute("SELECT 1").fetchone()
+                profile_count = int(
+                    db.execute("SELECT COUNT(*) AS total FROM users").fetchone()["total"]
+                )
+            checks.append(("Base SQLite", f"OK · {profile_count} perfiles"))
+        except (sqlite3.Error, OSError) as exc:
+            logging.exception("Diagnóstico SQLite fallido")
+            checks.append(("Base SQLite", f"ERROR · {type(exc).__name__}"))
+
+        cleanup_ok = CLEANUP_TASK is not None and not CLEANUP_TASK.done()
+        checks.append((
+            "Limpieza automática",
+            "OK · activa" if cleanup_ok else "REVISAR · tarea no activa"
+        ))
+        checks.append((
+            "Directorio de datos",
+            "OK · accesible" if DATA_DIR.exists() and os.access(DATA_DIR, os.W_OK)
+            else "REVISAR · no escribible"
+        ))
+
+        failed = sum(
+            1 for _, result in checks
+            if result.startswith(("ERROR", "FALTA", "NO DISPONIBLE", "REVISAR"))
+        )
+        overall = "OPERATIVO" if failed == 0 else f"ATENCIÓN · {failed} revisión(es)"
+        answer = (
+            f"DIAGNÓSTICO DE KATHERINE · {overall}\n"
+            + "\n".join(
+                f"{'🟢' if not result.startswith(('ERROR', 'FALTA', 'NO DISPONIBLE', 'REVISAR')) else '🟠'} "
+                f"{label}: {result}"
+                for label, result in checks
+            )
+            + f"\n\nTareas de eventos activas: {len(background_tasks)}"
+        )
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!version":
+        commit = (
+            os.getenv("RENDER_GIT_COMMIT")
+            or os.getenv("GIT_COMMIT")
+            or os.getenv("SOURCE_VERSION")
+            or ""
+        )
+        branch = os.getenv("RENDER_GIT_BRANCH") or "No informada"
+        commit_label = commit[:8] if commit else "No informado por el entorno"
+        await send_message(
+            thread,
+            "KATHERINE · INFORMACIÓN DE VERSIÓN\n"
+            "Implementación: Python + FastAPI\n"
+            f"Python: {sys.version.split()[0]}\n"
+            f"Rama: {branch}\n"
+            f"Commit: {commit_label}\n"
+            f"PID: {os.getpid()}",
+            source,
+            reply
+        )
+        return
+
+    if command == "!estadisticas":
+        requests = int(metrics["api_requests"])
+        average = (
+            metrics["api_latency_total_ms"] / requests
+            if requests else 0
+        )
+        errors = int(metrics["api_errors"])
+        error_rate = (errors / requests * 100) if requests else 0
+        answer = (
+            "ESTADÍSTICAS DE KATHERINE · PROCESO ACTUAL\n"
+            f"Webhooks aceptados: {metrics['webhook_events']}\n"
+            f"Mensajes recibidos: {metrics['text_messages_received']}\n"
+            f"Comandos recibidos: {metrics['commands_received']}\n"
+            f"Respuestas enviadas: {metrics['messages_sent']}\n"
+            f"Interacciones recibidas: {metrics['interactions_received']}\n"
+            f"Solicitudes a Anarchy: {requests}\n"
+            f"Errores de API: {errors} ({error_rate:.1f}%)\n"
+            f"Latencia media: {average:.1f} ms\n"
+            f"Última latencia: {metrics['api_latency_last_ms']:.1f} ms\n"
+            f"Latencia máxima: {metrics['api_latency_max_ms']:.1f} ms\n"
+            f"Último comando: {LAST_COMMAND_NAME or 'Ninguno'}"
+        )
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!tareas":
+        cleanup_state = (
+            "activa" if CLEANUP_TASK is not None and not CLEANUP_TASK.done()
+            else "inactiva"
+        )
+        active_background = sum(1 for task in background_tasks if not task.done())
+        answer = (
+            "KATHERINE · TAREAS Y ESTADOS TEMPORALES\n"
+            f"Procesamientos en segundo plano: {active_background}\n"
+            f"Tarea de limpieza: {cleanup_state}\n"
+            f"Trivias activas: {len(trivia)}\n"
+            f"Juegos de números activos: {len(number_games)}\n"
+            f"Encuestas activas: {len(polls)}\n"
+            f"Mapeos de botones: {len(poll_button_map)}\n"
+            f"Colas de envío por chat: {len(send_history_chat)}\n"
+            f"Eventos recientes deduplicados: {len(seen_events)}"
+        )
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command in ("!cache", "!limpiarcache"):
+        if query.casefold() in ("limpiar", "borrar", "clear", "vaciar") or command == "!limpiarcache":
+            removed = len(cache)
+            cache.clear()
+            answer = f"Caché temporal de Genshin vaciada. Entradas eliminadas: {removed}."
+        else:
+            now = time.time()
+            valid = sum(
+                1 for value in cache.values()
+                if isinstance(value, tuple) and len(value) >= 2 and value[0] > now
+            )
+            expired = max(0, len(cache) - valid)
+            answer = (
+                "KATHERINE · CACHÉ TEMPORAL\n"
+                f"Entradas totales: {len(cache)}\n"
+                f"Vigentes: {valid}\n"
+                f"Caducadas pendientes de limpieza: {expired}\n"
+                "Duración habitual de las consultas: hasta 6 horas.\n"
+                f"Para vaciarla: {PREFIX}cache limpiar"
+            )
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!conexiones":
+        connection_lines = ["KATHERINE · ESTADO DE CONEXIONES"]
+        configured = 0
+        for source_name, label in (("developer", "Bot principal"), ("community", "Bot de comunidad")):
+            if not token_for(source_name):
+                connection_lines.append(f"⚪ {label}: token no configurado")
+                continue
+            configured += 1
+            result = await api("GET", "/me", source_name)
+            state = "🟢 Conectado" if result.get("ok") else "🔴 Error"
+            connection_lines.append(
+                f"{state} · {label}: HTTP {result.get('status', '?')}"
+            )
+        if configured == 0:
+            connection_lines.append("No hay tokens configurados.")
+        await send_message(thread, "\n".join(connection_lines), source, reply)
+        return
+
+    if command == "!configbot":
+        data_dir_env = os.getenv("DATA_DIR")
+        config_lines = [
+            "KATHERINE · CONFIGURACIÓN SEGURA",
+            f"Prefijo configurado: {PREFIX}",
+            f"Origen de este mensaje: {'Comunidad' if source == 'community' else 'Desarrollador'}",
+            f"Token principal: {'configurado' if BOT_TOKEN else 'ausente'}",
+            f"Webhook principal: {'configurado' if WEBHOOK_SECRET else 'ausente'}",
+            f"Token comunidad: {'configurado' if COMMUNITY_TOKEN else 'ausente'}",
+            f"Webhook comunidad: {'configurado' if COMMUNITY_SECRET else 'ausente'}",
+            f"DATA_DIR: {'configurado' if data_dir_env else 'ruta local por defecto'}",
+            f"Carpeta de datos accesible: {'sí' if DATA_DIR.exists() and os.access(DATA_DIR, os.W_OK) else 'no'}",
+            f"Cliente HTTP: {'activo' if HTTP_CLIENT is not None and not HTTP_CLIENT.is_closed else 'inactivo'}",
+            "Los valores secretos nunca se muestran."
+        ]
+        await send_message(thread, "\n".join(config_lines), source, reply)
         return
 
     if command == "!ping":
