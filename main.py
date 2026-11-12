@@ -12590,18 +12590,21 @@ async def handle_command(event: dict, source: str):
             if not is_admin_uid(admin_uid):
                 await send_message(thread, "Solo un administrador puede probar la conexión de IA.", source, reply)
                 return
+            provider = AI_CORE.provider_name
             try:
                 await AI_CORE.test_connection(external_request, rate_key=session_key)
-                answer = f"Conexión con OpenAI verificada. Modelo: {AI_CORE.model}."
+                answer = f"Conexión con {provider} verificada. Modelo: {AI_CORE.model}."
             except Exception as exc:
-                logging.warning("[AI] Prueba de conexión fallida: %s", type(exc).__name__)
-                detail = str(exc)
+                detail = str(exc)[:360]
+                logging.warning("[AI] Prueba fallida | proveedor=%s | motivo=%s", provider, detail)
                 if "HTTP 401" in detail or "HTTP 403" in detail:
-                    answer = "OpenAI rechazó la credencial (HTTP 401/403). Revisa la API Key y los permisos del proyecto."
+                    answer = f"{provider} rechazó la credencial (HTTP 401/403). Comprueba que la clave corresponda a ese proveedor y que tenga permisos para el modelo."
                 elif "HTTP 429" in detail:
-                    answer = "OpenAI respondió HTTP 429: revisa los límites, créditos y facturación del proyecto."
+                    answer = f"{provider} respondió HTTP 429. Comprueba cuota, facturación y límites del proyecto. Detalle: {detail}"
+                elif "HTTP 400" in detail:
+                    answer = f"{provider} rechazó el formato de la solicitud (HTTP 400). Comprueba el modelo y sus funciones compatibles. Detalle: {detail}"
                 else:
-                    answer = "No se pudo verificar la conexión con OpenAI. Revisa la configuración y los registros de Render."
+                    answer = f"No se pudo verificar la conexión con {provider}. Detalle: {detail or type(exc).__name__}"
             await send_message(thread, "ASTRA INTELLIGENCE · PRUEBA\n" + answer, source, reply)
             return
         if sub in ("olvidar", "forget"):
