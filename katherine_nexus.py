@@ -10,6 +10,35 @@ def _normalize(value: str) -> str:
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
     return re.sub(r"\s+", " ", text).strip().strip("¿?¡!.,;: ")
 
+COMMAND_ALIASES = {
+    "!buscar": ("!dj", ("buscar",)),
+    "!guardian": ("!admin", ()),
+}
+
+
+def parse_command_invocation(
+    content: str, used_prefix: str
+) -> tuple[str, list[str]] | None:
+    """Parse one prefixed command and canonicalize aliases in a single pass."""
+    text = str(content or "").strip()
+    prefix = str(used_prefix or "")
+    if not text or not prefix:
+        return None
+
+    parts = text.split()
+    token = parts[0]
+    if not token.startswith(prefix) or len(token) <= len(prefix):
+        return None
+
+    command = "!" + token[len(prefix):].casefold()
+    args = parts[1:]
+    alias = COMMAND_ALIASES.get(command)
+    if alias:
+        command, prepended_args = alias
+        args = [*prepended_args, *args]
+    return command, args
+
+
 def interpret_natural_request(value: str) -> str | None:
     """Route only high-confidence Spanish requests to existing commands."""
     raw = re.sub(r"\s+", " ", str(value or "")).strip()
@@ -27,7 +56,8 @@ def interpret_natural_request(value: str) -> str | None:
     text = _normalize(raw)
     text = re.sub(r"\s+(?:por favor|porfa)$", "", text).strip()
     if not text:
-        return "ayuda"
+        # Mencionar solo el nombre (o "Oye Katherine") no abre menús ni responde.
+        return None
     patterns = (
         (r"^(?:abre|abrir|muestra|mostrar) (?:el )?(?:menu|panel)(?: interactivo)?$", "menu"),
         (r"^(?:ayuda|que puedes hacer|que sabes hacer|comandos disponibles)$", "ayuda"),
