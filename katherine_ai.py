@@ -55,7 +55,7 @@ ACTION_SCHEMA = {
             "maxItems": 3,
         },
     },
-    "required": ["kind", "answer", "command", "args"],
+    "required": ["kind", "answer", "command", "args", "steps"],
 }
 
 def resolve_community_faq(question: str) -> str | None:
