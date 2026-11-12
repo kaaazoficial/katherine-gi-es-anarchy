@@ -15,13 +15,33 @@ def interpret_natural_request(value: str) -> str | None:
     raw = re.sub(r"\s+", " ", str(value or "")).strip()
     if not raw or len(raw) > 500 or raw.startswith(("!", "-")):
         return None
+    # Procesar lenguaje natural únicamente cuando el usuario invoque a Katherine.
+    addressed = re.match(
+        r"^(?:oye[, ]+)?katherine(?:[, :]+|$)\s*(.*)$",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if not addressed:
+        return None
+    raw = addressed.group(1).strip()
     text = _normalize(raw)
-    text = re.sub(r"^(?:por favor\s+)?(?:katherine[, ]+)", "", text)
     text = re.sub(r"\s+(?:por favor|porfa)$", "", text).strip()
     if not text:
-        return None
+        return "ayuda"
     patterns = (
         (r"^(?:abre|abrir|muestra|mostrar) (?:el )?(?:menu|panel)(?: interactivo)?$", "menu"),
+        (r"^(?:ayuda|que puedes hacer|que sabes hacer|comandos disponibles)$", "ayuda"),
+        (r"^(?:revisa|consulta|muestra) (?:el )?(?:estado|salud|diagnostico)(?: del bot| de katherine)?$", "estado"),
+        (r"^(?:abre|muestra|consulta) (?:el )?(?:panel de administracion|guardian)$", "guardian"),
+        (r"^(?:dime|cuentame) (?:un )?chiste$", "chiste"),
+        (r"^(?:dame|di) (?:una )?frase$", "frase"),
+        (r"^(?:lanza|tira) (?:un )?dado$", "dado"),
+        (r"^(?:lanza|tira) (?:una )?moneda$", "moneda"),
+        (r"^(?:consulta|muestra|dime) (?:mis )?puntos$", "puntos"),
+        (r"^(?:muestra|abre|consulta) (?:el )?ranking$", "ranking"),
+        (r"^(?:muestra|consulta) (?:mi )?perfil$", "perfil"),
+        (r"^(?:dime|consulta) (?:la )?fecha$", "fecha"),
+
         (r"^(?:abre|abrir|muestra|mostrar) (?:el )?centro(?: de control)?$", "centro"),
         (r"^(?:como esta|estado de|diagnostico de) katherine$", "estado"),
         (r"^(?:diagnostica) katherine$", "estado"),
@@ -55,7 +75,12 @@ def interpret_natural_request(value: str) -> str | None:
         (r"^(?:que materiales necesita|materiales para|materiales de) (.+)$", "materiales"),
         (r"^(?:que cobertura tiene|cobertura de|apartados de la guia de) (.+)$", "cobertura"),
         (r"^(?:busca en genshin|busqueda de genshin|busca genshin) (.+)$", "buscargenshin"),
+        (r"^(?:haz un roast a|roast a|insulta amistosamente a) (.+)$", "roast"),
+        (r"^(?:crea|haz) (?:una )?encuesta (?:sobre )?(.+)$", "encuesta"),
+        (r"^(?:consulta|abre|busca en)?\s*(?:la )?enciclopedia(?: de genshin)? (?:sobre |de |del )?(.+)$", "enciclopedia"),
+        (r"^(?:quien es|que es|que sabes de) (.+)$", "enciclopedia"),
         (r"^(?:reproduce|pon|busca musica de|busca la cancion) (.+)$", "dj buscar"),
+        (r"^(?:recomiendame|ponme) musica (?:para|de) (.+)$", "dj ambiente"),
         (r"^(?:busca imagenes? de|imagenes? de) (.+)$", "imagen"),
         (r"^(?:busca videos? de|videos? de) (.+)$", "video"),
         (r"^(?:busca audios? de|audios? de) (.+)$", "audio"),
@@ -76,7 +101,9 @@ def interpret_natural_request(value: str) -> str | None:
         payload = translation.group(2).strip()
         if payload:
             return f"traducir {language} | {payload}"
-    return None
+    # Una invocación explícita siempre recibe una respuesta, incluso si la
+    # solicitud todavía no tiene una acción específica registrada.
+    return f"asistente {raw[:300]}"
 
 def extract_message_id(payload: Any) -> str | None:
     """Extract message ids from common POST response envelopes."""
@@ -95,6 +122,8 @@ def extract_message_id(payload: Any) -> str | None:
                     value = nested.get("id")
                     if isinstance(value, (str, int)) and str(value).strip():
                         return str(value)
+    # Una invocación explícita siempre obtiene respuesta. Si no existe una
+    # intención segura conocida, el núcleo devuelve sus capacidades disponibles.
     return None
 
 def cleanup_community_events(events: dict, now: float | None = None) -> int:

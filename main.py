@@ -58,6 +58,10 @@ from katherine_nexus import (
     interpret_natural_request,
     toggle_community_participant,
 )
+from katherine_astra import (
+    is_recoverable_dj_failure,
+    resolve_music_mood,
+)
 
 # ---------------------------------------------------------------------------
 # CONFIGURACION
@@ -447,6 +451,57 @@ def delete_dj_playlist(thread_id: str, playlist_name: str) -> bool:
         return True
 
 
+
+
+def save_dj_favorite(thread_id: str, uid: str, track: dict) -> bool:
+    """Keep favorites in memory only; they expire after 24 hours or a restart."""
+    url = str(track.get("url") or "").strip()
+    if not url or not dj_audio_url_allowed(url):
+        return False
+    key = (str(thread_id), str(uid))
+    now = time.time()
+    favorites = [
+        item for item in DJ_FAVORITES.get(key, [])
+        if float(item.get("expires", 0)) > now
+    ]
+    if any(item.get("url") == url for item in favorites):
+        DJ_FAVORITES[key] = favorites
+        return False
+    next_id = max((int(item.get("id", 0)) for item in favorites), default=0) + 1
+    favorite = {
+        "id": next_id,
+        "title": str(track.get("title") or "Pista")[:160],
+        "url": url,
+        "creator": str(track.get("creator") or "")[:120],
+        "license": str(track.get("license") or "")[:100],
+        "source": str(track.get("source") or "")[:80],
+        "extension": str(track.get("extension") or ".mp3")[:8],
+        "expires": now + DJ_FAVORITES_TTL,
+    }
+    favorites.append(favorite)
+    DJ_FAVORITES[key] = favorites[-50:]
+    return True
+
+
+def list_dj_favorites(thread_id: str, uid: str, limit: int = 20) -> list[dict]:
+    key = (str(thread_id), str(uid))
+    now = time.time()
+    favorites = [
+        item for item in DJ_FAVORITES.get(key, [])
+        if float(item.get("expires", 0)) > now
+    ]
+    DJ_FAVORITES[key] = favorites
+    return [dict(item) for item in reversed(favorites[-max(1, min(50, int(limit))):])]
+
+
+def delete_dj_favorite(thread_id: str, uid: str, favorite_id: int) -> bool:
+    key = (str(thread_id), str(uid))
+    favorites = DJ_FAVORITES.get(key, [])
+    updated = [item for item in favorites if int(item.get("id", -1)) != int(favorite_id)]
+    DJ_FAVORITES[key] = updated
+    return len(updated) != len(favorites)
+
+
 def anti_spam_configuration(thread_id: str) -> dict:
     def bounded(key, default, minimum, maximum):
         try:
@@ -457,7 +512,9 @@ def anti_spam_configuration(thread_id: str) -> dict:
         "enabled": get_chat_setting(thread_id, "antispam_enabled", "1") == "1",
         "max_messages": bounded("antispam_max_messages", 7, 3, 20),
         "window_seconds": bounded("antispam_window_seconds", 8, 3, 60),
-        "repeat_limit": bounded("antispam_repeat_limit", 3, 2, 10)
+        "repeat_limit": bounded("antispam_repeat_limit", 3, 2, 10),
+        "max_links": bounded("antispam_max_links", 4, 2, 12),
+        "max_mentions": bounded("antispam_max_mentions", 8, 3, 20)
     }
 
 
@@ -538,8 +595,16 @@ def check_antispam_message(event: dict, source: str):
     digest = hashlib.sha256(content.encode("utf-8", errors="ignore")).hexdigest()
     activity.append((now, digest))
     repeated = sum(1 for _, item_digest in activity if item_digest == digest)
-    flooded = len(activity) >= config["max_messages"] or repeated >= config["repeat_limit"]
-    if not flooded:
+    link_count = len(re.findall(r"(?:https?://|www\.)\S+", content, flags=re.I))
+    mention_count = len(message.get("mentions") or [])
+    reason = ""
+    if link_count > config["max_links"]:
+        reason = f"Exceso de enlaces en un mensaje ({link_count})."
+    elif mention_count > config["max_mentions"]:
+        reason = f"Menciones masivas en un mensaje ({mention_count})."
+    elif len(activity) >= config["max_messages"] or repeated >= config["repeat_limit"]:
+        reason = "Antispam automático: demasiados mensajes o contenido repetido."
+    if not reason:
         return False, None
 
     warn_key = f"{thread_id}:{uid}"
@@ -549,7 +614,7 @@ def check_antispam_message(event: dict, source: str):
     target_uid = scoped_uid(f"developer:{thread_id}", uid)
     warning_id = add_moderation_warning(
         thread_id, target_uid, nickname, "Katherine", "Katherine",
-        "Antispam automático: demasiados mensajes o contenido repetido.",
+        reason,
         automatic=True
     )
     metrics["antispam_blocked"] += 1
@@ -751,6 +816,9 @@ USER_SPAM_WARNED_UNTIL = {}
 DJ_MUSIC_DIR = Path(os.getenv("DJ_MUSIC_DIR", "music")).resolve()
 DJ_AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".oga", ".flac", ".m4a", ".aac", ".opus"}
 DJ_SEARCH_RESULTS: dict[str, dict] = {}
+DJ_FAVORITES: dict[tuple[str, str], list[dict]] = {}
+DJ_FAVORITES_TTL = 86400
+
 DJ_ARCHIVE_CACHE: dict[str, dict] = {}
 DJ_SOURCE_CACHE: dict[str, dict] = {}
 JAMENDO_CLIENT_ID = os.getenv("JAMENDO_CLIENT_ID", "").strip()
@@ -1078,6 +1146,8 @@ async def build_status_message(source: str, nickname: str, thread_id: str | None
         f"• Fuentes con fallos registrados: {sum(1 for item in SOURCE_HEALTH.values() if item.get('failures', 0) and not item.get('last_success_at'))}",
         f"• Solicitudes externas: {sum(item.get('requests', 0) for item in SOURCE_HEALTH.values())}",
         f"• Errores externos: {sum(item.get('failures', 0) for item in SOURCE_HEALTH.values())}",
+        f"• Circuit breakers activos: {sum(1 for item in SOURCE_HEALTH.values() if item.get('circuit_open_until', 0) > time.time())}",
+        f"• Consultas omitidas por circuito: {metrics['external_circuit_open']}",
         "",
         "🌐 API Y RENDIMIENTO",
         f"• Solicitudes API: {metrics['api_requests']}",
@@ -1089,6 +1159,9 @@ async def build_status_message(source: str, nickname: str, thread_id: str | None
         "💾 DATOS",
         f"• SQLite: {db_line}",
         f"• Caché Genshin: {len(cache)} entradas",
+        f"• DJ: {metrics['dj_tracks_started']} pistas iniciadas · {metrics['dj_fallback_tracks_started']} alternativas automáticas",
+        f"• DJ: {metrics['dj_fallback_tracks_skipped']} pistas inválidas omitidas · {metrics['dj_playback_retries']} reintentos",
+        f"• TTS: {metrics['tts_priority_enqueued']} prioritarios · {metrics['tts_regular_enqueued']} normales · {metrics['tts_duplicates_skipped']} duplicados omitidos",
         "",
         "🔐 CONFIGURACIÓN Y PROCESO",
         f"• Python: {sys.version.split()[0]} | PID: {os.getpid()}",
@@ -1136,6 +1209,15 @@ async def external_request(method: str, url: str, **kwargs):
     """HTTP compartido con concurrencia limitada, telemetría y reintentos seguros."""
     host_match = re.match(r"https?://([^/:]+)", str(url), flags=re.I)
     host = host_match.group(1).lower() if host_match else "unknown"
+    host_state = SOURCE_HEALTH.setdefault(host, {
+        "requests": 0, "successes": 0, "failures": 0,
+        "last_status": None, "last_latency_ms": 0.0,
+        "last_success_at": None, "last_error": None,
+        "consecutive_failures": 0, "circuit_open_until": 0.0
+    })
+    if float(host_state.get("circuit_open_until", 0) or 0) > time.time():
+        metrics["external_circuit_open"] += 1
+        raise RuntimeError(f"Fuente {host} temporalmente aislada por fallos consecutivos.")
     host_semaphore = EXTERNAL_HOST_LIMITS.setdefault(host, asyncio.Semaphore(3))
     safe_retry = str(method).upper() in ("GET", "HEAD")
     attempts = 3 if safe_retry else 1
@@ -1166,10 +1248,19 @@ async def external_request(method: str, url: str, **kwargs):
                         state["successes"] += 1
                         state["last_success_at"] = time.time()
                         state["last_error"] = None
+                        state["consecutive_failures"] = 0
+                        state["circuit_open_until"] = 0.0
                         return response
 
                     state["failures"] += 1
                     state["last_error"] = f"HTTP {response.status_code}"
+                    if response.status_code in (429, 500, 502, 503, 504):
+                        state["consecutive_failures"] = int(state.get("consecutive_failures", 0)) + 1
+                        if state["consecutive_failures"] >= 6:
+                            state["circuit_open_until"] = time.time() + 30
+                            logging.warning("[NEXUS] Circuit breaker abierto para %s durante 30 s", host)
+                    else:
+                        state["consecutive_failures"] = 0
 
                     if (
                         safe_retry
@@ -1197,6 +1288,10 @@ async def external_request(method: str, url: str, **kwargs):
                     state["failures"] += 1
                     state["last_latency_ms"] = (time.perf_counter() - started) * 1000
                     state["last_error"] = type(exc).__name__
+                    state["consecutive_failures"] = int(state.get("consecutive_failures", 0)) + 1
+                    if state["consecutive_failures"] >= 6:
+                        state["circuit_open_until"] = time.time() + 30
+                        logging.warning("[NEXUS] Circuit breaker abierto para %s durante 30 s", host)
                     if not safe_retry or attempt + 1 >= attempts:
                         raise
                     await asyncio.sleep(0.35 * (attempt + 1))
@@ -2530,6 +2625,7 @@ async def ensure_voice_room(thread_id: str):
                 "task": None,
                 "speech_task": None,
                 "speech_queue": asyncio.Queue(maxsize=20),
+                "speech_priority_queue": asyncio.Queue(maxsize=5),
                 "reading_enabled": False,
                 "speaking": asyncio.Event(),
                 "filename": None,
@@ -2727,12 +2823,16 @@ async def speech_queue_worker(thread_id: str):
     state = DJ_ROOMS.get(str(thread_id))
     if not state or edge_tts is None:
         return
-    queue = state["speech_queue"]
     while not state["stop_event"].is_set():
+        queue = state.get("speech_priority_queue")
         try:
-            text_to_read = await asyncio.wait_for(queue.get(), timeout=1.0)
-        except asyncio.TimeoutError:
-            continue
+            text_to_read = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            queue = state["speech_queue"]
+            try:
+                text_to_read = await asyncio.wait_for(queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
 
         temp_path = None
         try:
@@ -2867,7 +2967,22 @@ async def enqueue_message_for_speech(event: dict, source: str):
     if len(speech_text) < 2:
         return
 
-    queue = state["speech_queue"]
+    speech_text = speech_text[:700]
+    digest = hashlib.sha256(speech_text.casefold().encode("utf-8")).hexdigest()
+    recent = state.setdefault("speech_recent", {})
+    now = time.time()
+    for old_digest, stamp in list(recent.items()):
+        if now - stamp > 15:
+            recent.pop(old_digest, None)
+    if digest in recent:
+        metrics["tts_duplicates_skipped"] += 1
+        return
+    recent[digest] = now
+    is_directed = bool(re.match(r"^(?:oye[, ]+)?katherine\b", content, flags=re.I))
+    queue = (
+        state.get("speech_priority_queue") or state["speech_queue"]
+        if is_directed else state["speech_queue"]
+    )
     if queue.full():
         try:
             queue.get_nowait()
@@ -2876,8 +2991,9 @@ async def enqueue_message_for_speech(event: dict, source: str):
             pass
     try:
         queue.put_nowait(speech_text)
+        metrics["tts_priority_enqueued" if is_directed else "tts_regular_enqueued"] += 1
     except asyncio.QueueFull:
-        logging.warning("[TTS] Cola llena; se omitió un mensaje en %s", thread_id)
+        logging.warning("[TTS] Cola %s llena; se omitió un mensaje en %s", "prioritaria" if is_directed else "normal", thread_id)
 
 
 async def download_dj_audio(url: str, file_extension: str | None = None) -> Path:
@@ -11981,7 +12097,8 @@ async def maybe_send_auto_reply(thread_id: str, uid: str, nickname: str, content
             AUTO_REPLY_USER_COOLDOWN[(str(thread_id), str(uid))] = now + 30
             metrics["auto_replies_sent"] += 1
             await send_message(thread_id, response, "developer")
-            return
+            return True
+    return False
 
 
 def format_poll_results(poll: dict) -> str:
@@ -12353,6 +12470,8 @@ async def handle_command(event: dict, source: str):
     if command == "!buscar":
         command = "!dj"
         args = ["buscar", *args]
+    if command == "!guardian":
+        command = "!admin"
 
     query = " ".join(args).strip()
     reply = message_id
@@ -12381,6 +12500,23 @@ async def handle_command(event: dict, source: str):
 
 
 
+    if command == "!asistente":
+        request_text = query.strip()
+        if request_text and await maybe_send_auto_reply(thread, raw_uid, nickname, request_text):
+            return
+        answer = (
+            f"Te escucho. Sobre «{request_text[:180]}», todavía no tengo una acción específica conectada.\\n"
+            "Puedo consultar la enciclopedia de Genshin, buscar y reproducir música, "
+            "controlar el DJ, entrar a la sala de voz, leer mensajes, revisar el estado "
+            "y abrir el panel de administración. Dime qué necesitas empezando por «Katherine»."
+            if request_text else
+            "Estoy lista. Puedes pedirme consultas o acciones empezando por «Katherine». "
+            "Por ejemplo: «Katherine, busca a Nahida en la enciclopedia», "
+            "«Katherine, pon música para estudiar» o «Katherine, pausa la música»."
+        )
+        await send_message(thread, answer, source, reply)
+        return
+
     if command in ("!centro", "!nexus"):
         await send_nexus_center(thread, source, raw_uid, nickname, reply)
         return
@@ -12395,7 +12531,7 @@ async def handle_command(event: dict, source: str):
         )
         return
 
-    if command in ("!admin", "!paneladmin"):
+    if command in ("!admin", "!paneladmin", "!guardian"):
         if not is_admin_uid(raw_uid):
             await send_message(thread, "No tienes permisos de administración.", source, reply)
             return
@@ -12528,6 +12664,7 @@ async def handle_command(event: dict, source: str):
     if command in ("!ayuda", "!comandos"):
         help_sections = [
             ("00 · INICIO RÁPIDO", [
+                "También puedes hablarle directamente: «Katherine, ...». Sin invocarla, no responde a conversación normal.",
                 f"{PREFIX}ayuda — abre este catálogo de comandos.",
                 f"{PREFIX}comandos — alias de ayuda.",
                 f"{PREFIX}miuid — muestra tu UID para configurar permisos.",
@@ -12542,6 +12679,7 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}jefes — lista de jefes reconocidos.",
                 f"{PREFIX}banner — banners con fuente oficial verificable.",
                 f"{PREFIX}calendario — eventos y fechas verificables.",
+                f"{PREFIX}enciclopedia <nombre> — consulta el archivo de Teyvat por categorías.",
                 f"{PREFIX}buscargenshin <texto> — busca personajes y objetos.",
                 f"{PREFIX}lista personajes|enemigos [página] — consulta listados.",
                 f"{PREFIX}enemigo <nombre> — ficha de enemigo o jefe.",
@@ -12635,6 +12773,9 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}tts menciones on/off — configura lectura de menciones.",
                 f"{PREFIX}volumenlectura / subirvolumenlectura / bajarvolumenlectura — controles rápidos TTS.",
                 f"{PREFIX}dj buscar <tema> — busca en Internet Archive, Commons y Jamendo.",
+                f"{PREFIX}dj ambiente <mood> — recomienda música para estudiar, trabajar, dormir, jugar o relajarse.",
+                f"{PREFIX}dj favorito lista/guardar <número>/reproducir <id>/quitar <id> — gestiona favoritos.",
+
                 f"{PREFIX}dj fuentes — muestra catálogos disponibles y su configuración.",
                 f"{PREFIX}buscar <tema> — alias de búsqueda musical.",
                 f"{PREFIX}dj <archivo.mp3> [bucle] — reproduce un archivo local.",
@@ -12642,6 +12783,8 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}dj añadir <archivo> — agrega una pista a la cola.",
                 f"{PREFIX}dj lista — muestra audios locales.",
                 f"{PREFIX}playlist crear/agregar/ver/reproducir/borrar — administra listas.",
+                "Las playlists aceptan archivos locales y favoritos remotos: agregar <nombre> | favorito:<id>.",
+
                 f"{PREFIX}volumen [0-100] — consulta o ajusta la música.",
                 f"{PREFIX}subirvolumen / bajarvolumen [cantidad] — cambia el volumen.",
                 f"{PREFIX}silencio — silencia la música.",
@@ -12656,6 +12799,9 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}economia — explica el sistema de puntos.",
                 f"{PREFIX}autotest — ejecuta pruebas internas.",
                 f"{PREFIX}admin — abre el panel de administración.",
+                f"{PREFIX}guardian — alias del panel de protección y moderación.",
+                f"{PREFIX}antispam enlaces <2-12> / menciones <3-20> — ajusta límites del Guardian.",
+
                 f"{PREFIX}advertir @usuario motivo — registra una advertencia.",
                 f"{PREFIX}advertencias @usuario — consulta advertencias.",
                 f"{PREFIX}quitaradvertencia <ID> — retira una advertencia.",
@@ -13535,6 +13681,59 @@ async def handle_command(event: dict, source: str):
     # -----------------------------------------------------------------------
     # EXPLORADOR DINÁMICO DE GENSHIN-DB
     # -----------------------------------------------------------------------
+    if command in ("!enciclopedia", "!archivo", "!teyvat"):
+        if not query:
+            await send_message(
+                thread,
+                """ENCICLOPEDIA DE TEYVAT
+Consulta personajes, armas, artefactos, enemigos, materiales, comida, dominios, regiones y elementos.
+Uso: !enciclopedia <nombre>""",
+                source,
+                reply
+            )
+            return
+        categories = [
+            ("Personajes", "characters"),
+            ("Armas", "weapons"),
+            ("Artefactos", "artifacts"),
+            ("Enemigos", "enemies"),
+            ("Materiales", "materials"),
+            ("Comida", "foods"),
+            ("Dominios", "domains"),
+            ("Geografía", "geographies"),
+            ("Elementos", "elements"),
+        ]
+        results = await asyncio.gather(
+            *(game_data(folder, query) for _, folder in categories),
+            return_exceptions=True
+        )
+        sections = []
+        for (label, folder), data in zip(categories, results):
+            if isinstance(data, Exception) or data is None:
+                continue
+            if isinstance(data, dict):
+                name = clean_game_text(data.get("name") or data.get("Name") or query)
+                if name.casefold() == query.casefold() or query.casefold() in name.casefold():
+                    detail = describe_game(data, query, folder)
+                    if detail and not detail.startswith("No encontré"):
+                        sections.append(f"【{label}】\\n{detail}")
+            elif isinstance(data, list) and data:
+                matches = [
+                    clean_game_text(item.get("name") if isinstance(item, dict) else item)
+                    for item in data[:8]
+                ]
+                if any(query.casefold() in item.casefold() for item in matches):
+                    sections.append(f"【{label}】\\n" + ", ".join(matches[:6]))
+        if sections:
+            answer = f"ARCHIVO DE TEYVAT · {query}\\n\\n" + "\\n\\n".join(sections[:5])
+        else:
+            answer = (
+                f"No encontré una ficha exacta de «{query}» en la enciclopedia. "
+                "Prueba con el nombre oficial, un alias o una consulta más específica."
+            )
+        await send_message(thread, answer, source, reply)
+        return
+
     if command == "!buscargenshin":
         if not query:
             await send_message(
@@ -14909,8 +15108,9 @@ async def handle_command(event: dict, source: str):
                     f"🛡️ Antispam: {'activado' if current['enabled'] else 'desactivado'}\n"
                     f"Límite: {current['max_messages']} mensajes / {current['window_seconds']} s\n"
                     f"Repeticiones: {current['repeat_limit']}\n"
-                    "Usa !antispam on/off, !antispam limite <3-20>, "
-                    "ventana <3-60>, repeticiones <2-10>.",
+                    f"Máximo de enlaces: {current['max_links']} · menciones: {current['max_mentions']}\n"
+                    "Usa !antispam on/off, limite <3-20>, ventana <3-60>, "
+                    "repeticiones <2-10>, enlaces <2-12>, menciones <3-20>.",
                     source, reply
                 )
                 return
@@ -14920,16 +15120,23 @@ async def handle_command(event: dict, source: str):
                 set_chat_setting(thread, "antispam_enabled", "1" if enabled else "0")
                 log_admin_action(thread, raw_uid, nickname, "antispam", "activado" if enabled else "desactivado")
                 answer = f"Antispam {'activado' if enabled else 'desactivado'}."
-            elif sub in ("limite", "ventana", "repeticiones") and len(args) > 1:
+            elif sub in ("limite", "ventana", "repeticiones", "enlaces", "menciones") and len(args) > 1:
                 try:
                     number = int(args[1])
-                    low, high = (3, 20) if sub == "limite" else ((3, 60) if sub == "ventana" else (2, 10))
+                    bounds = {
+                        "limite": (3, 20), "ventana": (3, 60),
+                        "repeticiones": (2, 10), "enlaces": (2, 12),
+                        "menciones": (3, 20)
+                    }
+                    low, high = bounds[sub]
                     if not low <= number <= high:
                         raise ValueError("rango")
                     key = {
                         "limite": "antispam_max_messages",
                         "ventana": "antispam_window_seconds",
-                        "repeticiones": "antispam_repeat_limit"
+                        "repeticiones": "antispam_repeat_limit",
+                        "enlaces": "antispam_max_links",
+                        "menciones": "antispam_max_mentions"
                     }[sub]
                     set_chat_setting(thread, key, str(number))
                     log_admin_action(thread, raw_uid, nickname, "antispam_config", f"{sub}={number}")
@@ -14937,7 +15144,7 @@ async def handle_command(event: dict, source: str):
                 except ValueError:
                     answer = "Valor fuera de rango."
             else:
-                answer = "Uso: !antispam on/off, limite <3-20>, ventana <3-60>, repeticiones <2-10>."
+                answer = "Uso: !antispam on/off, limite <3-20>, ventana <3-60>, repeticiones <2-10>, enlaces <2-12>, menciones <3-20>."
             await send_message(thread, answer, source, reply)
             return
 
@@ -15017,7 +15224,7 @@ async def handle_command(event: dict, source: str):
                 "• Internet Archive: búsqueda y validación de licencia automática.\n"
                 "• Wikimedia Commons: audio libre con licencia verificable.\n"
                 f"• Jamendo: {jamendo_status}; requiere Client ID gratuito.\n"
-                "Las búsquedas combinan los catálogos disponibles y mezclan sus resultados.",
+                "Las búsquedas combinan los catálogos disponibles, validan las pistas antes de reproducirlas y pueden usar recomendaciones por ambiente: estudiar, trabajar, relajarse, dormir, jugar, combate, triste o feliz.",
                 dj_source,
                 reply
             )
@@ -15038,6 +15245,61 @@ async def handle_command(event: dict, source: str):
             )
             return
 
+        if args[0].lower() in ("favorito", "favoritos"):
+            sub = args[1].lower() if len(args) > 1 else "lista"
+            if sub in ("lista", "listar"):
+                favorites = list_dj_favorites(thread, raw_uid)
+                if not favorites:
+                    await send_message(thread, "Todavía no tienes canciones favoritas en esta sala.", dj_source, reply)
+                    return
+                listing = "\\n".join(
+                    f"{item['id']}. {item['title']} — {item['creator']} ({item['source']})"
+                    for item in favorites
+                )
+                await send_message(thread, "DJ · FAVORITOS\\n" + listing, dj_source, reply)
+                return
+            if sub in ("guardar", "agregar", "añadir"):
+                try:
+                    index = int(args[2]) - 1
+                    track = (DJ_SEARCH_RESULTS.get(thread) or {}).get("tracks", [])[index]
+                except (ValueError, IndexError):
+                    await send_message(thread, "Primero busca música con !dj buscar y elige un número válido.", dj_source, reply)
+                    return
+                saved = save_dj_favorite(thread, raw_uid, track)
+                await send_message(thread, "⭐ Canción guardada en favoritos." if saved else "No se pudo guardar; quizá ya existe.", dj_source, reply)
+                return
+            if sub in ("quitar", "eliminar", "borrar") and len(args) > 2:
+                try:
+                    favorite_id = int(args[2])
+                except ValueError:
+                    favorite_id = -1
+                removed = delete_dj_favorite(thread, raw_uid, favorite_id)
+                await send_message(thread, "Favorito eliminado." if removed else "No encontré ese favorito.", dj_source, reply)
+                return
+            if sub in ("reproducir", "play") and len(args) > 2:
+                try:
+                    favorite_id = int(args[2])
+                except ValueError:
+                    favorite_id = -1
+                favorite = next((item for item in list_dj_favorites(thread, raw_uid, 50) if item["id"] == favorite_id), None)
+                if not favorite:
+                    await send_message(thread, "No encontré ese favorito.", dj_source, reply)
+                    return
+                metadata = {
+                    "title": favorite["title"], "creator": favorite["creator"],
+                    "license": favorite["license"], "source": favorite["source"],
+                    "extension": favorite["extension"], "url": favorite["url"]
+                }
+                ok, message = await start_dj_room(thread, favorite["url"], False, track_metadata=metadata)
+                await send_message(thread, f"🎧 {message}" if ok else f"DJ: {message}", dj_source, reply)
+                return
+            await send_message(thread, "Usa !dj favorito lista, guardar <número>, reproducir <id> o quitar <id>.", dj_source, reply)
+            return
+
+        if args[0].lower() in ("ambiente", "mood", "recomendar"):
+            mood = " ".join(args[1:]).strip().casefold()
+            search_term = resolve_music_mood(mood)
+            args = ["buscar", search_term]
         if args[0].lower() in ("buscar", "search"):
             search_term = " ".join(args[1:]).strip()
             if not search_term:
@@ -15195,6 +15457,40 @@ async def handle_command(event: dict, source: str):
 # ---------------------------------------------------------------------------
 # INTERACCIONES DE BOTONES: ENCUESTAS, MENÚS, JUEGOS Y ACCIONES
 # ---------------------------------------------------------------------------
+async def start_dj_search_with_fallback(
+    thread_id: str, tracks: list[dict], selected_index: int = 0
+) -> tuple[bool, str, dict | None, int | None]:
+    """Try the selected track and later search results if a file cannot be validated."""
+    if not tracks:
+        return False, "No hay pistas disponibles.", None, None
+    start = max(0, min(len(tracks) - 1, int(selected_index)))
+    last_error = "No pude preparar ninguna pista."
+    candidate_order = list(range(start, len(tracks))) + list(range(0, start))
+    for index in candidate_order:
+        track = tracks[index]
+        ok, message = await start_dj_room(
+            thread_id,
+            track["url"],
+            looping=False,
+            track_metadata=track
+        )
+        if ok:
+            if index != start:
+                metrics["dj_fallback_tracks_started"] += 1
+                logging.info(
+                    "[DJ] Pista alternativa %s iniciada tras fallo de validación en sala %s",
+                    index + 1, thread_id
+                )
+                message = f"La pista seleccionada no se pudo validar; inicié «{track.get('title', 'otra pista')}» como alternativa."
+            return True, message, track, index
+        last_error = message
+        recoverable = is_recoverable_dj_failure(message)
+        if not recoverable:
+            break
+        metrics["dj_fallback_tracks_skipped"] += 1
+    return False, last_error, None, None
+
+
 async def handle_interaction(event: dict, source: str):
     button_id = str(event.get("buttonId") or "")
     thread_id = str(event.get("threadId") or "")
@@ -15450,13 +15746,11 @@ async def handle_interaction(event: dict, source: str):
             await send_message(thread_id, "Esa selección ya no está disponible.", dj_source)
             return
 
-        ok, message = await start_dj_room(
-            thread_id,
-            track["url"],
-            looping=False,
-            track_metadata=track
+        ok, message, selected_track, selected_index = await start_dj_search_with_fallback(
+            thread_id, saved.get("tracks", []), selected_index
         )
-        if ok:
+        if ok and selected_track:
+            track = selected_track
             credit = (
                 f"🎧 Ahora suena: {track['title']} — {track['creator']}\n"
                 f"Fuente: {track.get('source', 'catálogo musical')}\n"
@@ -15545,11 +15839,20 @@ async def dispatch(event: dict, source: str):
                 routed_message = dict(message_data)
                 routed_message["content"] = f"{PREFIX}{routed_command}"
                 routed_event["message"] = routed_message
-                logging.info("[NEXUS] Solicitud interpretada como %s", routed_command.split()[0])
+                logging.info("[NEXUS] Solicitud dirigida a Katherine interpretada como %s", routed_command.split()[0])
                 await handle_command(routed_event, source)
             else:
-                await handle_command(event, source)
+                # Conversación ordinaria: se mantienen estadísticas de actividad,
+                # pero no se activa el asistente ni las respuestas automáticas.
+                author = message_data.get("author") or {}
+                raw_uid = str(author.get("uid") or author.get("nickname") or "unknown")
+                nickname = author.get("nickname") or "Viajero"
+                scope_key = f"{source}:{event.get('threadId')}"
+                record_user(scoped_uid(scope_key, raw_uid), nickname, count_message=True)
+                record_chat_activity(str(event.get("threadId") or ""), scoped_uid(scope_key, raw_uid), nickname)
+                metrics["unaddressed_messages_ignored"] += 1
         else:
+            # Los comandos clásicos con prefijo siguen funcionando.
             await handle_command(event, source)
 
     elif kind == "interaction":

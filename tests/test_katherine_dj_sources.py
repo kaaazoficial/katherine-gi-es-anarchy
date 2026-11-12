@@ -131,3 +131,26 @@ def test_chat_output_keeps_plain_text_and_internal_commands():
     )
     assert text == "Usa !dj buscar ambient y luego !dj cola."
 
+def test_dj_search_fallback_skips_invalid_track_and_starts_next(monkeypatch):
+    calls = []
+
+    async def fake_start(thread_id, url, looping, track_metadata=None, enqueue=False):
+        calls.append(url)
+        if url.endswith("broken.mp3"):
+            return False, "No pude descargar o validar la canción (RuntimeError: HTML)."
+        return True, "Reproducción iniciada."
+
+    monkeypatch.setattr(katherine, "start_dj_room", fake_start)
+    tracks = [
+        {"url": "https://audio.jamendo.com/broken.mp3", "title": "No válida"},
+        {"url": "https://audio.jamendo.com/good.mp3", "title": "Válida"},
+    ]
+    ok, message, selected, index = asyncio.run(
+        katherine.start_dj_search_with_fallback("room-1", tracks, 0)
+    )
+    assert ok is True
+    assert selected["title"] == "Válida"
+    assert index == 1
+    assert "alternativa" in message
+    assert calls == [tracks[0]["url"], tracks[1]["url"]]
+

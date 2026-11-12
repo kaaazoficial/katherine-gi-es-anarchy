@@ -154,18 +154,24 @@ def test_antispam_configuration_applies_safe_bounds(database):
         "max_messages": 7,
         "window_seconds": 8,
         "repeat_limit": 3,
+        "max_links": 4,
+        "max_mentions": 8,
     }
 
     database.set_chat_setting("room-1", "antispam_enabled", "0")
     database.set_chat_setting("room-1", "antispam_max_messages", "999")
     database.set_chat_setting("room-1", "antispam_window_seconds", "1")
     database.set_chat_setting("room-1", "antispam_repeat_limit", "99")
+    database.set_chat_setting("room-1", "antispam_max_links", "99")
+    database.set_chat_setting("room-1", "antispam_max_mentions", "1")
 
     config = database.anti_spam_configuration("room-1")
     assert config["enabled"] is False
     assert config["max_messages"] == 20
     assert config["window_seconds"] == 3
     assert config["repeat_limit"] == 10
+    assert config["max_links"] == 12
+    assert config["max_mentions"] == 3
 
 
 def test_volume_controls_handle_limits_and_restore():
@@ -223,3 +229,59 @@ def test_builtin_katherine_regression_suite_passes():
     assert result["checks"] > 0
     assert result["failed"] == 0, result["failures"]
     assert result["passed"] == result["checks"]
+
+def test_dj_favorites_are_scoped_to_user_and_room(database, monkeypatch):
+    monkeypatch.setattr(katherine, "DJ_FAVORITES", {})
+    track = {
+        "url": "https://audio.jamendo.com/track.mp3",
+        "title": "Tema favorito",
+        "creator": "Artista",
+        "license": "CC BY",
+        "source": "Jamendo",
+        "extension": ".mp3",
+    }
+    assert database.save_dj_favorite("room-1", "user-1", track)
+    assert not database.save_dj_favorite("room-1", "user-1", track)
+    assert database.list_dj_favorites("room-1", "user-1")[0]["title"] == "Tema favorito"
+    assert database.list_dj_favorites("room-1", "user-2") == []
+    assert database.list_dj_favorites("room-2", "user-1") == []
+    favorite_id = database.list_dj_favorites("room-1", "user-1")[0]["id"]
+    assert database.delete_dj_favorite("room-1", "user-1", favorite_id)
+    assert database.list_dj_favorites("room-1", "user-1") == []
+
+def test_guardian_warns_for_link_bursts_and_records_reason(database, monkeypatch):
+    monkeypatch.setattr(katherine, "ADMIN_UIDS", set())
+    database.set_chat_setting("room-guardian", "antispam_max_links", "2")
+    katherine.USER_MESSAGE_ACTIVITY.clear()
+    katherine.USER_SPAM_WARNED_UNTIL.clear()
+    event = {
+        "threadId": "room-guardian",
+        "message": {
+            "content": "https://one.example https://two.example https://three.example",
+            "author": {"uid": "user-guardian", "nickname": "Viajero"},
+            "mentions": [],
+        },
+    }
+    blocked, info = katherine.check_antispam_message(event, "developer")
+    assert blocked is True
+    assert info and info["warning_id"]
+    target_uid = katherine.scoped_uid("developer:room-guardian", "user-guardian")
+    warnings = database.get_moderation_warnings("room-guardian", target_uid)
+    assert warnings[0]["automatic"] == 1
+    assert "Exceso de enlaces" in warnings[0]["reason"]
+
+
+def test_external_circuit_breaker_skips_open_host_without_network(monkeypatch):
+    host = "astra-circuit.test"
+    monkeypatch.setitem(
+        katherine.SOURCE_HEALTH,
+        host,
+        {"circuit_open_until": katherine.time.time() + 60},
+    )
+    before = katherine.metrics["external_circuit_open"]
+    with pytest.raises(RuntimeError, match="temporalmente aislada"):
+        import asyncio
+        asyncio.run(katherine.external_request("GET", f"https://{host}/status"))
+    assert katherine.metrics["external_circuit_open"] == before + 1
+    katherine.SOURCE_HEALTH.pop(host, None)
+
