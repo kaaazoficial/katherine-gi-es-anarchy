@@ -10,6 +10,7 @@ on:
       - "katherine_ai.py"
       - "tests/**"
       - "requirements-test.txt"
+      - "pytest.ini"
       - ".github/workflows/tests.yml"
   pull_request:
     branches:
@@ -19,6 +20,7 @@ on:
       - "requirements.txt"
       - "tests/**"
       - "requirements-test.txt"
+      - "pytest.ini"
       - "katherine_nexus.py"
       - "katherine_astra.py"
       - "katherine_ai.py"
@@ -33,15 +35,19 @@ jobs:
     name: Unit and regression tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v7.1.0
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: requirements-test.txt
 
