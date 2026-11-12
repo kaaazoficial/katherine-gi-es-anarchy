@@ -1,4 +1,4 @@
-ne - Bot de Anarchy Apps (Python)
+# Katherine - Bot de Anarchy Apps (Python)
 # Requiere Python 3.11+
 import os
 import re
