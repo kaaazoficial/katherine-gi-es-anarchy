@@ -1,93 +1,153 @@
-"""Katherine Nexus: deterministic natural-language routing to supported commands.
-
-This module deliberately does not call external services, store user content, or
-invent API capabilities. It only translates high-confidence Spanish requests
-into commands already implemented by Katherine.
-"""
+"""Nexus helpers for Katherine: safe routing and ephemeral state."""
 from __future__ import annotations
-
 import re
+import time
 import unicodedata
-
+from typing import Any
 
 def _normalize(value: str) -> str:
     text = unicodedata.normalize("NFKD", str(value or "").casefold())
-    text = "".join(char for char in text if not unicodedata.combining(char))
-    text = re.sub(r"\s+", " ", text).strip()
-    return text.strip("¿?¡!.,;: ")
-
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return re.sub(r"\s+", " ", text).strip().strip("¿?¡!.,;: ")
 
 def interpret_natural_request(value: str) -> str | None:
-    """Return an existing Katherine command (without prefix), or None.
-
-    Only anchored, high-confidence patterns are routed. Ordinary conversation
-    remains untouched and continues through Katherine's existing auto-reply
-    behavior.
-    """
+    """Route only high-confidence Spanish requests to existing commands."""
     raw = re.sub(r"\s+", " ", str(value or "")).strip()
     if not raw or len(raw) > 500 or raw.startswith(("!", "-")):
         return None
     text = _normalize(raw)
-    if not text:
-        return None
-
-    text = re.sub(r"^(?:por favor\s+)?(?:katherine[, ]+)?", "", text)
+    text = re.sub(r"^(?:por favor\s+)?(?:katherine[, ]+)", "", text)
     text = re.sub(r"\s+(?:por favor|porfa)$", "", text).strip()
     if not text:
         return None
-
     patterns = (
         (r"^(?:abre|abrir|muestra|mostrar) (?:el )?(?:menu|panel)(?: interactivo)?$", "menu"),
-        (r"^(?:como esta|estado de) katherine$", "estado"),
+        (r"^(?:abre|abrir|muestra|mostrar) (?:el )?centro(?: de control)?$", "centro"),
+        (r"^(?:como esta|estado de|diagnostico de) katherine$", "estado"),
+        (r"^(?:diagnostica) katherine$", "estado"),
+        (r"^(?:que fuentes|fuentes disponibles|estado de las fuentes)$", "fuentes"),
         (r"^(?:ejecuta|haz|realiza) (?:un )?(?:autotest|prueba interna)$", "autotest"),
         (r"^(?:pausa|pausar|deten|detener) (?:la )?(?:musica|reproduccion)$", "dj pausa"),
         (r"^(?:reanuda|reanudar|continua|continuar) (?:la )?(?:musica|reproduccion)$", "dj reanudar"),
         (r"^(?:salta|saltar) (?:la )?(?:cancion|pista|tema)$", "dj saltar"),
         (r"^(?:muestra|mostrar|consulta) (?:la )?cola musical$", "dj cola"),
+        (r"^(?:que esta sonando|cancion actual|pista actual)$", "dj actual"),
         (r"^(?:entra|entrar|unete|unirse) (?:a )?(?:la )?(?:llamada|sala de voz)$", "join"),
         (r"^(?:lee|leer) (?:los )?mensajes en voz alta$", "leer"),
         (r"^(?:deja de leer|desactiva la lectura en voz alta)$", "noleer"),
+        (r"^(?:crea|crear|convoca) (?:un )?(?:evento|actividad)(?: de comunidad)?$", "evento"),
+        (r"^(?:muestra|mostrar|consulta) (?:el )?evento(?: de la sala)?$", "evento"),
+        (r"^(?:muestra|mostrar|consulta) (?:la )?actividad(?: del chat)?$", "actividad"),
         (r"^(?:que )?hora es en ([a-z0-9_+/-]+)$", None),
     )
     for pattern, command in patterns:
         match = re.fullmatch(pattern, text)
         if match:
-            if command is not None:
+            if command:
                 return command
             zone = match.group(1).strip()
             return f"zona {zone}" if re.fullmatch(r"[a-z0-9_+/-]{2,64}", zone) else None
-
-    subject_patterns = (
+    subjects = (
         (r"^(?:dame|muestra|busca)?\s*(?:una )?guia (?:de |del )?(.+)$", "guia"),
         (r"^(?:como armo|como construir|build de|build para|equipa) (.+)$", "guia"),
         (r"^(?:que equipos hay para|equipos para|equipo de|composiciones para) (.+)$", "equipos"),
         (r"^(?:cual es la )?rotacion (?:de |para )?(.+)$", "rotacion"),
         (r"^(?:que materiales necesita|materiales para|materiales de) (.+)$", "materiales"),
+        (r"^(?:que cobertura tiene|cobertura de|apartados de la guia de) (.+)$", "cobertura"),
         (r"^(?:busca en genshin|busqueda de genshin|busca genshin) (.+)$", "buscargenshin"),
         (r"^(?:reproduce|pon|busca musica de|busca la cancion) (.+)$", "dj buscar"),
         (r"^(?:busca imagenes? de|imagenes? de) (.+)$", "imagen"),
         (r"^(?:busca videos? de|videos? de) (.+)$", "video"),
         (r"^(?:busca audios? de|audios? de) (.+)$", "audio"),
     )
-    for pattern, command in subject_patterns:
+    for pattern, command in subjects:
         match = re.fullmatch(pattern, text)
         if match:
             subject = re.sub(r"\s+", " ", match.group(1)).strip(" .?!")
             if not subject or len(subject) > 120:
                 return None
-            if command in {"imagen", "video", "audio"}:
-                return f"multimedia {command} {subject}"
-            return f"{command} {subject}"
-
+            return f"multimedia {command} {subject}" if command in {"imagen", "video", "audio"} else f"{command} {subject}"
     translation = re.fullmatch(
-        r"(?:katherine[, ]+)?(?:traduce|traducir) (?:esto )?al?\s*([a-záéíóúñ ]{2,30})\s*[:|,]\s*(.{1,350})",
-        raw,
-        flags=re.IGNORECASE,
+        r"(?:traduce|traducir) (?:esto )?al?\s*([a-záéíóúñ ]{2,30})\s*[:|,]\s*(.{1,350})",
+        raw, flags=re.IGNORECASE
     )
     if translation:
         language = _normalize(translation.group(1))
         payload = translation.group(2).strip()
         if payload:
             return f"traducir {language} | {payload}"
-
     return None
+
+def extract_message_id(payload: Any) -> str | None:
+    """Extract message ids from common POST response envelopes."""
+    if isinstance(payload, dict):
+        for key in ("messageId", "message_id"):
+            value = payload.get(key)
+            if isinstance(value, (str, int)) and str(value).strip():
+                return str(value)
+        for key in ("message", "data", "result", "item"):
+            nested = payload.get(key)
+            if isinstance(nested, dict):
+                found = extract_message_id(nested)
+                if found:
+                    return found
+                if key == "message":
+                    value = nested.get("id")
+                    if isinstance(value, (str, int)) and str(value).strip():
+                        return str(value)
+    return None
+
+def cleanup_community_events(events: dict, now: float | None = None) -> int:
+    now = time.time() if now is None else float(now)
+    expired = [key for key, item in events.items()
+               if not isinstance(item, dict) or item.get("closed")
+               or float(item.get("expires_at", 0)) <= now]
+    for key in expired:
+        events.pop(key, None)
+    return len(expired)
+
+def toggle_community_participant(event: dict, user_id: str, nickname: str,
+                                 join: bool, now: float | None = None) -> tuple[str, int]:
+    now = time.time() if now is None else float(now)
+    if not isinstance(event, dict) or event.get("closed"):
+        return "closed", 0
+    if float(event.get("expires_at", 0)) <= now:
+        return "expired", 0
+    participants = event.setdefault("participants", {})
+    user_id = str(user_id or "").strip()
+    if not user_id:
+        return "invalid", len(participants)
+    if join:
+        if user_id in participants:
+            return "already_joined", len(participants)
+        capacity = max(1, min(200, int(event.get("capacity", 40))))
+        if len(participants) >= capacity:
+            return "full", len(participants)
+        participants[user_id] = str(nickname or "Viajero")[:80]
+        return "joined", len(participants)
+    if user_id not in participants:
+        return "not_joined", len(participants)
+    participants.pop(user_id, None)
+    return "left", len(participants)
+
+def format_source_health(source_health: dict, limit: int = 12) -> str:
+    if not isinstance(source_health, dict) or not source_health:
+        return "FUENTES EXTERNAS\nTodavía no hay mediciones de fuentes en este proceso."
+    lines = ["FUENTES EXTERNAS · SALUD DEL PROCESO"]
+    ranked = sorted(source_health.items(), key=lambda item: (
+        int((item[1] or {}).get("failures", 0)),
+        int((item[1] or {}).get("requests", 0))), reverse=True)
+    for host, raw in ranked[:max(1, min(20, int(limit)))]:
+        item = raw if isinstance(raw, dict) else {}
+        requests = int(item.get("requests", 0))
+        successes = int(item.get("successes", 0))
+        failures = int(item.get("failures", 0))
+        latency = float(item.get("last_latency_ms", 0) or 0)
+        status = item.get("last_status") or "—"
+        lines.append(f"• {str(host)[:80]} · HTTP {status} · {latency:.0f} ms\n"
+                     f"  {successes}/{requests} correctas · {failures} fallidas")
+        error = str(item.get("last_error") or "").strip()
+        if error:
+            lines.append(f"  Último error: {error[:110]}")
+    lines.append("Los contadores se reinician cuando Render reinicia el proceso.")
+    return "\n".join(lines)
