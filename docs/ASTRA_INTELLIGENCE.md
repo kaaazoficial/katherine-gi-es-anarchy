@@ -3,7 +3,7 @@
 Esta expansión excluye CREATIVITY AI. La IA es una capa opcional sobre los comandos y fuentes que Katherine ya tiene; no reemplaza el enrutador determinista ni las herramientas actuales.
 
 ## Componentes
-- **Katherine AI Core:** OpenAI Responses API con salida JSON estructurada. Puede responder o proponer un comando de una lista permitida.
+- **Katherine AI Core:** Responses API compatible con OpenAI o Groq, con salida JSON validada. Puede responder o proponer un comando de una lista permitida.
 - **Memoria contextual:** aislada por usuario y sala, solo RAM, caduca a los 15 minutos y conserva hasta 12 turnos.
 - **Teyvat AI:** delega consultas en enciclopedia, guías, equipos, rotaciones, materiales, reacciones y noticias oficiales.
 - **Guardian AI:** revisión contextual manual; recomienda revisión humana, no sanciona ni borra mensajes.
@@ -23,7 +23,7 @@ Variables:
 Sin clave, la IA informa que no está conectada y los comandos clásicos siguen disponibles. No se inserta una clave ficticia ni se copia una credencial al repositorio. Las solicitudes envían \`store: false\`.
 
 ## Comandos
-- \`!ia estado\`, \`!ia probar\` (administrador; valida la conexión real con OpenAI), \`!ia ayuda\`, \`!ia olvidar\`.
+- \`!ia estado\`, \`!ia probar\` (administrador; valida la conexión real con el proveedor configurado), \`!ia ayuda\`, \`!ia olvidar\`.
 - \`!ia preguntar <consulta>\`, \`!ia genshin <consulta>\`.
 - \`!ia musica <descripción>\`, \`!ia traducir idioma | texto\`.
 - \`!ia guardian revisar <texto>\` (administradores).
