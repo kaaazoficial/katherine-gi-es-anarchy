@@ -11173,6 +11173,7 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}menu — abre el menú interactivo.",
                 f"{PREFIX}economia — muestra el sistema de puntos.",
                 f"{PREFIX}perfilbot <Nombre> | <Estado> — modifica el perfil (administradores).",
+                f"{PREFIX}avatarbot <URL|eliminar> — cambia o retira el avatar (administradores).",
                 f"{PREFIX}autotest — pruebas internas de Katherine."
             ]
         ]
@@ -12780,6 +12781,72 @@ async def handle_command(event: dict, source: str):
             source,
             reply
         )
+        return
+
+    if command == "!avatarbot":
+        if not ADMIN_UIDS or raw_uid not in ADMIN_UIDS:
+            await send_message(
+                thread,
+                "No tienes permiso para cambiar el avatar de Katherine.",
+                source,
+                reply
+            )
+            return
+
+        avatar_value = query.strip().strip("<>")
+        if not avatar_value:
+            await send_message(
+                thread,
+                "Uso: !avatarbot https://.../imagen.png\n"
+                "También puedes usar !avatarbot eliminar para retirar el avatar.",
+                source,
+                reply
+            )
+            return
+
+        remove_avatar = avatar_value.casefold() in {
+            "eliminar", "quitar", "borrar", "reset", "default"
+        }
+        if remove_avatar:
+            payload = {"avatar": None}
+        else:
+            parsed_avatar = urlparse(avatar_value)
+            hostname = (parsed_avatar.hostname or "").lower()
+            if (
+                len(avatar_value) > 2048
+                or parsed_avatar.scheme.lower() != "https"
+                or not hostname
+                or parsed_avatar.username
+                or parsed_avatar.password
+                or hostname in {"localhost", "127.0.0.1", "::1"}
+                or hostname.endswith((".local", ".internal"))
+            ):
+                await send_message(
+                    thread,
+                    "URL no válida. Usa un enlace HTTPS público a una imagen.",
+                    source,
+                    reply
+                )
+                return
+            payload = {"avatar": avatar_value}
+
+        result = await api("PATCH", "/me", "community", payload)
+        if result.get("ok"):
+            await send_message(
+                thread,
+                "Avatar de Katherine actualizado."
+                if not remove_avatar
+                else "Avatar personalizado de Katherine retirado.",
+                source,
+                reply
+            )
+        else:
+            await send_message(
+                thread,
+                f"No se pudo cambiar el avatar. La API respondió HTTP {result.get('status', '?')}.",
+                source,
+                reply
+            )
         return
 
     if command == "!join":
