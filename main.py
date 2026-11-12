@@ -51,7 +51,13 @@ from urllib.parse import urljoin, quote, urlparse
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
-from katherine_nexus import interpret_natural_request
+from katherine_nexus import (
+    cleanup_community_events,
+    extract_message_id,
+    format_source_health,
+    interpret_natural_request,
+    toggle_community_participant,
+)
 
 # ---------------------------------------------------------------------------
 # CONFIGURACION
@@ -724,6 +730,7 @@ EXTERNAL_HOST_LIMITS = {}
 SOURCE_HEALTH = {}
 poll_button_map: dict[str, str] = {}
 BUTTON_ACTIONS: dict[str, dict] = {}
+COMMUNITY_EVENTS: dict[str, dict] = {}
 DJ_ROOMS: dict[str, dict] = {}
 DJ_READY_EVENTS: dict[str, asyncio.Event] = {}
 VOICE_CONNECT_LOCKS: dict[str, asyncio.Lock] = {}
@@ -930,6 +937,7 @@ def cleanup_expired_state():
     for key, action in list(BUTTON_ACTIONS.items()):
         if action.get("expires", now + 1) <= now:
             BUTTON_ACTIONS.pop(key, None)
+    cleanup_community_events(COMMUNITY_EVENTS, now=now)
     active_poll_ids = set(polls)
     for button_key, poll_id in list(poll_button_map.items()):
         if poll_id not in active_poll_ids:
@@ -1484,6 +1492,185 @@ async def send_message(
                 return result
 
     return last_result
+
+
+# ---------------------------------------------------------------------------
+# PROGRESO EDITABLE · NEXUS
+# ---------------------------------------------------------------------------
+async def start_progress_message(
+    thread_id: str, content: str, source: str = "developer", reply_id=None
+) -> dict:
+    """Publica el primer estado y conserva el ID si la API lo devuelve."""
+    result = await send_message(thread_id, content, source, reply_id)
+    message_id = extract_message_id((result or {}).get("data"))
+    return {
+        "thread_id": str(thread_id),
+        "source": source,
+        "message_id": message_id,
+        "created_at": time.time(),
+        "enabled": bool(message_id),
+    }
+
+
+async def update_progress_message(context: dict | None, content: str) -> bool:
+    """Edita el mensaje solo dentro de la ventana de 15 minutos documentada."""
+    if not isinstance(context, dict) or not context.get("enabled"):
+        return False
+    if time.time() - float(context.get("created_at", 0)) >= 14 * 60:
+        context["enabled"] = False
+        return False
+    result = await api(
+        "PATCH",
+        f"/threads/{context['thread_id']}/messages/{context['message_id']}",
+        context.get("source", "developer"),
+        {"content": str(content)[:2000]},
+    )
+    if result.get("ok"):
+        metrics["progress_edits"] += 1
+        return True
+    context["enabled"] = False
+    metrics["progress_edit_failures"] += 1
+    logging.warning(
+        "[NEXUS] No pude editar el mensaje de progreso (HTTP %s).",
+        result.get("status")
+    )
+    return False
+
+
+async def finish_progress_message(
+    context: dict | None,
+    content: str,
+    thread_id: str,
+    source: str,
+    reply_id=None,
+):
+    if await update_progress_message(context, content):
+        return {"ok": True, "edited": True}
+    return await send_message(thread_id, content, source, reply_id)
+
+
+async def send_nexus_center(
+    thread_id: str, source: str, raw_uid: str, nickname: str, reply_id=None
+):
+    choices = [
+        {"label": "Ayuda", "value": "ayuda"},
+        {"label": "Menú", "value": "menu"},
+        {"label": "Estado", "value": "estado"},
+        {"label": "Fuentes", "value": "fuentes"},
+        {"label": "Cola DJ", "value": "cola"},
+    ]
+    owner_uid = scoped_uid(f"{source}:{thread_id}", str(raw_uid))
+    buttons = register_buttons(
+        source, thread_id, "run_command", choices,
+        {"raw_uid": str(raw_uid), "nickname": nickname},
+        owner_uid=owner_uid, ttl=1800
+    )
+    await send_message(
+        thread_id,
+        "KATHERINE · CENTRO DE CONTROL\n"
+        "Accesos directos a las funciones principales. "
+        "Los controles ejecutan los comandos existentes con sus permisos habituales.",
+        source, reply_id, buttons
+    )
+
+
+async def community_event_message(thread_id: str, event: dict) -> str:
+    participants = event.get("participants") or {}
+    remaining = max(0, int(float(event.get("expires_at", 0)) - time.time()))
+    return (
+        "EVENTO DE COMUNIDAD · KATHERINE\n"
+        f"{event.get('title', 'Actividad')}\n\n"
+        f"Participantes: {len(participants)}/{int(event.get('capacity', 40))}\n"
+        f"Vigencia restante: {format_duration(remaining)}\n"
+        "Usa los botones para unirte o retirarte. La participación es voluntaria."
+    )
+
+
+async def handle_community_event_command(
+    thread_id: str, source: str, raw_uid: str, nickname: str,
+    args: list[str], reply_id=None
+):
+    sub = args[0].casefold() if args else "estado"
+    current = COMMUNITY_EVENTS.get(str(thread_id))
+    if current and (
+        current.get("closed") or float(current.get("expires_at", 0)) <= time.time()
+    ):
+        COMMUNITY_EVENTS.pop(str(thread_id), None)
+        current = None
+
+    if sub in ("crear", "crear", "convocar", "iniciar"):
+        title = " ".join(args[1:]).strip()
+        if not 4 <= len(title) <= 100:
+            await send_message(
+                thread_id,
+                "Uso: !evento crear <título de 4 a 100 caracteres>. "
+                "Los eventos duran una hora y admiten hasta 40 participantes.",
+                source, reply_id
+            )
+            return
+        if current:
+            await send_message(
+                thread_id,
+                "Ya hay un evento activo en esta sala. Usa !evento estado o ciérralo antes.",
+                source, reply_id
+            )
+            return
+        event_id = secrets.token_hex(6)
+        current = {
+            "id": event_id,
+            "title": title,
+            "owner_uid": str(raw_uid),
+            "created_at": time.time(),
+            "expires_at": time.time() + 3600,
+            "capacity": 40,
+            "participants": {str(raw_uid): str(nickname)[:80]},
+            "closed": False,
+        }
+        COMMUNITY_EVENTS[str(thread_id)] = current
+        buttons = register_buttons(
+            source, thread_id, "community_event",
+            [
+                {"label": "Unirme", "value": "join"},
+                {"label": "Retirarme", "value": "leave"},
+            ],
+            {"event_id": event_id}, ttl=3600
+        )
+        await send_message(
+            thread_id, await community_event_message(thread_id, current),
+            source, reply_id, buttons
+        )
+        metrics["community_events_created"] += 1
+        return
+
+    if sub in ("cerrar", "terminar", "finalizar"):
+        if not current:
+            await send_message(thread_id, "No hay un evento activo en esta sala.", source, reply_id)
+            return
+        if str(raw_uid) != str(current.get("owner_uid")) and not is_admin_uid(raw_uid):
+            await send_message(thread_id, "Solo quien creó el evento o un administrador puede cerrarlo.", source, reply_id)
+            return
+        current["closed"] = True
+        count = len(current.get("participants") or {})
+        for key, action in list(BUTTON_ACTIONS.items()):
+            payload = action.get("payload") or {}
+            if action.get("type") == "community_event" and payload.get("event_id") == current.get("id"):
+                BUTTON_ACTIONS.pop(key, None)
+        COMMUNITY_EVENTS.pop(str(thread_id), None)
+        metrics["community_events_closed"] += 1
+        await send_message(
+            thread_id, f"EVENTO CERRADO · {current.get('title')}\nParticipantes que se habían unido: {count}.",
+            source, reply_id
+        )
+        return
+
+    if not current:
+        await send_message(
+            thread_id,
+            "No hay un evento activo. Crea uno con !evento crear <título>.",
+            source, reply_id
+        )
+        return
+    await send_message(thread_id, await community_event_message(thread_id, current), source, reply_id)
 
 
 # ---------------------------------------------------------------------------
@@ -2479,13 +2666,27 @@ async def dj_playback_loop(
             state["skip_event"].clear()
             try:
                 while not state["stop_event"].is_set() and not state["playback_stop_event"].is_set():
-                    try:
-                        played = await _dj_play_single(thread_id, current_path, state)
-                    except Exception:
-                        metrics["dj_playback_retries"] += 1
-                        logging.warning("[DJ] Reintentando pista %s en sala %s", current_title, thread_id)
-                        await asyncio.sleep(1.0)
-                        played = await _dj_play_single(thread_id, current_path, state)
+                    last_playback_error = None
+                    for attempt in range(3):
+                        try:
+                            played = await _dj_play_single(thread_id, current_path, state)
+                            last_playback_error = None
+                            break
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            last_playback_error = exc
+                            if attempt >= 2:
+                                raise
+                            metrics["dj_playback_retries"] += 1
+                            delay = min(4.0, 0.75 * (2 ** attempt))
+                            logging.warning(
+                                "[DJ] Reintento %s/2 para %s en sala %s tras %s",
+                                attempt + 1, current_title, thread_id, type(exc).__name__
+                            )
+                            await asyncio.sleep(delay)
+                    if last_playback_error is not None:
+                        raise last_playback_error
                     if (
                         current_looping and played
                         and not state["skip_event"].is_set()
@@ -10610,13 +10811,34 @@ GUIDE_COVERAGE_SOURCE_NAMES = {
 }
 
 
-async def collect_character_guide_data(query: str):
-    """Obtiene una sola instantánea de la guía para !guia y !cobertura."""
-    character, stats = await asyncio.gather(
-        get_character(query),
-        character_stats(query)
-    )
+async def collect_character_guide_data(
+    query: str, progress_callback=None
+):
+    """Construye una guía multicapa y tolerante a fallos sin bloquear por una fuente."""
+    async def bounded_source(label: str, awaitable, timeout: float = 28):
+        try:
+            return await asyncio.wait_for(awaitable, timeout=timeout)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            metrics["guide_source_failures"] += 1
+            logging.warning(
+                "[NEXUS] Fuente %s no disponible (%s): %s",
+                label, type(exc).__name__, str(exc)[:180]
+            )
+            return None
 
+    async def progress(message: str):
+        if progress_callback:
+            try:
+                await progress_callback(message)
+            except Exception:
+                logging.debug("[NEXUS] No se pudo actualizar el progreso.", exc_info=True)
+
+    character, stats = await asyncio.gather(
+        bounded_source("genshin-db-ficha", get_character(query), 24),
+        bounded_source("genshin-db-estadisticas", character_stats(query), 24)
+    )
     name = (
         clean_game_text(character.get("name") or query)
         if isinstance(character, dict) else clean_game_text(query)
@@ -10627,56 +10849,48 @@ async def collect_character_guide_data(query: str):
     priority = TALENT_PRIORITIES.get(key)
     team = BUILD_TEAMS.get(key)
 
+    await progress(f"FICHA · {name}\nFicha básica consultada. Contrastando builds y equipos en paralelo…")
     needs_helper = {
         "artifacts": not bool(artifact),
         "weapons": not bool(weapons),
         "talents": not bool(priority)
     }
-    helper_data = None
-    if any(needs_helper.values()):
-        helper_data = await fetch_helper_character_guide(
-            character, query, name, key, needs_helper
-        )
-
-    kqm_data = None
-    if not team:
-        kqm_data = await fetch_kqm_teams(character, query, name, key)
+    helper_task = (
+        bounded_source(
+            "genshin-impact-helper",
+            fetch_helper_character_guide(character, query, name, key, needs_helper),
+            28
+        ) if any(needs_helper.values()) else asyncio.sleep(0, result=None)
+    )
+    kqm_task = (
+        bounded_source("keqingmains", fetch_kqm_teams(character, query, name, key), 28)
+        if not team else asyncio.sleep(0, result=None)
+    )
+    helper_data, kqm_data = await asyncio.gather(helper_task, kqm_task)
 
     needs_community = {
-        "artifacts": not bool(artifact) and not bool(
-            helper_data and helper_data.get("artifacts")
-        ),
-        "weapons": not bool(weapons) and not bool(
-            helper_data and helper_data.get("weapons")
-        ),
-        "stats": not bool(artifact) and not bool(
-            helper_data and helper_data.get("artifacts")
-        ),
-        "talents": not bool(priority) and not bool(
-            helper_data and helper_data.get("talents")
-        ),
-        "teams": not bool(team) and not bool(
-            kqm_data and kqm_data.get("teams")
-        )
+        "artifacts": not bool(artifact) and not bool(helper_data and helper_data.get("artifacts")),
+        "weapons": not bool(weapons) and not bool(helper_data and helper_data.get("weapons")),
+        "stats": not bool(artifact) and not bool(helper_data and helper_data.get("artifacts")),
+        "talents": not bool(priority) and not bool(helper_data and helper_data.get("talents")),
+        "teams": not bool(team) and not bool(kqm_data and kqm_data.get("teams"))
     }
     community_data = None
     if any(needs_community.values()):
-        community_data = await fetch_community_character_guide(
-            character, query, name, key, needs_community
+        await progress(
+            f"RESPALDO · {name}\nLas fuentes principales no cubrieron todos los apartados. Consultando alternativas…"
         )
-
+        community_data = await bounded_source(
+            "guias-comunitarias",
+            fetch_community_character_guide(character, query, name, key, needs_community),
+            32
+        )
+    await progress(f"ANÁLISIS · {name}\nFuentes contrastadas. Preparando la guía final…")
     return {
-        "query": query,
-        "name": name,
-        "key": key,
-        "character": character,
-        "stats": stats,
-        "artifact": artifact,
-        "weapons": weapons,
-        "priority": priority,
-        "team": team,
-        "helper_data": helper_data,
-        "kqm_data": kqm_data,
+        "query": query, "name": name, "key": key,
+        "character": character, "stats": stats, "artifact": artifact,
+        "weapons": weapons, "priority": priority, "team": team,
+        "helper_data": helper_data, "kqm_data": kqm_data,
         "community_data": community_data,
         "rotation": (community_data or {}).get("rotation"),
         "source_updated": (community_data or {}).get("source_updated"),
@@ -11780,6 +11994,21 @@ async def handle_command(event: dict, source: str):
         return
 
 
+
+    if command in ("!centro", "!nexus"):
+        await send_nexus_center(thread, source, raw_uid, nickname, reply)
+        return
+
+    if command in ("!fuentes", "!saludfuentes"):
+        await send_message(thread, format_source_health(SOURCE_HEALTH), source, reply)
+        return
+
+    if command in ("!evento", "!eventos"):
+        await handle_community_event_command(
+            thread, source, raw_uid, nickname, args, reply
+        )
+        return
+
     if command in ("!admin", "!paneladmin"):
         if not is_admin_uid(raw_uid):
             await send_message(thread, "No tienes permisos de administración.", source, reply)
@@ -12051,6 +12280,9 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}imagen / video / audio <consulta> — accesos directos multimedia.",
                 f"{PREFIX}respuestas on/off — activa o pausa respuestas contextuales.",
                 f"{PREFIX}respuesta añadir/lista/eliminar — administra respuestas automáticas.",
+                f"{PREFIX}centro — abre el centro interactivo de Katherine.",
+                f"{PREFIX}fuentes — muestra la salud de las fuentes externas.",
+                f"{PREFIX}evento crear <título>/estado/cerrar — gestiona un evento efímero de sala.",
             ]),
         ]
 
@@ -12560,7 +12792,15 @@ async def handle_command(event: dict, source: str):
                 reply
             )
             return
-        guide_data = await collect_character_guide_data(query)
+        progress = await start_progress_message(
+            thread, f"COBERTURA · {query}\nRevisando los apartados y las fuentes disponibles…",
+            source, reply
+        )
+        async def coverage_progress_update(text):
+            await update_progress_message(progress, text)
+        guide_data = await collect_character_guide_data(
+            query, progress_callback=coverage_progress_update
+        )
         if not isinstance(guide_data.get("character"), dict):
             await send_message(
                 thread,
@@ -12570,11 +12810,10 @@ async def handle_command(event: dict, source: str):
                 reply
             )
             return
-        await send_message(
-            thread,
+        await finish_progress_message(
+            progress,
             format_character_guide_coverage(guide_data),
-            source,
-            reply
+            thread, source, reply
         )
         return
 
@@ -12583,7 +12822,15 @@ async def handle_command(event: dict, source: str):
             await send_message(thread, f"Uso: {PREFIX}guia nombre del personaje", source, reply)
             return
 
-        guide_data = await collect_character_guide_data(query)
+        progress = await start_progress_message(
+            thread, f"GUÍA · {query}\nKatherine está consultando la ficha y contrastando fuentes…",
+            source, reply
+        )
+        async def guide_progress_update(text):
+            await update_progress_message(progress, text)
+        guide_data = await collect_character_guide_data(
+            query, progress_callback=guide_progress_update
+        )
         character = guide_data["character"]
         stats = guide_data["stats"]
         name = guide_data["name"]
@@ -12823,11 +13070,10 @@ async def handle_command(event: dict, source: str):
             "Ajusta las estadísticas y armas a tu equipo, rotación y necesidades de energía. "
             "Las clasificaciones pueden variar según la composición y la versión del juego."
         )
-        await send_message(
-            thread,
+        await finish_progress_message(
+            progress,
             "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n".join(sections),
-            source,
-            reply
+            thread, source, reply
         )
         return
 
@@ -14609,6 +14855,36 @@ async def handle_interaction(event: dict, source: str):
     payload = action.get("payload") or {}
     choice = payload.get("value")
 
+
+
+    if action_type == "community_event":
+        event = COMMUNITY_EVENTS.get(thread_id)
+        payload_event_id = str(payload.get("event_id") or "")
+        if not event or event.get("id") != payload_event_id:
+            await send_message(
+                thread_id, "Este evento ya terminó o caducó. Puedes crear otro con !evento crear <título>.",
+                source
+            )
+            return
+        joined, count = toggle_community_participant(
+            event, raw_user_uid, user_name, str(choice) == "join"
+        )
+        messages = {
+            "joined": f"Te uniste a «{event['title']}». Participantes: {count}/{event['capacity']}.",
+            "already_joined": f"Ya formas parte de «{event['title']}». Participantes: {count}/{event['capacity']}.",
+            "full": f"«{event['title']}» alcanzó su capacidad máxima.",
+            "left": f"Saliste de «{event['title']}». Participantes: {count}/{event['capacity']}.",
+            "not_joined": "No estabas inscrito en este evento.",
+            "expired": "El evento ya caducó.",
+            "closed": "El evento fue cerrado.",
+            "invalid": "No pude identificar tu cuenta en esta interacción.",
+        }
+        if joined == "joined":
+            metrics["community_event_joins"] += 1
+        elif joined == "left":
+            metrics["community_event_leaves"] += 1
+        await send_message(thread_id, messages.get(joined, "No pude actualizar tu participación."), source)
+        return
 
     if action_type == "admin_panel":
         BUTTON_ACTIONS.pop(button_id, None)
