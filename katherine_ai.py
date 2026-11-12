@@ -464,9 +464,11 @@ class KatherineAI:
         if self.is_groq and not self.uses_groq_strict_schema:
             prompt_instructions += (
                 "\n\nDevuelve únicamente un objeto JSON válido, sin bloques Markdown, "
-                "con estas cuatro claves: kind (answer, command o plan), answer, command, args y opcionalmente steps. "
-                "Todos los valores deben ser cadenas, salvo steps que es una lista de objetos command/args. Si respondes directamente usa kind=answer "
-                "y deja command y args vacíos."
+                "con estas cinco claves: kind (answer, command o plan), answer, command, args y steps. "
+                "Todos los valores deben ser cadenas, salvo steps, que es una lista de objetos command/args. "
+                "Si respondes directamente usa kind=answer y deja command y args vacíos y steps como lista vacía. "
+                "Si solicitas una herramienta individual usa kind=command y steps como lista vacía. "
+                "Si el usuario pide varias acciones compatibles, usa kind=plan y entre uno y tres pasos ordenados."
             )
 
         output_format = (
