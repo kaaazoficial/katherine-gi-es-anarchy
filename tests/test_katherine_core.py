@@ -249,3 +249,38 @@ def test_dj_favorites_are_scoped_to_user_and_room(database):
     assert database.delete_dj_favorite("room-1", "user-1", favorite_id)
     assert database.list_dj_favorites("room-1", "user-1") == []
 
+def test_guardian_warns_for_link_bursts_and_records_reason(database, monkeypatch):
+    monkeypatch.setattr(katherine, "ADMIN_UIDS", set())
+    katherine.USER_MESSAGE_ACTIVITY.clear()
+    katherine.USER_SPAM_WARNED_UNTIL.clear()
+    event = {
+        "threadId": "room-guardian",
+        "message": {
+            "content": "https://one.example https://two.example https://three.example",
+            "author": {"uid": "user-guardian", "nickname": "Viajero"},
+            "mentions": [],
+        },
+    }
+    blocked, info = katherine.check_antispam_message(event, "developer")
+    assert blocked is True
+    assert info and info["warning_id"]
+    target_uid = katherine.scoped_uid("developer:room-guardian", "user-guardian")
+    warnings = database.get_moderation_warnings("room-guardian", target_uid)
+    assert warnings[0]["automatic"] == 1
+    assert "Exceso de enlaces" in warnings[0]["reason"]
+
+
+def test_external_circuit_breaker_skips_open_host_without_network(monkeypatch):
+    host = "astra-circuit.test"
+    monkeypatch.setitem(
+        katherine.SOURCE_HEALTH,
+        host,
+        {"circuit_open_until": katherine.time.time() + 60},
+    )
+    before = katherine.metrics["external_circuit_open"]
+    with pytest.raises(RuntimeError, match="temporalmente aislada"):
+        import asyncio
+        asyncio.run(katherine.external_request("GET", f"https://{host}/status"))
+    assert katherine.metrics["external_circuit_open"] == before + 1
+    katherine.SOURCE_HEALTH.pop(host, None)
+
