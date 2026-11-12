@@ -13072,7 +13072,155 @@ async def handle_command(event: dict, source: str):
             await send_message(thread, "\n".join(lines), source, reply)
         return
 
-    if command in ("!dj", "!reproducir"):    if command in ("!djdetener", "!djstop", "!salirsala"):
+    if command in ("!dj", "!reproducir"):
+        dj_source = source
+        if not COMMUNITY_TOKEN:
+            await send_message(
+                thread,
+                "El DJ necesita COMMUNITY_BOT_TOKEN configurado en las variables de Render.",
+                dj_source,
+                reply
+            )
+            return
+        if pyav is None or livekit_rtc is None or np is None:
+            await send_message(
+                thread,
+                "El reproductor DJ no está instalado correctamente en Render.",
+                dj_source,
+                reply
+            )
+            return
+
+        if not args or args[0].lower() in ("lista", "list"):
+            tracks = list_dj_tracks()
+            await send_message(
+                thread,
+                "KATHERINE DJ\n"
+                + ("Archivos locales:\n" + "\n".join(f"• {name}" for name in tracks)
+                   if tracks else "No hay audios locales.")
+                + "\n\nPara buscar música pública: !dj buscar <tema>\n"
+                "Ejemplos: !dj buscar jazz, !dj buscar piano, !dj buscar ambient.\n"
+                "También puedes reproducir archivos locales con !dj archivo.mp3.",
+                dj_source,
+                reply
+            )
+            return
+
+        if args[0].lower() in ("buscar", "search"):
+            search_term = " ".join(args[1:]).strip()
+            if not search_term:
+                await send_message(
+                    thread,
+                    "Uso: !dj buscar <tema o género>. Ejemplos: jazz, piano, ambient, clásica.",
+                    dj_source,
+                    reply
+                )
+                return
+            try:
+                results = await search_archive_audio(search_term, limit=5)
+            except Exception as exc:
+                logging.exception("[DJ] Búsqueda en Internet Archive fallida")
+                await send_message(
+                    thread,
+                    f"No pude consultar el catálogo musical ahora mismo ({type(exc).__name__}).",
+                    dj_source,
+                    reply
+                )
+                return
+
+            if not results:
+                await send_message(
+                    thread,
+                    "No encontré pistas reproducibles con licencias permitidas para esa búsqueda. "
+                    "Prueba con otro género o palabra.",
+                    dj_source,
+                    reply
+                )
+                return
+
+            DJ_SEARCH_RESULTS[thread] = {
+                "tracks": results,
+                "expires": time.time() + 900
+            }
+            for old_thread, saved in list(DJ_SEARCH_RESULTS.items()):
+                if saved.get("expires", 0) <= time.time():
+                    DJ_SEARCH_RESULTS.pop(old_thread, None)
+
+            buttons = register_buttons(
+                dj_source,
+                thread,
+                "dj_select",
+                [
+                    {
+                        "label": f"{index + 1}. {track['title']}"[:40],
+                        "value": str(index)
+                    }
+                    for index, track in enumerate(results)
+                ],
+                ttl=900
+            )
+            listing = "\n".join(
+                f"{index + 1}. {track['title']} — {track['creator']} "
+                f"({track['license']})"
+                for index, track in enumerate(results)
+            )
+            await send_message(
+                thread,
+                f"CATÁLOGO MUSICAL · INTERNET ARCHIVE\nBúsqueda: {search_term}\n\n"
+                f"{listing}\n\nSelecciona una pista para reproducirla en la sala:",
+                dj_source,
+                reply,
+                buttons
+            )
+            return
+
+        if args[0].lower() in ("detener", "stop", "parar"):
+            if thread not in DJ_ROOMS:
+                await send_message(
+                    thread,
+                    "Katherine no está reproduciendo audio en esta sala.",
+                    dj_source,
+                    reply
+                )
+                return
+            await stop_dj_room(thread, request_leave=True)
+            await send_message(
+                thread,
+                "⏹️ Reproducción detenida. Katherine salió de la sala.",
+                dj_source,
+                reply
+            )
+            return
+
+        track_path = resolve_dj_track(args[0])
+        if not track_path:
+            await send_message(
+                thread,
+                "No encuentro ese archivo en music/. También puedes buscar audio público "
+                "con !dj buscar <tema>.",
+                dj_source,
+                reply
+            )
+            return
+
+        looping = any(
+            value.lower() in ("bucle", "loop", "repetir")
+            for value in args[1:]
+        )
+        room_id = thread
+        if len(args) > 1 and args[-1].isdigit():
+            room_id = args[-1]
+
+        ok, message = await start_dj_room(room_id, track_path, looping)
+        await send_message(
+            thread,
+            f"🎧 {message}" if ok else f"DJ: {message}",
+            dj_source,
+            reply
+        )
+        return
+
+    if command in ("!djdetener", "!djstop", "!salirsala"):
         if thread not in DJ_ROOMS:
             await send_message(thread, "Katherine no está conectada a una llamada en esta sala.", source, reply)
             return
