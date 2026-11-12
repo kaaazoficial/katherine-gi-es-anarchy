@@ -128,3 +128,62 @@ def test_guide_sources_run_in_parallel_and_return_partial_data(monkeypatch):
     assert result["kqm_data"]["teams"] == ["Equipo de prueba"]
     assert progress
     assert any("RESPALDO" in item or "FICHA" in item for item in progress)
+
+def test_unaddressed_chat_is_tracked_but_does_not_activate_katherine(monkeypatch):
+    calls = {"commands": [], "users": [], "activity": []}
+
+    monkeypatch.setattr(katherine, "check_antispam_message", lambda event, source: (False, None))
+
+    async def no_speech(event, source):
+        return None
+
+    async def capture_command(event, source):
+        calls["commands"].append(event["message"]["content"])
+
+    monkeypatch.setattr(katherine, "enqueue_message_for_speech", no_speech)
+    monkeypatch.setattr(katherine, "handle_command", capture_command)
+    monkeypatch.setattr(katherine, "record_user", lambda uid, nickname, count_message=False: calls["users"].append((uid, nickname, count_message)))
+    monkeypatch.setattr(katherine, "record_chat_activity", lambda thread, uid, nickname: calls["activity"].append((thread, uid, nickname)))
+
+    event = {
+        "type": "message",
+        "threadId": "room-natural",
+        "message": {
+            "content": "hola a todos",
+            "author": {"uid": "user-1", "nickname": "Viajero"},
+        },
+    }
+    asyncio.run(katherine.dispatch(event, "developer"))
+
+    assert calls["commands"] == []
+    assert calls["users"] == [("developer:room-natural:user-1", "Viajero", True)]
+    assert calls["activity"] == [("room-natural", "developer:room-natural:user-1", "Viajero")]
+
+
+def test_addressed_natural_request_routes_to_existing_command(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(katherine, "check_antispam_message", lambda event, source: (False, None))
+
+    async def no_speech(event, source):
+        return None
+
+    async def capture_command(event, source):
+        calls.append(event["message"]["content"])
+
+    monkeypatch.setattr(katherine, "enqueue_message_for_speech", no_speech)
+    monkeypatch.setattr(katherine, "handle_command", capture_command)
+    monkeypatch.setattr(katherine, "record_user", lambda *args, **kwargs: None)
+    monkeypatch.setattr(katherine, "record_chat_activity", lambda *args, **kwargs: None)
+
+    event = {
+        "type": "message",
+        "threadId": "room-natural",
+        "message": {
+            "content": "Katherine, pausa la música",
+            "author": {"uid": "user-1", "nickname": "Viajero"},
+        },
+    }
+    asyncio.run(katherine.dispatch(event, "developer"))
+    assert calls == ["!dj pausa"]
+
