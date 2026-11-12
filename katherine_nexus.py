@@ -5,6 +5,15 @@ import time
 import unicodedata
 from typing import Any
 
+from katherine_topics import is_genshin_related_request
+
+
+GENSHIN_COMMANDS = frozenset({
+    "enciclopedia", "guia", "equipos", "rotacion", "materiales",
+    "cobertura", "buscargenshin",
+})
+
+
 def _normalize(value: str) -> str:
     text = unicodedata.normalize("NFKD", str(value or "").casefold())
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
@@ -121,6 +130,9 @@ def interpret_natural_request(value: str) -> str | None:
             subject = re.sub(r"\s+", " ", match.group(1)).strip(" .?!")
             if not subject or len(subject) > 120:
                 return None
+            if command in GENSHIN_COMMANDS and not is_genshin_related_request(text):
+                # Never route a generic app/platform/person question to Teyvat.
+                continue
             return f"multimedia {command} {subject}" if command in {"imagen", "video", "audio"} else f"{command} {subject}"
     translation = re.fullmatch(
         r"(?:traduce|traducir) (?:esto )?al?\s*([a-záéíóúñ ]{2,30})\s*[:|,]\s*(.{1,350})",

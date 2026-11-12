@@ -30,7 +30,7 @@ Sin clave, la IA informa que no está conectada y los comandos clásicos siguen 
 - \`!ia analista activar|resumen|limpiar|desactivar\` (administradores).
 - \`!ia diagnostico\` (administradores).
 
-Las solicitudes naturales explícitas se envían al núcleo si hay clave configurada; si no, conservan el enrutador determinista. La mención aislada «Katherine» nunca activa el bot.
+Las solicitudes naturales explícitas se envían al núcleo si hay clave configurada; si no, conservan el enrutador determinista. Las herramientas de Teyvat solo se seleccionan cuando la consulta menciona Genshin/Teyvat o una entidad reconocible del juego; preguntas generales sobre Anarchy Apps, Katherine, bots, APIs o programación nunca se derivan a la enciclopedia. La mención aislada «Katherine» nunca activa el bot.
 
 ## Seguridad y límites
 - Los comandos propuestos pasan por allowlist, validación de argumentos y el handler original.
