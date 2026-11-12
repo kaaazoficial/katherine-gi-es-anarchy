@@ -8484,7 +8484,8 @@ async def fetch_community_character_guide(
         "stats": None,
         "talents": None,
         "teams": None,
-        "sources": []
+        "sources": [],
+        "field_sources": {}
     }
     field_sources = (
         ("weapons", "weapons"),
@@ -8508,6 +8509,7 @@ async def fetch_community_character_guide(
                 else:
                     merged[field] = value
                 merged["sources"].append(source_name)
+                merged["field_sources"][field] = source_name
                 merged[field + "_url"] = data.get("url")
                 break
 
@@ -8519,7 +8521,9 @@ async def fetch_community_character_guide(
                 for index, item in enumerate(data["teams"], 1)
             )
             merged["teams_url"] = data.get("url")
-            merged["sources"].append("genshin_builds_teams" if sources.get("genshin_builds_teams") else "icy_veins_teams")
+            team_source = "genshin_builds_teams" if sources.get("genshin_builds_teams") else "icy_veins_teams"
+            merged["sources"].append(team_source)
+            merged["field_sources"]["teams"] = team_source
 
     source_labels = {
         "genshin_builds": "Genshin-Builds (español)",
@@ -8644,6 +8648,325 @@ def parse_genshin_builds_content(content: str, url: str):
     }
 
 
+
+
+# ---------------------------------------------------------------------------
+# COBERTURA DE GUÍAS POR PERSONAJE
+# ---------------------------------------------------------------------------
+GUIDE_COVERAGE_SOURCE_NAMES = {
+    "local": "Katherine · recomendaciones revisadas",
+    "genshin_db": "Genshin-DB",
+    "helper": "Genshin Impact Helper Team",
+    "genshin_builds": "Genshin-Builds",
+    "kqm": "KeqingMains",
+    "genshin_gg": "Genshin.gg",
+    "icy_veins": "Icy Veins",
+    "icy_veins_teams": "Icy Veins · equipos"
+}
+
+
+async def collect_character_guide_data(query: str):
+    """Obtiene una sola instantánea de la guía para !guia y !cobertura."""
+    character, stats = await asyncio.gather(
+        get_character(query),
+        character_stats(query)
+    )
+
+    name = (
+        clean_game_text(character.get("name") or query)
+        if isinstance(character, dict) else clean_game_text(query)
+    )
+    key = normalize_character_guide_key(name)
+    artifact = ARTIFACT_GUIDES.get(key)
+    weapons = WEAPON_GUIDES.get(key)
+    priority = TALENT_PRIORITIES.get(key)
+    team = BUILD_TEAMS.get(key)
+
+    needs_helper = {
+        "artifacts": not bool(artifact),
+        "weapons": not bool(weapons),
+        "talents": not bool(priority)
+    }
+    helper_data = None
+    if any(needs_helper.values()):
+        helper_data = await fetch_helper_character_guide(
+            character, query, name, key, needs_helper
+        )
+
+    kqm_data = None
+    if not team:
+        kqm_data = await fetch_kqm_teams(character, query, name, key)
+
+    needs_community = {
+        "artifacts": not bool(artifact) and not bool(
+            helper_data and helper_data.get("artifacts")
+        ),
+        "weapons": not bool(weapons) and not bool(
+            helper_data and helper_data.get("weapons")
+        ),
+        "stats": not bool(artifact) and not bool(
+            helper_data and helper_data.get("artifacts")
+        ),
+        "talents": not bool(priority) and not bool(
+            helper_data and helper_data.get("talents")
+        ),
+        "teams": not bool(team) and not bool(
+            kqm_data and kqm_data.get("teams")
+        )
+    }
+    community_data = None
+    if any(needs_community.values()):
+        community_data = await fetch_community_character_guide(
+            character, query, name, key, needs_community
+        )
+
+    return {
+        "query": query,
+        "name": name,
+        "key": key,
+        "character": character,
+        "stats": stats,
+        "artifact": artifact,
+        "weapons": weapons,
+        "priority": priority,
+        "team": team,
+        "helper_data": helper_data,
+        "kqm_data": kqm_data,
+        "community_data": community_data
+    }
+
+
+def build_character_guide_coverage(data: dict):
+    """Registra qué apartados existen y quién proporcionó cada uno."""
+    character = data.get("character")
+    stats = data.get("stats")
+    artifact = data.get("artifact")
+    weapons = data.get("weapons")
+    priority = data.get("priority")
+    team = data.get("team")
+    helper = data.get("helper_data") or {}
+    kqm = data.get("kqm_data") or {}
+    community = data.get("community_data") or {}
+    field_sources = community.get("field_sources") or {}
+
+    def source_for(field, fallback=None):
+        source = field_sources.get(field)
+        if source:
+            return GUIDE_COVERAGE_SOURCE_NAMES.get(source, source)
+        return fallback or "Sin fuente"
+
+    def helper_text(field):
+        return str(helper.get(field) or "")
+
+    helper_artifacts = helper_text("artifacts")
+    helper_weapons = helper_text("weapons")
+    helper_talents = helper_text("talents")
+
+    skills = []
+    passives = []
+    constellations = []
+    costs = None
+    if isinstance(character, dict):
+        skills = character.get("skillTalents") or character.get("talents") or []
+        passives = character.get("passiveTalents") or []
+        constellations = (
+            character.get("constellations")
+            or character.get("Constellations")
+            or []
+        )
+        if isinstance(skills, dict):
+            skills = list(skills.values())
+        if isinstance(passives, dict):
+            passives = list(passives.values())
+        if isinstance(constellations, dict):
+            constellations = list(constellations.values())
+        costs = aggregate_material_costs(character.get("costs"))
+
+    if not isinstance(skills, list):
+        skills = []
+    if not isinstance(passives, list):
+        passives = []
+    if not isinstance(constellations, list):
+        constellations = []
+
+    base_stats = get_level90(stats)
+    if isinstance(base_stats, dict):
+        base_stats_ok = any(base_stats.get(k) is not None for k in ("hp", "attack", "defense"))
+    else:
+        base_stats_ok = False
+
+    helper_has_sets = "sets:" in helper_artifacts.casefold()
+    helper_has_main = "stats principales:" in helper_artifacts.casefold()
+    helper_has_sub = "prioridad de substats:" in helper_artifacts.casefold()
+    community_artifacts = bool(community.get("artifacts"))
+    community_stats = bool(community.get("stats"))
+
+    rows = [
+        {
+            "label": "Ficha del personaje",
+            "ok": isinstance(character, dict),
+            "source": "Genshin-DB" if isinstance(character, dict) else "Sin fuente"
+        },
+        {
+            "label": "Estadísticas base · nivel 90",
+            "ok": base_stats_ok,
+            "source": "Genshin-DB" if base_stats_ok else "Sin fuente"
+        },
+        {
+            "label": "Sets de artefactos",
+            "ok": bool(
+                (artifact and artifact.get("sets"))
+                or helper_has_sets
+                or community_artifacts
+            ),
+            "source": (
+                "Katherine · guía revisada" if artifact and artifact.get("sets")
+                else "Genshin Impact Helper Team" if helper_has_sets
+                else source_for("artifacts") if community_artifacts
+                else "Sin fuente"
+            )
+        },
+        {
+            "label": "Estadísticas principales",
+            "ok": bool(
+                (artifact and artifact.get("main"))
+                or helper_has_main
+                or community_stats
+            ),
+            "source": (
+                "Katherine · guía revisada" if artifact and artifact.get("main")
+                else "Genshin Impact Helper Team" if helper_has_main
+                else source_for("stats") if community_stats
+                else "Sin fuente"
+            )
+        },
+        {
+            "label": "Subestadísticas",
+            "ok": bool(
+                (artifact and artifact.get("subs"))
+                or helper_has_sub
+                or community_stats
+            ),
+            "source": (
+                "Katherine · guía revisada" if artifact and artifact.get("subs")
+                else "Genshin Impact Helper Team" if helper_has_sub
+                else source_for("stats") if community_stats
+                else "Sin fuente"
+            )
+        },
+        {
+            "label": "Armas recomendadas",
+            "ok": bool(
+                (weapons and weapons.get("weapons"))
+                or helper_weapons
+                or community.get("weapons")
+            ),
+            "source": (
+                "Katherine · guía revisada" if weapons and weapons.get("weapons")
+                else "Genshin Impact Helper Team" if helper_weapons
+                else source_for("weapons") if community.get("weapons")
+                else "Sin fuente"
+            )
+        },
+        {
+            "label": "Equipos recomendados",
+            "ok": bool(
+                team
+                or kqm.get("teams")
+                or community.get("teams")
+            ),
+            "source": (
+                "Katherine · guía revisada" if team
+                else "KeqingMains" if kqm.get("teams")
+                else source_for("teams") if community.get("teams")
+                else "Sin fuente"
+            )
+        },
+        {
+            "label": "Prioridad de talentos",
+            "ok": bool(priority or helper_talents or community.get("talents")),
+            "source": (
+                "Katherine · guía revisada" if priority
+                else "Genshin Impact Helper Team" if helper_talents
+                else source_for("talents") if community.get("talents")
+                else "Sin fuente"
+            )
+        },
+        {
+            "label": "Habilidades de combate",
+            "ok": bool(skills),
+            "source": "Genshin-DB" if skills else "Sin fuente"
+        },
+        {
+            "label": "Habilidades pasivas",
+            "ok": bool(passives),
+            "source": "Genshin-DB" if passives else "Sin fuente"
+        },
+        {
+            "label": "Detalles de constelaciones",
+            "ok": len(constellations) >= 6,
+            "source": "Genshin-DB" if len(constellations) >= 6 else "Sin fuente completa"
+        },
+        {
+            "label": "Recomendación de constelaciones",
+            "ok": bool(CONSTELLATION_GUIDES.get(data.get("key"))),
+            "source": (
+                "Katherine · guía revisada"
+                if CONSTELLATION_GUIDES.get(data.get("key")) else "Sin fuente"
+            )
+        },
+        {
+            "label": "Materiales de ascensión",
+            "ok": bool(costs),
+            "source": "Genshin-DB" if costs else "Sin fuente"
+        }
+    ]
+
+    total = len(rows)
+    found = sum(1 for row in rows if row["ok"])
+    missing = total - found
+    percentage = round((found / total) * 100) if total else 0
+    return {
+        "character": data.get("name") or data.get("query") or "Personaje",
+        "rows": rows,
+        "found": found,
+        "missing": missing,
+        "total": total,
+        "percentage": percentage
+    }
+
+
+def format_character_guide_coverage(data: dict):
+    """Presenta el diagnóstico con estado y fuente de cada apartado."""
+    coverage = build_character_guide_coverage(data)
+    if coverage["percentage"] >= 90:
+        state = "COBERTURA ALTA"
+    elif coverage["percentage"] >= 65:
+        state = "COBERTURA PARCIAL"
+    else:
+        state = "GUÍA INCOMPLETA"
+
+    lines = [
+        f"COBERTURA DE GUÍA · {coverage['character'].upper()}",
+        f"Resultado: {coverage['found']}/{coverage['total']} apartados · {coverage['percentage']}% · {state}",
+        ""
+    ]
+    for row in coverage["rows"]:
+        icon = "🟢" if row["ok"] else "🔴"
+        status = "Disponible" if row["ok"] else "Falta"
+        lines.append(f"{icon} {row['label']}: {status}")
+        lines.append(f"   Fuente: {row['source']}")
+
+    missing_rows = [row["label"] for row in coverage["rows"] if not row["ok"]]
+    lines.extend(["", "APARTADOS PENDIENTES"])
+    lines.append(", ".join(missing_rows) if missing_rows else "Ninguno.")
+    lines.append(
+        "La cobertura indica datos encontrados en las fuentes consultadas; "
+        "no significa que todas las recomendaciones tengan el mismo nivel de detalle."
+    )
+    return "\n".join(lines)
+
+
 def normalize_character_guide_key(name: str) -> str:
     key = re.sub(r"\s+", " ", str(name).casefold().strip())
     return CHARACTER_GUIDE_ALIASES.get(key, key)
@@ -8709,6 +9032,7 @@ async def handle_command(event: dict, source: str):
             [
                 "GENSHIN IMPACT · GUÍA Y CONSULTAS",
                 f"{PREFIX}guia <personaje> — guía completa: estadísticas, sets, stats principales, substats, armas, equipos, talentos, constelaciones y materiales.",
+                f"{PREFIX}cobertura <personaje> — muestra qué apartados de su guía están disponibles, cuáles faltan y sus fuentes.",
                 f"{PREFIX}buscargenshin <texto> — busca personajes y objetos.",
                 f"{PREFIX}lista <categoría> [página] — lista personajes, armas, enemigos y otros datos.",
                 f"{PREFIX}enemigo <nombre> — ficha de enemigo o jefe.",
@@ -9139,64 +9463,50 @@ async def handle_command(event: dict, source: str):
     # -----------------------------------------------------------------------
     # GUÍAS, ESTADÍSTICAS Y BÚSQUEDA AMPLIADA DE GENSHIN
     # -----------------------------------------------------------------------
+    if command == "!cobertura":
+        if not query:
+            await send_message(
+                thread,
+                f"Uso: {PREFIX}cobertura nombre del personaje",
+                source,
+                reply
+            )
+            return
+        guide_data = await collect_character_guide_data(query)
+        if not isinstance(guide_data.get("character"), dict):
+            await send_message(
+                thread,
+                f"No encontré la ficha de «{query}» en Genshin-DB. "
+                "No puedo calcular una cobertura fiable.",
+                source,
+                reply
+            )
+            return
+        await send_message(
+            thread,
+            format_character_guide_coverage(guide_data),
+            source,
+            reply
+        )
+        return
+
     if command == "!guia":
         if not query:
             await send_message(thread, f"Uso: {PREFIX}guia nombre del personaje", source, reply)
             return
 
-        character, stats = await asyncio.gather(
-            get_character(query),
-            character_stats(query)
-        )
-
-        name = (
-            clean_game_text(character.get("name") or query)
-            if isinstance(character, dict) else clean_game_text(query)
-        )
-        key = normalize_character_guide_key(name)
-
-        artifact = ARTIFACT_GUIDES.get(key)
-        weapons = WEAPON_GUIDES.get(key)
-        priority = TALENT_PRIORITIES.get(key)
-        team = BUILD_TEAMS.get(key)
-
-        needs_helper = {
-            "artifacts": not bool(artifact),
-            "weapons": not bool(weapons),
-            "talents": not bool(priority)
-        }
-        helper_data = None
-        if any(needs_helper.values()):
-            helper_data = await fetch_helper_character_guide(
-                character, query, name, key, needs_helper
-            )
-
-        kqm_data = None
-        if not team:
-            kqm_data = await fetch_kqm_teams(character, query, name, key)
-
-        needs_community = {
-            "artifacts": not bool(artifact) and not bool(
-                helper_data and helper_data.get("artifacts")
-            ),
-            "weapons": not bool(weapons) and not bool(
-                helper_data and helper_data.get("weapons")
-            ),
-            "stats": not bool(artifact) and not bool(
-                helper_data and helper_data.get("artifacts")
-            ),
-            "talents": not bool(priority) and not bool(
-                helper_data and helper_data.get("talents")
-            ),
-            "teams": not bool(team) and not bool(
-                kqm_data and kqm_data.get("teams")
-            )
-        }
-        community_data = None
-        if any(needs_community.values()):
-            community_data = await fetch_community_character_guide(
-                character, query, name, key, needs_community
-            )
+        guide_data = await collect_character_guide_data(query)
+        character = guide_data["character"]
+        stats = guide_data["stats"]
+        name = guide_data["name"]
+        key = guide_data["key"]
+        artifact = guide_data["artifact"]
+        weapons = guide_data["weapons"]
+        priority = guide_data["priority"]
+        team = guide_data["team"]
+        helper_data = guide_data["helper_data"]
+        kqm_data = guide_data["kqm_data"]
+        community_data = guide_data["community_data"]
 
         if not isinstance(character, dict) and not helper_data and not kqm_data:
             await send_message(
@@ -9411,6 +9721,7 @@ async def handle_command(event: dict, source: str):
                     + "\n".join(dict.fromkeys(source_lines))
                 )
 
+        sections.append(format_character_guide_coverage(guide_data))
         sections.append(
             "RECOMENDACIÓN FINAL\n"
             "Ajusta las estadísticas y armas a tu equipo, rotación y necesidades de energía. "
