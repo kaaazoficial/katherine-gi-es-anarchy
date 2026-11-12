@@ -10070,6 +10070,12 @@ async def handle_command(event: dict, source: str):
         return
     command = "!" + command_token[len(used_prefix):].lower()
     args = pieces[1:]
+
+    # Alias sencillo para buscar música: !buscar piano equivale a !dj buscar piano.
+    if command == "!buscar":
+        command = "!dj"
+        args = ["buscar", *args]
+
     query = " ".join(args).strip()
     reply = message_id
     LAST_COMMAND_AT = time.time()
@@ -10202,6 +10208,7 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}salas — consulta salas en vivo.",
                 f"{PREFIX}dj lista — muestra audios locales e instrucciones.",
                 f"{PREFIX}dj buscar <tema> — busca música pública y licenciada.",
+                f"{PREFIX}buscar <tema> — alias rápido de {PREFIX}dj buscar.",
                 f"{PREFIX}dj archivo.mp3 [bucle] — reproduce audio local (comunidad).",
                 f"{PREFIX}djdetener — detiene la reproducción y sale de la sala.",
                 f"{PREFIX}menu — abre el menú interactivo.",
@@ -12002,6 +12009,15 @@ async def handle_command(event: dict, source: str):
 
         await send_message(thread, answer, source, reply)
         return
+
+    # Respuesta explícita para comandos inexistentes: nunca dejar al usuario
+    # sin respuesta por haber escrito un nombre no registrado.
+    await send_message(
+        thread,
+        f"No reconozco el comando {command}. Usa !ayuda para consultar los comandos disponibles.",
+        source,
+        reply
+    )
 
 
 # ---------------------------------------------------------------------------
