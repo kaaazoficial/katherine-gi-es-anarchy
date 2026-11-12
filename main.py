@@ -878,7 +878,7 @@ def get_database_stats() -> tuple[float, int | None]:
     return total_bytes / (1024 * 1024), user_count
 
 
-async def build_status_message(source: str, nickname: str) -> str:
+async def build_status_message(source: str, nickname: str, thread_id: str | None = None) -> str:
     """Informe técnico con métricas reales del proceso y prueba de API."""
     started_check = time.perf_counter()
     result = await api("GET", "/me", source)
@@ -991,6 +991,30 @@ async def build_status_message(source: str, nickname: str) -> str:
         f"• Chats vinculados al token: {len(thread_ids)}",
         "Los contadores corresponden a este proceso desde su último reinicio."
     ]
+    audio_state = DJ_ROOMS.get(str(thread_id)) if thread_id else None
+    if audio_state:
+        lines.extend([
+            "",
+            "🎙️ DIAGNÓSTICO DE AUDIO",
+            f"• LiveKit: {'conectado' if audio_state.get('room') else 'no conectado'}",
+            f"• Fuente de audio: {'publicada' if audio_state.get('audio_track') else 'no publicada'}",
+            f"• DJ: {'reproduciendo' if audio_state.get('task') and not audio_state['task'].done() else 'en espera'}",
+            f"• Pista: {audio_state.get('filename') or 'ninguna'}",
+            f"• Pausa: {'sí' if not audio_state['pause_event'].is_set() else 'no'}",
+            f"• Cola musical: {len(audio_state.get('queue', []))}",
+            f"• Volumen: {round(float(audio_state.get('volume', 0.75))*100)}%",
+            f"• Lectura TTS: {'activa' if audio_state.get('reading_enabled') else 'inactiva'}",
+            f"• Cola TTS: {audio_state['speech_queue'].qsize()}",
+            f"• Voz TTS: {audio_state.get('tts_voice', TTS_VOICE)} ({audio_state.get('tts_rate', '+0%')})"
+        ])
+    else:
+        lines.extend(["", "🎙️ DIAGNÓSTICO DE AUDIO", "• No hay una conexión de audio activa en esta sala."])
+    lines.extend([
+        f"• Errores de reproducción desde inicio: {metrics['dj_playback_errors']}",
+        f"• Reintentos automáticos: {metrics['dj_playback_retries']}",
+        f"• Canciones saltadas: {metrics['dj_tracks_skipped']}",
+        f"• Errores de validación: {metrics['dj_validation_errors']}"
+    ])
     return "\n".join(lines)
 
 
@@ -1780,6 +1804,7 @@ async def ensure_voice_room(thread_id: str):
                 "temporary_audio_path": None,
                 "queue": deque(),
                 "pause_event": asyncio.Event(),
+                "skip_event": asyncio.Event(),
                 "skip_requested": False,
                 "tts_voice": TTS_VOICE,
                 "tts_rate": "+0%",
@@ -1787,6 +1812,11 @@ async def ensure_voice_room(thread_id: str):
                 "tts_read_mentions": False,
                 "started_at": time.time()
             }
+            room_state = DJ_ROOMS[thread_id]
+            room_state["tts_voice"] = get_chat_setting(thread_id, "tts_voice", TTS_VOICE)
+            room_state["tts_rate"] = get_chat_setting(thread_id, "tts_rate", "+0%")
+            room_state["tts_read_links"] = get_chat_setting(thread_id, "tts_read_links", "0") == "1"
+            room_state["tts_read_mentions"] = get_chat_setting(thread_id, "tts_read_mentions", "0") == "1"
             logging.info("[VOZ] Katherine conectada a la llamada %s", thread_id)
             return True, "Katherine se unió a la llamada."
         except asyncio.TimeoutError:
@@ -2180,6 +2210,58 @@ async def download_dj_audio(url: str) -> Path:
         raise
 
 
+async def _dj_play_single(thread_id: str, path: Path, state: dict) -> bool:
+    """Reproduce una pista; False indica salto o interrupción."""
+    container = pyav.open(str(path), mode="r")
+    try:
+        audio_stream = next(
+            (stream for stream in container.streams if stream.type == "audio"),
+            None
+        )
+        if audio_stream is None:
+            raise ValueError("El archivo no contiene una pista de audio.")
+        resampler = pyav.AudioResampler(format="s16", layout="mono", rate=48000)
+        for decoded in container.decode(audio_stream):
+            if state["stop_event"].is_set() or state["playback_stop_event"].is_set():
+                return False
+            for frame in resampler.resample(decoded):
+                samples = np.asarray(frame.to_ndarray(), dtype=np.int16).reshape(-1)
+                volume = max(0.0, min(1.0, float(state.get("volume", 0.75))))
+                if volume <= 0:
+                    samples = np.zeros_like(samples)
+                elif volume < 1:
+                    samples = np.clip(
+                        samples.astype(np.float32) * volume, -32768, 32767
+                    ).astype(np.int16)
+                for offset in range(0, len(samples), 480):
+                    if state["stop_event"].is_set() or state["playback_stop_event"].is_set():
+                        return False
+                    if state["skip_event"].is_set():
+                        return False
+                    while not state["pause_event"].is_set():
+                        if state["stop_event"].is_set() or state["playback_stop_event"].is_set():
+                            return False
+                        if state["skip_event"].is_set():
+                            return False
+                        await asyncio.sleep(0.04)
+                    while state["speaking"].is_set():
+                        if state["stop_event"].is_set() or state["playback_stop_event"].is_set():
+                            return False
+                        if state["skip_event"].is_set():
+                            return False
+                        await asyncio.sleep(0.02)
+                    chunk = samples[offset:offset + 480]
+                    if not len(chunk):
+                        continue
+                    audio_frame = livekit_rtc.AudioFrame.create(48000, 1, len(chunk))
+                    destination = np.frombuffer(audio_frame.data, dtype=np.int16)
+                    destination[:len(chunk)] = chunk
+                    await state["audio_source"].capture_frame(audio_frame)
+        return True
+    finally:
+        container.close()
+
+
 async def dj_playback_loop(
     thread_id: str,
     file_path: Path | str,
@@ -2190,85 +2272,86 @@ async def dj_playback_loop(
     state = DJ_ROOMS.get(str(thread_id))
     if not state:
         return
-    playback_stop = state["playback_stop_event"]
-    session_stop = state["stop_event"]
-    audio_source_url = str(file_path)
-    track_label = display_name or (
-        file_path.name if isinstance(file_path, Path) else "audio remoto"
-    )
+
+    current_path = Path(file_path)
+    current_temporary = state.get("temporary_audio_path")
+    current_looping = bool(looping)
+    current_title = display_name or current_path.name
 
     try:
-        while not playback_stop.is_set() and not session_stop.is_set():
-            # Las pistas remotas ya se descargan a disco antes de llegar aquí.
-            # PyAV abre archivos locales, no URLs HTTP directas.
-            container = pyav.open(audio_source_url, mode="r")
+        while not state["stop_event"].is_set() and not state["playback_stop_event"].is_set():
+            state["filename"] = current_title
+            state["track_started_at"] = time.time()
+            state["skip_event"].clear()
             try:
-                audio_stream = next(
-                    (stream for stream in container.streams if stream.type == "audio"),
-                    None
+                while not state["stop_event"].is_set() and not state["playback_stop_event"].is_set():
+                    try:
+                        played = await _dj_play_single(thread_id, current_path, state)
+                    except Exception:
+                        metrics["dj_playback_retries"] += 1
+                        logging.warning("[DJ] Reintentando pista %s en sala %s", current_title, thread_id)
+                        await asyncio.sleep(1.0)
+                        played = await _dj_play_single(thread_id, current_path, state)
+                    if (
+                        current_looping and played
+                        and not state["skip_event"].is_set()
+                        and not state["stop_event"].is_set()
+                        and not state["playback_stop_event"].is_set()
+                    ):
+                        continue
+                    break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                metrics["dj_playback_errors"] += 1
+                logging.exception("[DJ] Falló la pista %s en sala %s", current_title, thread_id)
+                await send_message(
+                    str(thread_id),
+                    f"⚠️ No pude reproducir «{current_title}» ({type(exc).__name__}). "
+                    "La saltaré y continuaré con la cola.",
+                    "developer"
                 )
-                if audio_stream is None:
-                    raise ValueError("El archivo no contiene una pista de audio.")
 
-                resampler = pyav.AudioResampler(
-                    format="s16",
-                    layout="mono",
-                    rate=48000
-                )
-                for decoded in container.decode(audio_stream):
-                    if playback_stop.is_set() or session_stop.is_set():
-                        break
-                    for frame in resampler.resample(decoded):
-                        samples = np.asarray(frame.to_ndarray(), dtype=np.int16).reshape(-1)
-                        volume = max(0.0, min(1.0, float(state.get("volume", 0.75))))
-                        if volume <= 0.0:
-                            samples = np.zeros_like(samples)
-                        elif volume < 1.0:
-                            samples = np.clip(
-                                samples.astype(np.float32) * volume,
-                                -32768,
-                                32767
-                            ).astype(np.int16)
-                        for offset in range(0, len(samples), 480):
-                            if playback_stop.is_set() or session_stop.is_set():
-                                break
-                            while state["speaking"].is_set() and not playback_stop.is_set() and not session_stop.is_set():
-                                await asyncio.sleep(0.02)
-                            if playback_stop.is_set() or session_stop.is_set():
-                                break
-                            chunk = samples[offset:offset + 480]
-                            if not len(chunk):
-                                continue
-                            audio_frame = livekit_rtc.AudioFrame.create(
-                                48000, 1, len(chunk)
-                            )
-                            destination = np.frombuffer(
-                                audio_frame.data, dtype=np.int16
-                            )
-                            destination[:len(chunk)] = chunk
-                            await audio_source.capture_frame(audio_frame)
-                    if playback_stop.is_set() or session_stop.is_set():
-                        break
-            finally:
-                container.close()
+            if current_temporary:
+                try:
+                    Path(current_temporary).unlink(missing_ok=True)
+                except OSError:
+                    logging.warning("[DJ] No pude eliminar una pista temporal de %s", thread_id)
+            current_temporary = None
+            state["temporary_audio_path"] = None
 
-            if not looping:
+            if state["stop_event"].is_set() or state["playback_stop_event"].is_set():
                 break
+            if state["skip_event"].is_set():
+                state["skip_event"].clear()
+                metrics["dj_tracks_skipped"] += 1
+
+            if state["queue"]:
+                next_item = state["queue"].popleft()
+                current_path = Path(next_item["path"])
+                current_temporary = next_item.get("temporary")
+                current_title = next_item.get("title") or current_path.name
+                current_looping = bool(next_item.get("looping", False))
+                state["track"] = next_item.get("metadata")
+                state["temporary_audio_path"] = current_temporary
+                state["filename"] = current_title
+                metrics["dj_queue_advanced"] += 1
+                continue
+            break
 
     except asyncio.CancelledError:
         raise
-    except Exception:
-        logging.exception("[DJ] Falló la reproducción de %s", track_label)
     finally:
+        if current_temporary:
+            try:
+                Path(current_temporary).unlink(missing_ok=True)
+            except OSError:
+                pass
         if DJ_ROOMS.get(str(thread_id)) is state and state.get("task") is asyncio.current_task():
             state["task"] = None
-            temporary_audio = state.pop("temporary_audio_path", None)
-            if temporary_audio:
-                try:
-                    Path(temporary_audio).unlink(missing_ok=True)
-                except OSError:
-                    logging.warning("[DJ] No pude borrar el audio temporal de %s", thread_id)
-            if not state.get("reading_enabled") and not session_stop.is_set():
+            state["filename"] = None
+            state["track"] = None
+            if not state.get("reading_enabled") and not state["stop_event"].is_set():
                 await stop_dj_room(
                     str(thread_id),
                     request_leave=True,
@@ -2276,7 +2359,7 @@ async def dj_playback_loop(
                 )
 
 
-def validate_local_dj_audio(path: Path):
+def validate_local_dj_audio(def validate_local_dj_audio(path: Path):
     resolved = Path(path).resolve()
     music_root = DJ_MUSIC_DIR.resolve()
     if not resolved.is_relative_to(music_root):
@@ -2306,7 +2389,8 @@ async def start_dj_room(
     thread_id: str,
     file_path: Path | str,
     looping: bool,
-    track_metadata: dict | None = None
+    track_metadata: dict | None = None,
+    enqueue: bool = False
 ):
     if pyav is None or livekit_rtc is None or np is None:
         return False, "Faltan dependencias de LiveKit, PyAV o NumPy en Render."
@@ -2315,14 +2399,20 @@ async def start_dj_room(
     original_source = file_path
     if isinstance(file_path, str) and file_path.lower().startswith("https://"):
         try:
-            file_path = await download_dj_audio(file_path)
-            temporary_audio = file_path
+            temporary_audio = await download_dj_audio(file_path)
+            file_path = temporary_audio
         except Exception as exc:
             logging.exception("[DJ] No se pudo preparar la pista remota")
             return False, (
                 "No pude descargar o validar la canción "
                 f"({type(exc).__name__}: {str(exc)[:140]})."
             )
+    else:
+        try:
+            file_path = validate_local_dj_audio(Path(file_path))
+        except Exception as exc:
+            metrics["dj_validation_errors"] += 1
+            return False, f"El archivo no pasó la validación de audio: {str(exc)[:140]}."
 
     ok, message = await ensure_voice_room(str(thread_id))
     if not ok:
@@ -2331,49 +2421,74 @@ async def start_dj_room(
         return False, message
 
     state = DJ_ROOMS[str(thread_id)]
-    previous_task = state.get("task")
-    if previous_task and not previous_task.done():
+    display_name = (
+        (track_metadata or {}).get("title")
+        or (Path(str(original_source)).name if isinstance(original_source, (str, Path)) else "Audio")
+    )
+    active_task = state.get("task")
+
+    if enqueue and active_task and not active_task.done():
+        if len(state["queue"]) >= 50:
+            if temporary_audio:
+                Path(temporary_audio).unlink(missing_ok=True)
+            return False, "La cola alcanzó su límite de 50 canciones."
+        state["queue"].append({
+            "path": str(file_path),
+            "temporary": str(temporary_audio) if temporary_audio else None,
+            "title": display_name,
+            "metadata": track_metadata,
+            "looping": bool(looping)
+        })
+        metrics["dj_tracks_queued"] += 1
+        return True, f"«{display_name}» añadida a la cola (posición {len(state['queue'])})."
+
+    if active_task and not active_task.done():
         state["task"] = None
         state["playback_stop_event"].set()
-        previous_task.cancel()
+        active_task.cancel()
         try:
-            await previous_task
+            await active_task
         except asyncio.CancelledError:
             pass
         except Exception:
             logging.exception("[DJ] Error reemplazando la pista anterior")
 
-    old_temporary_audio = state.get("temporary_audio_path")
-    if old_temporary_audio:
+    for queued in list(state.get("queue", [])):
+        if queued.get("temporary"):
+            try:
+                Path(queued["temporary"]).unlink(missing_ok=True)
+            except OSError:
+                pass
+    state["queue"].clear()
+
+    old_temporary = state.get("temporary_audio_path")
+    if old_temporary:
         try:
-            Path(old_temporary_audio).unlink(missing_ok=True)
+            Path(old_temporary).unlink(missing_ok=True)
         except OSError:
             logging.warning("[DJ] No pude borrar la pista temporal anterior.")
 
     state["playback_stop_event"] = asyncio.Event()
-    display_name = (
-        (track_metadata or {}).get("title")
-        or (file_path.name if isinstance(file_path, Path) else Path(str(original_source)).name)
-    )
+    state["skip_event"].clear()
+    state["pause_event"].set()
     state["filename"] = display_name
     state["track"] = track_metadata
-    state["looping"] = looping
+    state["looping"] = bool(looping)
     state["temporary_audio_path"] = str(temporary_audio) if temporary_audio else None
     state.setdefault("volume", 0.75)
     state.setdefault("last_volume", state["volume"])
     state["task"] = asyncio.create_task(
         dj_playback_loop(
-            str(thread_id),
-            file_path,
-            looping,
-            state["audio_source"],
-            display_name
+            str(thread_id), Path(file_path), bool(looping),
+            state["audio_source"], display_name
         )
     )
+    metrics["dj_tracks_started"] += 1
     return True, "Reproducción iniciada."
 
 
 # ---------------------------------------------------------------------------
+# GENSHIN DATABASE API# ---------------------------------------------------------------------------
 # GENSHIN DATABASE API
 # ---------------------------------------------------------------------------
 async def game_data(folder: str, query: str, extra_params: dict | None = None):
@@ -10939,6 +11054,16 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}join — entra en la llamada asociada a esta sala.",
                 f"{PREFIX}leer — activa la lectura en voz alta de mensajes de texto.",
                 f"{PREFIX}noleer — desactiva la lectura sin salir de la llamada.",
+                f"{PREFIX}tts ajustes — consulta voz, velocidad y filtros de lectura.",
+                f"{PREFIX}tts voz <nombre> / velocidad <-50 a 100> — configura la lectura.",
+                f"{PREFIX}tts enlaces on/off y menciones on/off — elige qué leer.",
+                f"{PREFIX}dj pausa / reanudar / saltar / cola — controles de reproducción.",
+                f"{PREFIX}dj añadir <archivo> — agrega una pista local a la cola.",
+                f"{PREFIX}playlist crear/agregar/ver/reproducir/borrar — administra playlists.",
+                f"{PREFIX}advertir @usuario motivo — registra una advertencia.",
+                f"{PREFIX}advertencias @usuario — consulta advertencias.",
+                f"{PREFIX}quitaradvertencia <id> — retira una advertencia.",
+                f"{PREFIX}antispam estado/on/off — configura el antispam de esta sala.",
                 f"{PREFIX}salirsala — desconecta a Katherine de la llamada.",
                 f"{PREFIX}dj lista — muestra audios locales e instrucciones.",
                 f"{PREFIX}dj buscar <tema> — busca música pública y licenciada.",
@@ -12473,7 +12598,7 @@ async def handle_command(event: dict, source: str):
     # SISTEMA Y ESTADO DEL BOT
     # -----------------------------------------------------------------------
     if command == "!estado":
-        answer = await build_status_message(source, nickname)
+        answer = await build_status_message(source, nickname, thread)
         await send_message(thread, answer, source, reply)
         return
 
@@ -12513,15 +12638,6 @@ async def handle_command(event: dict, source: str):
         return
 
     if command == "!perfilbot":
-        if source != "community":
-            await send_message(
-                thread,
-                "Este comando requiere el token del bot de comunidad.",
-                source,
-                reply
-            )
-            return
-
         if not ADMIN_UIDS or raw_uid not in ADMIN_UIDS:
             await send_message(
                 thread,
@@ -12675,155 +12791,280 @@ async def handle_command(event: dict, source: str):
         )
         return
 
-    if command in ("!dj", "!reproducir"):
-        dj_source = source
-        if not COMMUNITY_TOKEN:
-            await send_message(
-                thread,
-                "El DJ necesita COMMUNITY_BOT_TOKEN configurado en las variables de Render.",
-                dj_source,
-                reply
-            )
-            return
-        if pyav is None or livekit_rtc is None or np is None:
-            await send_message(
-                thread,
-                "El reproductor DJ no está instalado correctamente en Render.",
-                dj_source,
-                reply
-            )
-            return
+    if command in ("!pausa", "!reanudar", "!saltar", "!cola", "!dj"):
+        subcommand = args[0].lower() if args else ""
+        if command == "!dj" and subcommand in (
+            "pausa", "pausar", "reanudar", "continuar", "saltar", "skip",
+            "cola", "queue", "actual", "añadir", "agregar"
+        ):
+            action = subcommand
+        elif command != "!dj":
+            action = {"!pausa": "pausa", "!reanudar": "reanudar",
+                      "!saltar": "saltar", "!cola": "cola"}[command]
+        else:
+            action = ""
 
-        if not args or args[0].lower() in ("lista", "list"):
-            tracks = list_dj_tracks()
-            await send_message(
-                thread,
-                "KATHERINE DJ\n"
-                + ("Archivos locales:\n" + "\n".join(f"• {name}" for name in tracks)
-                   if tracks else "No hay audios locales.")
-                + "\n\nPara buscar música pública: !dj buscar <tema>\n"
-                "Ejemplos: !dj buscar jazz, !dj buscar piano, !dj buscar ambient.\n"
-                "También puedes reproducir archivos locales con !dj archivo.mp3.",
-                dj_source,
-                reply
-            )
-            return
-
-        if args[0].lower() in ("buscar", "search"):
-            search_term = " ".join(args[1:]).strip()
-            if not search_term:
+        if action:
+            state = DJ_ROOMS.get(thread)
+            if not state:
+                await send_message(thread, "Katherine no está conectada a una llamada. Usa !join o !dj primero.", source, reply)
+                return
+            if action in ("pausa", "pausar"):
+                state["pause_event"].clear()
+                await send_message(thread, "⏸️ Música pausada.", source, reply)
+            elif action in ("reanudar", "continuar"):
+                state["pause_event"].set()
+                await send_message(thread, "▶️ Reproducción reanudada.", source, reply)
+            elif action in ("saltar", "skip"):
+                if not state.get("task") or state["task"].done():
+                    await send_message(thread, "No hay una canción reproduciéndose.", source, reply)
+                else:
+                    state["skip_event"].set()
+                    await send_message(thread, "⏭️ Saltando a la siguiente canción…", source, reply)
+            elif action in ("cola", "queue"):
+                lines = [
+                    f"🎧 Reproduciendo: {state.get('filename') or 'Nada'}",
+                    f"Estado: {'Pausada' if not state['pause_event'].is_set() else 'Reproduciendo'}",
+                    f"Volumen: {round(float(state.get('volume', 0.75))*100)}%"
+                ]
+                for index, item in enumerate(list(state.get("queue", []))[:15], 1):
+                    lines.append(f"{index}. {item.get('title') or Path(item['path']).name}")
+                if not state.get("queue"):
+                    lines.append("La cola está vacía.")
+                await send_message(thread, "\n".join(lines), source, reply)
+            elif action == "actual":
                 await send_message(
                     thread,
-                    "Uso: !dj buscar <tema o género>. Ejemplos: jazz, piano, ambient, clásica.",
-                    dj_source,
-                    reply
+                    f"🎧 Ahora suena: {state.get('filename') or 'Sin pista'}\n"
+                    f"En cola: {len(state.get('queue', []))}\n"
+                    f"Volumen: {round(float(state.get('volume', 0.75))*100)}%",
+                    source, reply
                 )
+            elif action in ("añadir", "agregar"):
+                name = " ".join(args[1:]).strip()
+                path = resolve_dj_track(name)
+                if not path:
+                    await send_message(thread, "Indica un archivo local válido. Ejemplo: !dj añadir tema.mp3", source, reply)
+                else:
+                    ok, result = await start_dj_room(thread, path, False, enqueue=True)
+                    await send_message(thread, f"🎶 {result}" if ok else f"DJ: {result}", source, reply)
+            return
+
+    if command == "!tts":
+        state = DJ_ROOMS.get(thread)
+        if not state:
+            await send_message(thread, "Conecta primero a una llamada con !join o !leer para configurar la lectura.", source, reply)
+            return
+        if not args or args[0].lower() in ("ajustes", "estado", "config"):
+            await send_message(
+                thread,
+                "🔊 AJUSTES DE LECTURA\n"
+                f"Voz: {state.get('tts_voice', TTS_VOICE)}\n"
+                f"Velocidad: {state.get('tts_rate', '+0%')}\n"
+                f"Leer enlaces: {'sí' if state.get('tts_read_links') else 'no'}\n"
+                f"Leer menciones: {'sí' if state.get('tts_read_mentions') else 'no'}\n"
+                f"En cola: {state['speech_queue'].qsize()}\n"
+                "Usos: !tts voz <nombre>, !tts velocidad <-50 a 100>, "
+                "!tts enlaces on/off, !tts menciones on/off, !tts voces.",
+                source, reply
+            )
+            return
+        setting = args[0].lower()
+        if setting == "voces":
+            await send_message(thread, "Voces disponibles: " + ", ".join(TTS_VOICE_OPTIONS.keys()), source, reply)
+            return
+        if len(args) < 2:
+            await send_message(thread, "Uso: !tts voz <nombre> | velocidad <porcentaje> | enlaces on/off | menciones on/off", source, reply)
+            return
+        value = " ".join(args[1:]).strip().lower()
+        if setting == "voz":
+            voice = TTS_VOICE_OPTIONS.get(value)
+            if not voice:
+                await send_message(thread, "Voz desconocida. Usa !tts voces para ver opciones.", source, reply)
                 return
+            state["tts_voice"] = voice
+            set_chat_setting(thread, "tts_voice", voice)
+            answer = f"Voz de lectura cambiada a {value}."
+        elif setting in ("velocidad", "rate"):
             try:
-                results = await search_archive_audio(search_term, limit=5)
-            except Exception as exc:
-                logging.exception("[DJ] Búsqueda en Internet Archive fallida")
-                await send_message(
-                    thread,
-                    f"No pude consultar el catálogo musical ahora mismo ({type(exc).__name__}).",
-                    dj_source,
-                    reply
-                )
+                rate_value = int(value.replace("%", "").replace("+", ""))
+                if not -50 <= rate_value <= 100:
+                    raise ValueError("rango")
+            except ValueError:
+                await send_message(thread, "La velocidad debe estar entre -50% y +100%.", source, reply)
                 return
-
-            if not results:
-                await send_message(
-                    thread,
-                    "No encontré pistas reproducibles con licencias permitidas para esa búsqueda. "
-                    "Prueba con otro género o palabra.",
-                    dj_source,
-                    reply
-                )
+            state["tts_rate"] = f"{rate_value:+d}%"
+            set_chat_setting(thread, "tts_rate", state["tts_rate"])
+            answer = f"Velocidad de lectura ajustada a {state['tts_rate']}."
+        elif setting in ("enlaces", "links", "menciones", "mentions"):
+            enabled = value in ("on", "si", "sí", "true", "1", "activar")
+            allowed = ("on", "off", "si", "sí", "no", "true", "false", "1", "0", "activar", "desactivar")
+            if value not in allowed:
+                await send_message(thread, "Usa on u off.", source, reply)
                 return
-
-            DJ_SEARCH_RESULTS[thread] = {
-                "tracks": results,
-                "expires": time.time() + 900
-            }
-            for old_thread, saved in list(DJ_SEARCH_RESULTS.items()):
-                if saved.get("expires", 0) <= time.time():
-                    DJ_SEARCH_RESULTS.pop(old_thread, None)
-
-            buttons = register_buttons(
-                dj_source,
-                thread,
-                "dj_select",
-                [
-                    {
-                        "label": f"{index + 1}. {track['title']}"[:40],
-                        "value": str(index)
-                    }
-                    for index, track in enumerate(results)
-                ],
-                ttl=900
-            )
-            listing = "\n".join(
-                f"{index + 1}. {track['title']} — {track['creator']} "
-                f"({track['license']})"
-                for index, track in enumerate(results)
-            )
-            await send_message(
-                thread,
-                f"CATÁLOGO MUSICAL · INTERNET ARCHIVE\nBúsqueda: {search_term}\n\n"
-                f"{listing}\n\nSelecciona una pista para reproducirla en la sala:",
-                dj_source,
-                reply,
-                buttons
-            )
+            key = "tts_read_links" if setting in ("enlaces", "links") else "tts_read_mentions"
+            state[key] = enabled
+            set_chat_setting(thread, key, "1" if enabled else "0")
+            answer = f"Lectura de {'enlaces' if key == 'tts_read_links' else 'menciones'} {'activada' if enabled else 'desactivada'}."
+        else:
+            await send_message(thread, "Ajuste desconocido. Usa !tts ajustes.", source, reply)
             return
-
-        if args[0].lower() in ("detener", "stop", "parar"):
-            if thread not in DJ_ROOMS:
-                await send_message(
-                    thread,
-                    "Katherine no está reproduciendo audio en esta sala.",
-                    dj_source,
-                    reply
-                )
-                return
-            await stop_dj_room(thread, request_leave=True)
-            await send_message(
-                thread,
-                "⏹️ Reproducción detenida. Katherine salió de la sala.",
-                dj_source,
-                reply
-            )
-            return
-
-        track_path = resolve_dj_track(args[0])
-        if not track_path:
-            await send_message(
-                thread,
-                "No encuentro ese archivo en music/. También puedes buscar audio público "
-                "con !dj buscar <tema>.",
-                dj_source,
-                reply
-            )
-            return
-
-        looping = any(
-            value.lower() in ("bucle", "loop", "repetir")
-            for value in args[1:]
-        )
-        room_id = thread
-        if len(args) > 1 and args[-1].isdigit():
-            room_id = args[-1]
-
-        ok, message = await start_dj_room(room_id, track_path, looping)
-        await send_message(
-            thread,
-            f"🎧 {message}" if ok else f"DJ: {message}",
-            dj_source,
-            reply
-        )
+        await send_message(thread, f"✅ {answer}", source, reply)
         return
 
-    if command in ("!djdetener", "!djstop", "!salirsala"):
+    if command == "!playlist":
+        if not args:
+            await send_message(
+                thread,
+                "PLAYLISTS\n!playlist crear <nombre>\n!playlist agregar <nombre> | <archivo local>\n"
+                "!playlist ver <nombre>\n!playlist reproducir <nombre>\n!playlist borrar <nombre>\n!playlist lista",
+                source, reply
+            )
+            return
+        sub, _, rest = query.partition(" ")
+        sub = sub.lower()
+        if sub == "crear":
+            ok = create_dj_playlist(thread, rest, raw_uid)
+            await send_message(thread, "Playlist creada." if ok else "No se pudo crear. El nombre debe tener 2-40 caracteres y no repetirse.", source, reply)
+        elif sub in ("lista", "listar"):
+            playlists = list_dj_playlists(thread)
+            content = "\n".join(f"• {p['name']} ({p['track_count']} pistas)" for p in playlists) or "No hay playlists."
+            await send_message(thread, content, source, reply)
+        elif sub in ("agregar", "añadir"):
+            playlist_name, sep, track_name = rest.partition("|")
+            track_name = track_name.strip()
+            path = resolve_dj_track(track_name)
+            if not sep or not path:
+                await send_message(thread, "Uso: !playlist agregar <nombre> | <archivo existente en music/>.", source, reply)
+            elif add_dj_playlist_track(thread, playlist_name, track_name):
+                await send_message(thread, f"«{track_name}» añadida a «{playlist_name.strip()}».", source, reply)
+            else:
+                await send_message(thread, "No existe esa playlist. Créala primero.", source, reply)
+        elif sub == "ver":
+            playlist, tracks = get_dj_playlist(thread, rest)
+            if not playlist:
+                await send_message(thread, "No encontré esa playlist.", source, reply)
+            else:
+                listing = "\n".join(f"{i}. {track['title']}" for i, track in enumerate(tracks, 1))
+                await send_message(thread, f"PLAYLIST · {playlist['name']}\n" + (listing or "Sin canciones."), source, reply)
+        elif sub in ("borrar", "eliminar"):
+            await send_message(thread, "Playlist eliminada." if delete_dj_playlist(thread, rest) else "No encontré esa playlist.", source, reply)
+        elif sub in ("reproducir", "play"):
+            playlist, tracks = get_dj_playlist(thread, rest)
+            if not playlist or not tracks:
+                await send_message(thread, "La playlist no existe o no contiene canciones.", source, reply)
+                return
+            valid_tracks = []
+            for item in tracks:
+                path = resolve_dj_track(item["source"])
+                if path:
+                    valid_tracks.append(path)
+            if not valid_tracks:
+                await send_message(thread, "No quedan archivos válidos de esa playlist en music/.", source, reply)
+                return
+            ok, message = await start_dj_room(thread, valid_tracks[0], False)
+            added = 0
+            if ok:
+                for path in valid_tracks[1:]:
+                    queued_ok, _ = await start_dj_room(thread, path, False, enqueue=True)
+                    if queued_ok:
+                        added += 1
+            await send_message(
+                thread,
+                f"▶️ Playlist «{playlist['name']}» iniciada: 1 canción y {added} en cola."
+                if ok else f"DJ: {message}",
+                source, reply
+            )
+        else:
+            await send_message(thread, "Subcomando desconocido. Usa !playlist.", source, reply)
+        return
+
+    if command in ("!advertir", "!advertencias", "!quitaradvertencia", "!antispam"):
+        if raw_uid not in ADMIN_UIDS:
+            await send_message(thread, "No tienes permisos de administración. Configura ADMIN_UIDS en Render con tu UID.", source, reply)
+            return
+        if command == "!antispam":
+            current = anti_spam_configuration(thread)
+            if not args or args[0].lower() in ("estado", "config"):
+                await send_message(
+                    thread,
+                    f"🛡️ Antispam: {'activado' if current['enabled'] else 'desactivado'}\n"
+                    f"Límite: {current['max_messages']} mensajes / {current['window_seconds']} s\n"
+                    f"Repeticiones: {current['repeat_limit']}\n"
+                    "Usa !antispam on/off, !antispam limite <3-20>, "
+                    "ventana <3-60>, repeticiones <2-10>.",
+                    source, reply
+                )
+                return
+            sub = args[0].lower()
+            if sub in ("on", "activar", "off", "desactivar"):
+                enabled = sub in ("on", "activar")
+                set_chat_setting(thread, "antispam_enabled", "1" if enabled else "0")
+                answer = f"Antispam {'activado' if enabled else 'desactivado'}."
+            elif sub in ("limite", "ventana", "repeticiones") and len(args) > 1:
+                try:
+                    number = int(args[1])
+                    low, high = (3, 20) if sub == "limite" else ((3, 60) if sub == "ventana" else (2, 10))
+                    if not low <= number <= high:
+                        raise ValueError("rango")
+                    key = {
+                        "limite": "antispam_max_messages",
+                        "ventana": "antispam_window_seconds",
+                        "repeticiones": "antispam_repeat_limit"
+                    }[sub]
+                    set_chat_setting(thread, key, str(number))
+                    answer = f"Antispam: {sub} ajustado a {number}."
+                except ValueError:
+                    answer = "Valor fuera de rango."
+            else:
+                answer = "Uso: !antispam on/off, limite <3-20>, ventana <3-60>, repeticiones <2-10>."
+            await send_message(thread, answer, source, reply)
+            return
+
+        if command == "!quitaradvertencia":
+            try:
+                warning_id = int(args[0])
+            except (IndexError, ValueError):
+                await send_message(thread, "Uso: !quitaradvertencia <id>.", source, reply)
+                return
+            removed = revoke_moderation_warning(thread, warning_id, raw_uid)
+            await send_message(thread, "Advertencia retirada." if removed else "No encontré una advertencia activa con ese ID.", source, reply)
+            return
+
+        target_uid, target_name = target_from_message(msg, args, scope_key)
+        if command == "!advertencias" and not target_uid:
+            target_uid, target_name = uid, nickname
+        if not target_uid and target_name:
+            found = find_user_by_nickname(target_name, scope_key)
+            if found:
+                target_uid, target_name = found["uid"], found["nickname"]
+        if not target_uid:
+            await send_message(thread, "Indica o menciona a un usuario. Ejemplo: !advertir @usuario motivo.", source, reply)
+            return
+
+        if command == "!advertir":
+            reason = re.sub(r"@[^\\s,;]+", "", query, count=1).strip()
+            warning_id = add_moderation_warning(
+                thread, target_uid, target_name or "Usuario",
+                raw_uid, nickname, reason or "Sin motivo indicado", automatic=False
+            )
+            active_count = sum(
+                1 for item in get_moderation_warnings(thread, target_uid, 30)
+                if item["active"]
+            )
+            await send_message(thread, f"⚠️ Advertencia #{warning_id} registrada para {target_name}. Total activas: {active_count}.", source, reply)
+        else:
+            warnings = get_moderation_warnings(thread, target_uid, 20)
+            active = [item for item in warnings if item["active"]]
+            lines = [f"⚠️ Advertencias de {target_name}: {len(active)} activas"]
+            lines.extend(
+                f"#{item['id']} · {datetime.fromtimestamp(item['created_at']).strftime('%d/%m %H:%M')} · {item['reason']}"
+                for item in warnings
+            )
+            await send_message(thread, "\n".join(lines), source, reply)
+        return
+
+    if command in ("!dj", "!reproducir"):    if command in ("!djdetener", "!djstop", "!salirsala"):
         if thread not in DJ_ROOMS:
             await send_message(thread, "Katherine no está conectada a una llamada en esta sala.", source, reply)
             return
@@ -13129,6 +13370,16 @@ async def dispatch(event: dict, source: str):
         # Ambos bots reciben el mismo evento de chat. Solo el bot developer
         # procesa texto, comandos y TTS; el community queda reservado para voz.
         if source != "developer":
+            return
+        blocked, spam_info = check_antispam_message(event, source)
+        if blocked:
+            if spam_info:
+                await send_message(
+                    str(event.get("threadId") or ""),
+                    f"🛡️ {spam_info['nickname']}, baja la frecuencia de mensajes. "
+                    f"Se registró la advertencia #{spam_info['warning_id']}.",
+                    "developer"
+                )
             return
         await enqueue_message_for_speech(event, source)
         await handle_command(event, source)
