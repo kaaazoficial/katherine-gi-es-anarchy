@@ -1274,7 +1274,7 @@ async def archive_item_details(identifier: str) -> dict | None:
     response = await external_request(
         "GET",
         f"{IA_BASE}/metadata/{quote(identifier, safe='')}",
-        headers={"Accept": "application/json", "User-Agent": "KatherineBot/1.0"},
+        headers={"Accept": "application/json", "User-Agent": "Katherine-AnarchyBot/3.1 (GPT-6; https://github.com/kaaazoficial/katherine-gi-es-anarchy)"},
         timeout=25
     )
     if not response.is_success:
@@ -1496,7 +1496,8 @@ async def dj_playback_loop(
             container = pyav.open(audio_source_url, mode="r", options={
                 "rw_timeout": "15000000",
                 "reconnect": "1",
-                "reconnect_streamed": "1"
+                "reconnect_streamed": "1",
+                "user_agent": "Katherine-AnarchyBot/3.1 (GPT-6; https://github.com/kaaazoficial/katherine-gi-es-anarchy)"
             })
             try:
                 audio_stream = next(
@@ -11829,6 +11830,14 @@ async def handle_command(event: dict, source: str):
             await send_message(
                 thread,
                 "Katherine DJ solo está disponible para el bot de comunidad.",
+                source,
+                reply
+            )
+            return
+        if not COMMUNITY_TOKEN:
+            await send_message(
+                thread,
+                "El DJ necesita COMMUNITY_BOT_TOKEN configurado en las variables de Render.",
                 source,
                 reply
             )
