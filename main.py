@@ -67,7 +67,7 @@ COMMUNITY_SECRET = os.getenv("COMMUNITY_WEBHOOK_SECRET", "").strip()
 PREFIX = os.getenv("COMMAND_PREFIX", "!").strip() or "!"
 if len(PREFIX) > 3 or any(ch.isspace() for ch in PREFIX):
     PREFIX = "!"
-ADMIN_UIDS = {x.strip() for x in os.getenv("ADMIN_UIDS", "").split(",") if x.strip()}
+ADMIN_UIDS = {x.strip() for x in (os.getenv("ADMIN_UIDS") or os.getenv("ADMINUIDS") or "").split(",") if x.strip()}
 STARTED = time.time()
 STARTED_MONOTONIC = time.monotonic()
 HTTP_CLIENT: httpx.AsyncClient | None = None
@@ -11015,6 +11015,18 @@ async def handle_command(event: dict, source: str):
         thread
     )
 
+    # Identificador de la cuenta que envió el comando. Solo se devuelve al
+    # propio usuario para que pueda configurarse como administrador en Render.
+    if command in ("!miuid", "!mi-id", "!mi_uid"):
+        await send_message(
+            thread,
+            f"Tu UID de Anarchy Apps es: {raw_uid}\n"
+            "Copia este identificador y configúralo en Render en ADMIN_UIDS.",
+            source,
+            reply
+        )
+        return
+
     # -----------------------------------------------------------------------
     # AYUDA
     # -----------------------------------------------------------------------
@@ -11024,7 +11036,8 @@ async def handle_command(event: dict, source: str):
                 "KATHERINE · CENTRO DE COMANDOS",
                 f"Prefijo principal: {PREFIX} (también se reconocen ! y -).",
                 f"{PREFIX}ayuda — muestra todos los comandos.",
-                f"{PREFIX}comandos — alias de ayuda."
+                f"{PREFIX}comandos — alias de ayuda.",
+                f"{PREFIX}miuid — muestra tu UID para configurar permisos de administrador."
             ],
             [
                 "GENSHIN IMPACT · GUÍA Y CONSULTAS",
