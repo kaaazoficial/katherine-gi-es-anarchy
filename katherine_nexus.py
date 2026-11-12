@@ -25,10 +25,10 @@ def interpret_natural_request(value: str) -> str | None:
     behavior.
     """
     raw = re.sub(r"\s+", " ", str(value or "")).strip()
-    text = _normalize(raw)
-    if not text or len(text) > 500:
+    if not raw or len(raw) > 500 or raw.startswith(("!", "-")):
         return None
-    if text.startswith(("!", "-")):
+    text = _normalize(raw)
+    if not text:
         return None
 
     text = re.sub(r"^(?:por favor\s+)?(?:katherine[, ]+)?", "", text)
@@ -80,11 +80,12 @@ def interpret_natural_request(value: str) -> str | None:
             return f"{command} {subject}"
 
     translation = re.fullmatch(
-        r"(?:traduce|traducir) (?:esto )?al?\s*([a-z ]{2,30})\s*[:|,]\s*(.{1,350})",
-        text,
+        r"(?:katherine[, ]+)?(?:traduce|traducir) (?:esto )?al?\s*([a-záéíóúñ ]{2,30})\s*[:|,]\s*(.{1,350})",
+        raw,
+        flags=re.IGNORECASE,
     )
     if translation:
-        language = translation.group(1).strip()
+        language = _normalize(translation.group(1))
         payload = translation.group(2).strip()
         if payload:
             return f"traducir {language} | {payload}"
