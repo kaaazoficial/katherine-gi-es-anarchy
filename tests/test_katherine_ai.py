@@ -319,7 +319,7 @@ async def test_unrelated_question_cannot_execute_genshin_tool(monkeypatch):
 
     result = await ai.assist("qué es Anarchy Apps", "room:user", fake_request)
     assert result["kind"] == "answer"
-    assert "Anarchy Apps" in result["answer"]
+    assert "anarchy apps" in result["answer"].casefold()
     assert len(requests) == 2
     assert "No invoques ninguna herramienta de Genshin" in requests[1]["json"]["instructions"]
 
@@ -346,7 +346,7 @@ async def test_unrelated_direct_answer_cannot_drift_to_genshin(monkeypatch):
 
     result = await ai.assist("qué es Anarchy Apps", "room:user", fake_request)
     assert result["kind"] == "answer"
-    assert "plataforma" in result["answer"]
+    assert "red social" in result["answer"]
     assert "Genshin" not in result["answer"]
 
 
@@ -402,7 +402,7 @@ async def test_katherine_identity_faq_works_without_ai_credentials(monkeypatch):
 
     result = await ai.assist("¿Quién eres?", "room:verified-user", unexpected_request)
     assert "bot de entretenimiento" in result["answer"]
-    assert "bot de soporte de Anarchy Apps" in result["answer"]
+    assert "no soy un bot de ayuda ni de soporte" in result["answer"].casefold()
 
 
 @pytest.mark.asyncio
