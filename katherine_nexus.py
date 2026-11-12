@@ -41,7 +41,7 @@ def interpret_natural_request(value: str) -> str | None:
         (r"^(?:muestra|abre|consulta) (?:el )?ranking$", "ranking"),
         (r"^(?:muestra|consulta) (?:mi )?perfil$", "perfil"),
         (r"^(?:dime|consulta) (?:la )?fecha$", "fecha"),
-        (r"^(?:crea|haz) (?:una )?encuesta (.+)$", "encuesta"),
+
         (r"^(?:abre|abrir|muestra|mostrar) (?:el )?centro(?: de control)?$", "centro"),
         (r"^(?:como esta|estado de|diagnostico de) katherine$", "estado"),
         (r"^(?:diagnostica) katherine$", "estado"),
@@ -76,6 +76,7 @@ def interpret_natural_request(value: str) -> str | None:
         (r"^(?:que cobertura tiene|cobertura de|apartados de la guia de) (.+)$", "cobertura"),
         (r"^(?:busca en genshin|busqueda de genshin|busca genshin) (.+)$", "buscargenshin"),
         (r"^(?:haz un roast a|roast a|insulta amistosamente a) (.+)$", "roast"),
+        (r"^(?:crea|haz) (?:una )?encuesta (.+)$", "encuesta"),
         (r"^(?:consulta|abre|busca en)?\s*(?:la )?enciclopedia(?: de genshin)? (?:sobre |de |del )?(.+)$", "enciclopedia"),
         (r"^(?:quien es|que es|que sabes de) (.+)$", "enciclopedia"),
         (r"^(?:reproduce|pon|busca musica de|busca la cancion) (.+)$", "dj buscar"),
