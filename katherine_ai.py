@@ -284,9 +284,7 @@ class KatherineAI:
 
     def remember_tool_result(self, session_key: str, command: str, result: str) -> None:
         """Keep a bounded, factual tool result for follow-up questions in this session."""
-        clean_result = str(result or "").strip()
-        clean_result = re.sub(r"[ \\t]+", " ", clean_result)
-        clean_result = re.sub(r"\\n{3,}", "\\n\\n", clean_result)
+        clean_result = " ".join(str(result or "").split())
         if not clean_result:
             clean_result = "El comando se ejecutó, pero no produjo una respuesta textual."
         self._append_history(
