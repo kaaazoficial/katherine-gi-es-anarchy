@@ -17,6 +17,10 @@ def response_payload(result):
         {"type": "output_text", "text": json.dumps(result)}
     ]}]}
 
+def test_default_model_is_current_mini(monkeypatch):
+    monkeypatch.delenv("KATHERINE_AI_MODEL", raising=False)
+    assert KatherineAI().model == "gpt-5.4-mini"
+
 def test_allowlist_accepts_safe_existing_commands():
     assert validate_ai_tool_call("enciclopedia", "Cyno") == "enciclopedia Cyno"
     assert validate_ai_tool_call("dj", "buscar ambient piano") == "dj buscar ambient piano"
@@ -95,6 +99,32 @@ async def test_api_request_uses_store_false_and_structured_output(monkeypatch):
     assert captured["json"]["store"] is False
     assert captured["json"]["model"] == "test-model"
     assert captured["json"]["text"]["format"]["schema"] == ACTION_SCHEMA
+
+@pytest.mark.asyncio
+async def test_task_requests_apply_per_user_cooldown(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+    async def fake_request(method, url, **kwargs):
+        return FakeResponse(response_payload({
+            "kind": "answer", "answer": "OK", "command": "", "args": ""
+        }))
+    assert await ai.translate("inglés", "hola", fake_request, rate_key="room:user") == "OK"
+    with pytest.raises(RuntimeError, match="IA_ENFRIAMIENTO"):
+        await ai.translate("inglés", "adiós", fake_request, rate_key="room:user")
+
+@pytest.mark.asyncio
+async def test_provider_connection_probe(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+    captured = {}
+    async def fake_request(method, url, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse(response_payload({
+            "kind": "answer", "answer": "OK", "command": "", "args": ""
+        }))
+    assert await ai.test_connection(fake_request) == "OK"
+    assert captured["json"]["store"] is False
+    assert captured["json"]["max_output_tokens"] == 120
 
 @pytest.mark.asyncio
 async def test_model_cannot_request_unapproved_tool(monkeypatch):
