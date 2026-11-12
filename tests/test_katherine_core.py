@@ -29,7 +29,6 @@ def test_database_initializes_expected_core_tables(database):
         "moderation_warnings",
         "dj_playlists",
         "dj_playlist_tracks",
-        "dj_favorites",
         "chat_activity_daily",
         "admin_audit_log",
         "auto_reply_rules",
@@ -231,7 +230,8 @@ def test_builtin_katherine_regression_suite_passes():
     assert result["failed"] == 0, result["failures"]
     assert result["passed"] == result["checks"]
 
-def test_dj_favorites_are_scoped_to_user_and_room(database):
+def test_dj_favorites_are_scoped_to_user_and_room(database, monkeypatch):
+    monkeypatch.setattr(katherine, "DJ_FAVORITES", {})
     track = {
         "url": "https://audio.jamendo.com/track.mp3",
         "title": "Tema favorito",
