@@ -9206,7 +9206,7 @@ async def handle_command(event: dict, source: str):
     # RECOMENDACIONES DE ARMAS Y PRIORIDAD DE TALENTOS
     # -----------------------------------------------------------------------
     def normalize_character_guide_key(name):
-        key = re.sub(r"\\s+", " ", name.casefold().strip())
+        key = re.sub(r"\s+", " ", name.casefold().strip())
         aliases = {
             "hu tao": "hu tao",
             "hutao": "hu tao",
