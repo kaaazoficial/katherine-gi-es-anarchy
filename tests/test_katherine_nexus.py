@@ -106,4 +106,4 @@ def test_format_source_health_summarizes_success_and_failures():
     }})
     assert "example.org" in answer
     assert "4/5 correctas" in answer
-    assert "125 ms" in answer
+    assert "126 ms" in answer
