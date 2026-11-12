@@ -1154,6 +1154,7 @@ async def handle_command(event: dict, source: str):
     if command in ("!ayuda", "!comandos"):
         help_lines = [
             "KATHERINE — AYUDA COMPLETA",
+            f"{PREFIX}ayuda / {PREFIX}comandos — muestra esta lista de comandos.",
             f"Prefijo principal: {PREFIX} (también se reconocen ! y -).",
             "",
             "GENSHIN IMPACT",
