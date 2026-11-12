@@ -422,7 +422,15 @@ def check_antispam_message(event: dict, source: str):
     uid = str(author.get("uid") or author.get("userId") or "")
     nickname = str(author.get("nickname") or author.get("name") or "Usuario")
     content = re.sub(r"\s+", " ", str(message.get("content") or "")).strip().casefold()
-    if not thread_id or not uid or not content or is_admin_uid(uid):
+    identity = BOT_IDENTITIES.get(source) or {}
+    if (
+        not thread_id or not uid or not content or is_admin_uid(uid)
+        or uid == str(identity.get("uid") or "")
+        or any(
+            str(author.get(key, "")).lower() in ("true", "1", "yes")
+            for key in ("bot", "isBot", "is_bot")
+        )
+    ):
         return False, None
 
     config = anti_spam_configuration(thread_id)
@@ -2359,7 +2367,7 @@ async def dj_playback_loop(
                 )
 
 
-def validate_local_dj_audio(def validate_local_dj_audio(path: Path):
+def validate_local_dj_audio(path: Path):
     resolved = Path(path).resolve()
     music_root = DJ_MUSIC_DIR.resolve()
     if not resolved.is_relative_to(music_root):
