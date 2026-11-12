@@ -362,7 +362,29 @@ class KatherineAI:
             )
         if not getattr(response, "is_success", False):
             status = getattr(response, "status_code", "desconocido")
-            raise RuntimeError(f"Proveedor IA HTTP {status}.")
+            # Preserve only the provider's safe diagnostic fields; never log headers
+            # or request data, which may contain the API credential.
+            code = ""
+            error_type = ""
+            message = ""
+            try:
+                error_payload = response.json()
+                error_data = error_payload.get("error", {}) if isinstance(error_payload, dict) else {}
+                if isinstance(error_data, dict):
+                    code = str(error_data.get("code") or "")[:80]
+                    error_type = str(error_data.get("type") or "")[:80]
+                    message = str(error_data.get("message") or "")[:240]
+            except Exception:
+                pass
+            safe_detail = " | ".join(
+                part for part in (
+                    f"código={code}" if code else "",
+                    f"tipo={error_type}" if error_type else "",
+                    f"detalle={message}" if message else "",
+                ) if part
+            )
+            suffix = f" ({safe_detail})" if safe_detail else ""
+            raise RuntimeError(f"Proveedor IA HTTP {status}{suffix}.")
         try:
             payload = response.json()
         except Exception as exc:
