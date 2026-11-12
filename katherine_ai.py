@@ -380,6 +380,9 @@ class KatherineAI:
         self, thread_id: str, nickname: str, content: str, is_bot: bool = False
     ) -> bool:
         key = str(thread_id)
+        enabled_at = self._analyst_enabled_at.get(key, 0)
+        if enabled_at and time.time() - float(enabled_at) >= self.analyst_ttl:
+            self.set_analyst(key, False)
         text = re.sub(r"\s+", " ", str(content or "")).strip()
         if (
             key not in self._analyst_enabled or is_bot or not text
@@ -403,6 +406,9 @@ class KatherineAI:
 
     def analyst_messages(self, thread_id: str) -> list[dict[str, str]]:
         key = str(thread_id)
+        enabled_at = self._analyst_enabled_at.get(key, 0)
+        if enabled_at and time.time() - float(enabled_at) >= self.analyst_ttl:
+            self.set_analyst(key, False)
         if key not in self._analyst_enabled:
             return []
         buffer = self._analyst.get(key, deque())
