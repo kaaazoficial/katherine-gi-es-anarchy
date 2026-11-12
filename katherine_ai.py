@@ -304,7 +304,7 @@ class KatherineAI:
             f"Proveedor: {self.provider_name if configured else 'sin configurar'}.",
             f"Conexión con {self.provider_name}: no comprobada (usa !ia probar).",
             f"Modelo: {self.model if configured else 'no conectado'}",
-            "Memoria contextual: temporal, aislada por usuario y sala (15 min).",
+            "Memoria contextual: temporal, aislada por usuario y sala (10 min; máximo 6 turnos).",
             (
                 "Solicitud a OpenAI: se envía store=false; revisa también la política de retención del proveedor."
                 if self.provider_name == "OpenAI"
