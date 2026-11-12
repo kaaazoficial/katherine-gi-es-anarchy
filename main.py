@@ -51,6 +51,7 @@ from urllib.parse import urljoin, quote, urlparse
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
+from katherine_nexus import interpret_natural_request
 
 # ---------------------------------------------------------------------------
 # CONFIGURACION
@@ -14850,7 +14851,24 @@ async def dispatch(event: dict, source: str):
                 )
             return
         await enqueue_message_for_speech(event, source)
-        await handle_command(event, source)
+
+        # NEXUS: convierte solicitudes claras en lenguaje natural a comandos
+        # existentes. No inventa acciones ni llama endpoints nuevos.
+        message_data = event.get("message") or {}
+        incoming_text = str(message_data.get("content") or "").strip()
+        if incoming_text and not incoming_text.startswith((PREFIX, "!", "-")):
+            routed_command = interpret_natural_request(incoming_text)
+            if routed_command:
+                routed_event = dict(event)
+                routed_message = dict(message_data)
+                routed_message["content"] = f"{PREFIX}{routed_command}"
+                routed_event["message"] = routed_message
+                logging.info("[NEXUS] Solicitud interpretada como %s", routed_command.split()[0])
+                await handle_command(routed_event, source)
+            else:
+                await handle_command(event, source)
+        else:
+            await handle_command(event, source)
 
     elif kind == "interaction":
         await handle_interaction(event, source)
