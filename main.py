@@ -183,6 +183,46 @@ def init_db():
         db.execute("CREATE INDEX IF NOT EXISTS idx_gifts_target ON gifts(target_uid, id DESC)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_users_points ON users(points DESC)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_users_activity ON users(message_count DESC)")
+        db.execute("""CREATE TABLE IF NOT EXISTS chat_settings (
+            thread_id TEXT NOT NULL,
+            setting_key TEXT NOT NULL,
+            setting_value TEXT NOT NULL,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY(thread_id, setting_key)
+        )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS moderation_warnings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id TEXT NOT NULL,
+            target_uid TEXT NOT NULL,
+            target_name TEXT NOT NULL,
+            moderator_uid TEXT NOT NULL,
+            moderator_name TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            automatic INTEGER NOT NULL DEFAULT 0,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at REAL NOT NULL,
+            removed_at REAL,
+            removed_by TEXT
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_warnings_target ON moderation_warnings(thread_id,target_uid,active,id DESC)")
+        db.execute("""CREATE TABLE IF NOT EXISTS dj_playlists (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            name_key TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            UNIQUE(thread_id, name_key)
+        )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS dj_playlist_tracks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            playlist_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            source TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            FOREIGN KEY(playlist_id) REFERENCES dj_playlists(id) ON DELETE CASCADE
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_playlist_tracks ON dj_playlist_tracks(playlist_id,id)")
 
 
 def record_user(uid: str, nickname: str, count_message: bool = False):
@@ -217,6 +257,207 @@ def find_user_by_nickname(nickname: str, scope_key: str | None = None):
         sql += " ORDER BY last_seen DESC LIMIT 1"
         row = db.execute(sql, tuple(params)).fetchone()
         return dict(row) if row else None
+
+
+def get_chat_setting(thread_id: str, key: str, default: str = "") -> str:
+    with db_session() as db:
+        row = db.execute(
+            "SELECT setting_value FROM chat_settings WHERE thread_id=? AND setting_key=?",
+            (str(thread_id), str(key))
+        ).fetchone()
+        return str(row["setting_value"]) if row else str(default)
+
+
+def set_chat_setting(thread_id: str, key: str, value: str):
+    with db_session() as db:
+        db.execute(
+            """INSERT INTO chat_settings(thread_id,setting_key,setting_value,updated_at)
+               VALUES(?,?,?,?)
+               ON CONFLICT(thread_id,setting_key) DO UPDATE SET
+               setting_value=excluded.setting_value, updated_at=excluded.updated_at""",
+            (str(thread_id), str(key), str(value), time.time())
+        )
+
+
+def is_admin_uid(uid: str) -> bool:
+    return str(uid or "").strip() in ADMIN_UIDS
+
+
+def add_moderation_warning(
+    thread_id: str, target_uid: str, target_name: str,
+    moderator_uid: str, moderator_name: str, reason: str = "",
+    automatic: bool = False
+) -> int:
+    with db_session() as db:
+        cursor = db.execute(
+            """INSERT INTO moderation_warnings
+               (thread_id,target_uid,target_name,moderator_uid,moderator_name,
+                reason,automatic,active,created_at)
+               VALUES(?,?,?,?,?,?,?,1,?)""",
+            (
+                str(thread_id), str(target_uid), str(target_name)[:80],
+                str(moderator_uid), str(moderator_name)[:80],
+                str(reason or "Sin motivo indicado")[:240],
+                1 if automatic else 0, time.time()
+            )
+        )
+        return int(cursor.lastrowid)
+
+
+def get_moderation_warnings(thread_id: str, target_uid: str, limit: int = 10):
+    with db_session() as db:
+        rows = db.execute(
+            """SELECT id,target_name,moderator_name,reason,automatic,active,created_at
+               FROM moderation_warnings
+               WHERE thread_id=? AND target_uid=?
+               ORDER BY id DESC LIMIT ?""",
+            (str(thread_id), str(target_uid), max(1, min(30, int(limit))))
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def revoke_moderation_warning(thread_id: str, warning_id: int, moderator_uid: str) -> bool:
+    with db_session() as db:
+        cursor = db.execute(
+            """UPDATE moderation_warnings SET active=0,removed_at=?,removed_by=?
+               WHERE id=? AND thread_id=? AND active=1""",
+            (time.time(), str(moderator_uid), int(warning_id), str(thread_id))
+        )
+        return cursor.rowcount > 0
+
+
+def create_dj_playlist(thread_id: str, name: str, creator_uid: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(name or "")).strip()
+    if not 2 <= len(normalized) <= 40:
+        return False
+    try:
+        with db_session() as db:
+            db.execute(
+                """INSERT INTO dj_playlists(thread_id,name,name_key,created_by,created_at)
+                   VALUES(?,?,?,?,?)""",
+                (str(thread_id), normalized, normalized.casefold(), str(creator_uid), time.time())
+            )
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def add_dj_playlist_track(thread_id: str, playlist_name: str, track_name: str) -> bool:
+    key = re.sub(r"\s+", " ", str(playlist_name or "")).strip().casefold()
+    with db_session() as db:
+        row = db.execute(
+            "SELECT id FROM dj_playlists WHERE thread_id=? AND name_key=?",
+            (str(thread_id), key)
+        ).fetchone()
+        if not row:
+            return False
+        db.execute(
+            "INSERT INTO dj_playlist_tracks(playlist_id,title,source,created_at) VALUES(?,?,?,?)",
+            (int(row["id"]), str(track_name)[:160], str(track_name), time.time())
+        )
+        return True
+
+
+def list_dj_playlists(thread_id: str):
+    with db_session() as db:
+        rows = db.execute(
+            """SELECT p.id,p.name,COUNT(t.id) AS track_count
+               FROM dj_playlists p LEFT JOIN dj_playlist_tracks t ON t.playlist_id=p.id
+               WHERE p.thread_id=? GROUP BY p.id ORDER BY lower(p.name)""",
+            (str(thread_id),)
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_dj_playlist(thread_id: str, playlist_name: str):
+    key = re.sub(r"\s+", " ", str(playlist_name or "")).strip().casefold()
+    with db_session() as db:
+        playlist = db.execute(
+            "SELECT id,name FROM dj_playlists WHERE thread_id=? AND name_key=?",
+            (str(thread_id), key)
+        ).fetchone()
+        if not playlist:
+            return None, []
+        rows = db.execute(
+            "SELECT title,source FROM dj_playlist_tracks WHERE playlist_id=? ORDER BY id",
+            (int(playlist["id"]),)
+        ).fetchall()
+        return dict(playlist), [dict(row) for row in rows]
+
+
+def delete_dj_playlist(thread_id: str, playlist_name: str) -> bool:
+    key = re.sub(r"\s+", " ", str(playlist_name or "")).strip().casefold()
+    with db_session() as db:
+        row = db.execute(
+            "SELECT id FROM dj_playlists WHERE thread_id=? AND name_key=?",
+            (str(thread_id), key)
+        ).fetchone()
+        if not row:
+            return False
+        db.execute("DELETE FROM dj_playlist_tracks WHERE playlist_id=?", (int(row["id"]),))
+        db.execute("DELETE FROM dj_playlists WHERE id=?", (int(row["id"]),))
+        return True
+
+
+def anti_spam_configuration(thread_id: str) -> dict:
+    def bounded(key, default, minimum, maximum):
+        try:
+            return max(minimum, min(maximum, int(get_chat_setting(thread_id, key, str(default)))))
+        except (TypeError, ValueError):
+            return default
+    return {
+        "enabled": get_chat_setting(thread_id, "antispam_enabled", "1") == "1",
+        "max_messages": bounded("antispam_max_messages", 7, 3, 20),
+        "window_seconds": bounded("antispam_window_seconds", 8, 3, 60),
+        "repeat_limit": bounded("antispam_repeat_limit", 3, 2, 10)
+    }
+
+
+def check_antispam_message(event: dict, source: str):
+    if source != "developer":
+        return False, None
+    thread_id = str(event.get("threadId") or "")
+    message = event.get("message") or {}
+    author = message.get("author") or {}
+    uid = str(author.get("uid") or author.get("userId") or "")
+    nickname = str(author.get("nickname") or author.get("name") or "Usuario")
+    content = re.sub(r"\s+", " ", str(message.get("content") or "")).strip().casefold()
+    if not thread_id or not uid or not content or is_admin_uid(uid):
+        return False, None
+
+    config = anti_spam_configuration(thread_id)
+    if not config["enabled"]:
+        return False, None
+
+    now = time.time()
+    key = (thread_id, uid)
+    activity = USER_MESSAGE_ACTIVITY[key]
+    cutoff = now - config["window_seconds"]
+    while activity and activity[0][0] < cutoff:
+        activity.popleft()
+    digest = hashlib.sha256(content.encode("utf-8", errors="ignore")).hexdigest()
+    activity.append((now, digest))
+    repeated = sum(1 for _, item_digest in activity if item_digest == digest)
+    flooded = len(activity) >= config["max_messages"] or repeated >= config["repeat_limit"]
+    if not flooded:
+        return False, None
+
+    warn_key = f"{thread_id}:{uid}"
+    if USER_SPAM_WARNED_UNTIL.get(warn_key, 0) > now:
+        return True, None
+    USER_SPAM_WARNED_UNTIL[warn_key] = now + 60
+    target_uid = scoped_uid(f"developer:{thread_id}", uid)
+    warning_id = add_moderation_warning(
+        thread_id, target_uid, nickname, "Katherine", "Katherine",
+        "Antispam automático: demasiados mensajes o contenido repetido.",
+        automatic=True
+    )
+    metrics["antispam_blocked"] += 1
+    logging.warning(
+        "[MODERACION] Antispam | sala=%s | usuario=%s | advertencia=%s",
+        thread_id, nickname, warning_id
+    )
+    return True, {"warning_id": warning_id, "nickname": nickname}
 
 
 def get_wish_state(uid: str) -> dict:
@@ -392,6 +633,18 @@ DJ_READY_EVENTS: dict[str, asyncio.Event] = {}
 VOICE_CONNECT_LOCKS: dict[str, asyncio.Lock] = {}
 BOT_IDENTITIES: dict[str, dict] = {}
 TTS_VOICE = os.getenv("TTS_VOICE", "es-CL-CatalinaNeural").strip() or "es-CL-CatalinaNeural"
+TTS_VOICE_OPTIONS = {
+    "catalina": "es-CL-CatalinaNeural",
+    "francisca": "es-CL-CatalinaNeural",
+    "alvaro": "es-ES-AlvaroNeural",
+    "elvira": "es-ES-ElviraNeural",
+    "dalia": "es-MX-DaliaNeural",
+    "jorge": "es-MX-JorgeNeural",
+    "lucia": "es-AR-ElenaNeural",
+    "carlos": "es-CO-GonzaloNeural"
+}
+USER_MESSAGE_ACTIVITY = defaultdict(deque)
+USER_SPAM_WARNED_UNTIL = {}
 DJ_MUSIC_DIR = Path(os.getenv("DJ_MUSIC_DIR", "music")).resolve()
 DJ_AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".opus"}
 DJ_SEARCH_RESULTS: dict[str, dict] = {}
@@ -1525,6 +1778,13 @@ async def ensure_voice_room(thread_id: str):
                 "volume": 0.75,
                 "last_volume": 0.75,
                 "temporary_audio_path": None,
+                "queue": deque(),
+                "pause_event": asyncio.Event(),
+                "skip_requested": False,
+                "tts_voice": TTS_VOICE,
+                "tts_rate": "+0%",
+                "tts_read_links": False,
+                "tts_read_mentions": False,
                 "started_at": time.time()
             }
             logging.info("[VOZ] Katherine conectada a la llamada %s", thread_id)
@@ -1602,11 +1862,22 @@ async def stop_dj_room(
         await api("POST", f"/live-rooms/{thread_id}/leave", "community")
 
 
-def clean_speech_text(content: str) -> str:
-    """Limpia formato y enlaces antes de enviar el texto al servicio de voz."""
+def clean_speech_text(content: str, include_links: bool = False, include_mentions: bool = False) -> str:
+    """Limpia texto y convierte enlaces/menciones en frases legibles si están habilitados."""
     text = html.unescape(str(content or ""))
-    text = re.sub(r"https?://\S+", " ", text, flags=re.I)
-    text = re.sub(r"<@!?[^>]+>", " ", text)
+    if include_links:
+        text = re.sub(
+            r"https?://([^/\s?#]+)[^\s]*",
+            lambda match: f"enlace a {match.group(1)}",
+            text,
+            flags=re.I
+        )
+    else:
+        text = re.sub(r"https?://\S+", " ", text, flags=re.I)
+    if include_mentions:
+        text = re.sub(r"<@!?([^>]+)>", "mención a usuario", text)
+    else:
+        text = re.sub(r"<@!?[^>]+>", " ", text)
     text = re.sub(r"[*_~`>#|]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:700]
@@ -1680,7 +1951,8 @@ async def speech_queue_worker(thread_id: str):
             os.close(fd)
             communicate = edge_tts.Communicate(
                 text_to_read,
-                TTS_VOICE
+                state.get("tts_voice", TTS_VOICE),
+                rate=state.get("tts_rate", "+0%")
             )
             await communicate.save(temp_path)
 
@@ -1779,7 +2051,25 @@ async def enqueue_message_for_speech(event: dict, source: str):
     content = str(message.get("content") or "").strip()
     if not content or content.startswith(("!", "-", PREFIX)):
         return
-    speech_text = clean_speech_text(content)
+
+    if state.get("tts_read_mentions"):
+        for mention in message.get("mentions") or []:
+            if not isinstance(mention, dict):
+                continue
+            mention_uid = str(mention.get("uid") or mention.get("userId") or mention.get("id") or "")
+            mention_name = str(
+                mention.get("nickname") or mention.get("username")
+                or mention.get("displayName") or mention.get("name") or "usuario"
+            )
+            if mention_uid:
+                content = content.replace(f"<@{mention_uid}>", mention_name)
+                content = content.replace(f"<@!{mention_uid}>", mention_name)
+
+    speech_text = clean_speech_text(
+        content,
+        include_links=bool(state.get("tts_read_links")),
+        include_mentions=bool(state.get("tts_read_mentions"))
+    )
     if len(speech_text) < 2:
         return
 
@@ -1864,6 +2154,9 @@ async def download_dj_audio(url: str) -> Path:
             )
             if audio_stream is None:
                 raise RuntimeError("El archivo descargado no contiene una pista de audio.")
+            first_frame = next(container.decode(audio_stream), None)
+            if first_frame is None:
+                raise RuntimeError("La pista no contiene frames de audio decodificables.")
         finally:
             container.close()
 
@@ -1981,6 +2274,32 @@ async def dj_playback_loop(
                     request_leave=True,
                     cancel_playback=False
                 )
+
+
+def validate_local_dj_audio(path: Path):
+    resolved = Path(path).resolve()
+    music_root = DJ_MUSIC_DIR.resolve()
+    if not resolved.is_relative_to(music_root):
+        raise ValueError("El archivo está fuera del directorio de música.")
+    if not resolved.is_file() or resolved.stat().st_size <= 0:
+        raise ValueError("El archivo no existe o está vacío.")
+    if resolved.stat().st_size > 80 * 1024 * 1024:
+        raise ValueError("El archivo supera el límite local de 80 MB.")
+    if resolved.suffix.lower() not in DJ_AUDIO_EXTENSIONS:
+        raise ValueError("Formato de audio no compatible.")
+    container = pyav.open(str(resolved), mode="r")
+    try:
+        audio_stream = next(
+            (stream for stream in container.streams if stream.type == "audio"),
+            None
+        )
+        if audio_stream is None:
+            raise ValueError("El archivo no contiene una pista de audio.")
+        if next(container.decode(audio_stream), None) is None:
+            raise ValueError("La pista no contiene audio decodificable.")
+    finally:
+        container.close()
+    return resolved
 
 
 async def start_dj_room(
