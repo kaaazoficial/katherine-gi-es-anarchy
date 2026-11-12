@@ -24,7 +24,7 @@ from katherine_nexus import (
         ("Katherine, muestra el ranking", "ranking"),
         ("Katherine, muestra mi perfil", "perfil"),
         ("Katherine, haz un roast a @usuario", "roast @usuario"),
-        ("Katherine, crea una encuesta sobre música", "encuesta música"),
+        ("Katherine, crea una encuesta sobre música", "encuesta musica"),
         ("Katherine, recomiéndame música para estudiar", "dj ambiente estudiar"),
         ("Katherine, consulta la enciclopedia de Genshin sobre Cyno", "enciclopedia cyno"),
         ("Katherine, quién es Nahida", "enciclopedia nahida"),
