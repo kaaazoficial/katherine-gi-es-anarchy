@@ -3483,7 +3483,7 @@ async def handle_command(event: dict, source: str):
             response.raise_for_status()
             data = response.json()
             if isinstance(data, dict):
-                ids = data.get("deck") or data.get("cards") or data.get("result") or []
+                ids = data.get("deck") or data.get("cards") or data.get("result") or data.get("deckcode") or []
             else:
                 ids = data
             if not isinstance(ids, list):
