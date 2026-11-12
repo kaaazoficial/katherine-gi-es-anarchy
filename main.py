@@ -12564,7 +12564,7 @@ async def handle_command(event: dict, source: str):
                     answer = "OpenAI respondió HTTP 429: revisa los límites, créditos y facturación del proyecto."
                 else:
                     answer = "No se pudo verificar la conexión con OpenAI. Revisa la configuración y los registros de Render."
-            await send_message(thread, "ASTRA INTELLIGENCE · PRUEBA\\n" + answer, source, reply)
+            await send_message(thread, "ASTRA INTELLIGENCE · PRUEBA\n" + answer, source, reply)
             return
         if sub in ("olvidar", "forget"):
             removed = AI_CORE.forget(session_key)
