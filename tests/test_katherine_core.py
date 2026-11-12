@@ -155,6 +155,8 @@ def test_antispam_configuration_applies_safe_bounds(database):
         "max_messages": 7,
         "window_seconds": 8,
         "repeat_limit": 3,
+        "max_links": 4,
+        "max_mentions": 8,
     }
 
     database.set_chat_setting("room-1", "antispam_enabled", "0")
