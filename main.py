@@ -6742,6 +6742,31 @@ def run_katherine_self_tests() -> dict:
     else:
         failures.append("aggregate_material_costs conserva materiales distintos")
 
+    sample_guide_html = """
+    <h2>Armas recomendadas</h2><ul><li>Espada de prueba</li></ul>
+    <h2>Mejores artefactos</h2><ul><li>Set de prueba</li></ul>
+    <h2>Estadísticas principales</h2><p>Reloj ATQ%, Copa Daño Cryo, Corona Prob. CRIT</p>
+    <h2>Equipos recomendados</h2><a>Skirk</a><a>Furina</a><a>Escoffier</a><a>Shenhe</a>
+    <h2>Rotación</h2><p>Habilidad, definitiva y ataques normales.</p>
+    """
+    parsed_guide = parse_community_guide_page(
+        sample_guide_html, "https://example.invalid/guide",
+        {"skirk", "furina", "escoffier", "shenhe"}
+    )
+    parser_checks = (
+        ("weapons", bool(parsed_guide and parsed_guide.get("weapons"))),
+        ("artifacts", bool(parsed_guide and parsed_guide.get("artifacts"))),
+        ("stats", bool(parsed_guide and parsed_guide.get("stats"))),
+        ("teams", bool(parsed_guide and parsed_guide.get("teams"))),
+        ("rotation", bool(parsed_guide and parsed_guide.get("rotation")))
+    )
+    for label, good in parser_checks:
+        checks += 1
+        if good:
+            passed += 1
+        elif len(failures) < 25:
+            failures.append(f"parser de guías: {label}")
+
     sample_html = "<p>Texto de prueba</p><br><strong>Genshin</strong>"
     cleaned = clean_game_text(sample_html)
     checks += 1
@@ -9358,7 +9383,6 @@ async def handle_command(event: dict, source: str):
             [
                 "SISTEMA Y KATHERINE",
                 f"{PREFIX}estado — panel único con API, latencia, CPU/RAM, procesos, errores, caché, SQLite, conexiones y salud de fuentes.",
-                f"{PREFIX}estado — panel unificado: API, latencia, RAM, CPU, actividad, procesos, tareas, caché, SQLite, conexiones y configuración.",
                 f"{PREFIX}fecha — fecha y hora de Chile.",
                 f"{PREFIX}zona <Area/Ciudad> — hora de una zona.",
                 f"{PREFIX}salas — consulta salas en vivo.",
@@ -9772,23 +9796,20 @@ async def handle_command(event: dict, source: str):
         return
 
     if command == "!jefes":
-        names = await game_data("enemies", "names")
-        if isinstance(names, dict):
-            names = names.get("names") or names.get("result") or []
-        if isinstance(names, list):
-            values = []
-            for item in names:
-                if isinstance(item, dict):
-                    value = item.get("name") or item.get("Name")
-                else:
-                    value = item
-                if value and any(word in str(value).casefold() for word in (
-                    "boss", "weekly", "world", "jefe", "semanal"
-                )):
-                    values.append(str(value))
-            answer = "JEFES REGISTRADOS\n\n" + "\n".join(f"• {v}" for v in values[:45]) if values else "La API no devolvió una lista clasificable de jefes."
+        if query:
+            data = await game_data("enemies", query)
+            answer = describe_game(data, query, "enemies") if isinstance(data, dict) else f"No encontré el jefe «{query}»."
         else:
-            answer = "No pude consultar la lista de jefes en este momento."
+            data = await game_data("enemies", "boss")
+            if isinstance(data, dict):
+                answer = describe_game(data, "Jefes", "enemies")
+            elif isinstance(data, list):
+                answer = "JEFES DISPONIBLES\n\n" + "\n".join(
+                    f"• {clean_game_text(item.get('name') if isinstance(item, dict) else item)}"
+                    for item in data[:35]
+                )
+            else:
+                answer = "La base de datos no entregó una lista de jefes clasificable."
         await send_message(thread, answer, source, reply)
         return
 
