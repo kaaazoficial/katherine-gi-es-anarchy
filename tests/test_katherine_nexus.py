@@ -28,6 +28,7 @@ from katherine_nexus import (
         ("Katherine, recomiéndame música para estudiar", "dj ambiente estudiar"),
         ("Katherine, consulta la enciclopedia de Genshin sobre Cyno", "enciclopedia cyno"),
         ("Katherine, quién es Nahida", "enciclopedia nahida"),
+        ("Katherine, qué es Genshin Impact", "enciclopedia genshin impact"),
         ("Katherine, haz un autotest", "autotest"),
         ("Katherine, pausa la música", "dj pausa"),
         ("Katherine, reanuda la reproducción", "dj reanudar"),
@@ -154,3 +155,27 @@ def test_bare_katherine_mentions_never_open_help_or_menu():
     for mention in ("Katherine", "katherine", "Oye Katherine", "Katherine,", "Oye, Katherine."):
         assert interpret_natural_request(mention) is None
 
+
+
+
+@pytest.mark.parametrize("utterance", [
+    "Katherine, qué es Anarchy Apps",
+    "Katherine, quién es Anarchy Apps",
+    "Katherine, qué sabes de la API de Anarchy Apps",
+    "Katherine, dame una guía de Anarchy Apps",
+    "Katherine, equipos para mi servidor",
+    "Katherine, consulta la enciclopedia sobre Anarchy Apps",
+])
+def test_unrelated_topics_never_route_to_genshin_tools(utterance):
+    result = interpret_natural_request(utterance)
+    assert result is not None
+    assert result.startswith("asistente ")
+    assert not result.startswith((
+        "enciclopedia ", "guia ", "equipos ", "rotacion ",
+        "materiales ", "cobertura ", "buscargenshin "
+    ))
+
+
+def test_genshin_entity_names_still_route_to_teyvat():
+    assert interpret_natural_request("Katherine, quién es Cyno") == "enciclopedia cyno"
+    assert interpret_natural_request("Katherine, dame una guía de Nahida") == "guia nahida"
