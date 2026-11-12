@@ -11826,7 +11826,7 @@ async def handle_command(event: dict, source: str):
         return
 
     if command in ("!dj", "!reproducir"):
-        dj_source = "community"
+        dj_source = source
         if not COMMUNITY_TOKEN:
             await send_message(
                 thread,
@@ -11975,10 +11975,10 @@ async def handle_command(event: dict, source: str):
 
     if command in ("!djdetener", "!djstop", "!salirsala"):
         if thread not in DJ_ROOMS:
-            await send_message(thread, "Katherine no está reproduciendo audio en esta sala.", "community", reply)
+            await send_message(thread, "Katherine no está reproduciendo audio en esta sala.", source, reply)
             return
         await stop_dj_room(thread, request_leave=True)
-        await send_message(thread, "⏹️ Katherine salió de la sala y detuvo la reproducción.", "community", reply)
+        await send_message(thread, "⏹️ Katherine salió de la sala y detuvo la reproducción.", source, reply)
         return
 
     if command == "!salas":
@@ -12049,7 +12049,7 @@ async def handle_interaction(event: dict, source: str):
     if not action:
         return
     if (
-        (action.get("source") != source and action.get("type") != "dj_select")
+        action.get("source") != source
         or action.get("thread") != thread_id
         or action.get("expires", 0) <= time.time()
     ):
@@ -12180,7 +12180,7 @@ async def handle_interaction(event: dict, source: str):
 
     if action_type == "dj_select":
         BUTTON_ACTIONS.pop(button_id, None)
-        dj_source = "community"
+        dj_source = source
         await remove_pressed_buttons(event, dj_source, remove=True)
 
         saved = DJ_SEARCH_RESULTS.get(thread_id) or {}
