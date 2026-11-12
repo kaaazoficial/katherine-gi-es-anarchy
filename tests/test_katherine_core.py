@@ -291,7 +291,7 @@ def test_external_circuit_breaker_skips_open_host_without_network(monkeypatch):
 
 
 def test_parse_admin_uids_supports_multiple_delimiters():
-    assert katherine.parse_admin_uids("uid-1, uid-2;uid-3\\nuid-4") == {
+    assert katherine.parse_admin_uids("uid-1, uid-2;uid-3\nuid-4") == {
         "uid-1", "uid-2", "uid-3", "uid-4"
     }
 
