@@ -24,7 +24,7 @@ def test_allowlist_accepts_safe_existing_commands():
     assert validate_ai_tool_call("traducir", "inglés | buenos días") == "traducir inglés | buenos días"
 
 @pytest.mark.parametrize(("command", "args"), [
-    ("admin", "resumen"), ("guardian", ""), ("advertir", "@usuario"),
+    ("admin", "resumen"), ("guardian", ""), ("evento", "crear actividad"), ("advertir", "@usuario"),
     ("pagar", "@usuario 100"), ("avatarbot", "https://example.com"),
     ("dj", "subirvolumen 100"), ("multimedia", "ejecutar programa"),
     ("actividad", "mes"), ("zona", "x"), ("enciclopedia", ""),
