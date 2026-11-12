@@ -41,6 +41,9 @@ COMMUNITY_TOKEN = os.getenv("COMMUNITY_BOT_TOKEN", "").strip()
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
 COMMUNITY_SECRET = os.getenv("COMMUNITY_WEBHOOK_SECRET", "").strip()
 PREFIX = os.getenv("COMMAND_PREFIX", "!").strip() or "!"
+if len(PREFIX) > 3 or any(ch.isspace() for ch in PREFIX):
+    PREFIX = "!"
+ADMIN_UIDS = {x.strip() for x in os.getenv("ADMIN_UIDS", "").split(",") if x.strip()}
 STARTED = time.time()
 STARTED_MONOTONIC = time.monotonic()
 HTTP_CLIENT: httpx.AsyncClient | None = None
@@ -120,6 +123,13 @@ def init_db():
             message TEXT NOT NULL DEFAULT '',
             created_at REAL NOT NULL
         )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS wish_state (
+            uid TEXT PRIMARY KEY,
+            pity5 INTEGER NOT NULL DEFAULT 0,
+            pity4 INTEGER NOT NULL DEFAULT 0,
+            guaranteed INTEGER NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL
+        )""")
         db.execute("CREATE INDEX IF NOT EXISTS idx_gifts_target ON gifts(target_uid, id DESC)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_users_points ON users(points DESC)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_users_activity ON users(message_count DESC)")
@@ -136,19 +146,54 @@ def record_user(uid: str, nickname: str, count_message: bool = False):
             (uid, nickname[:80], now, now, 1 if count_message else 0))
 
 
+def scoped_uid(scope_key: str, uid: str) -> str:
+    return f"{scope_key}:{uid}" if scope_key else str(uid)
+
+
 def get_user(uid: str):
     with db_session() as db:
         row = db.execute("SELECT * FROM users WHERE uid=?", (uid,)).fetchone()
         return dict(row) if row else None
 
 
-def find_user_by_nickname(nickname: str):
+def find_user_by_nickname(nickname: str, scope_key: str | None = None):
+    with db_session() as db:
+        sql = "SELECT * FROM users WHERE lower(nickname)=lower(?)"
+        params = [nickname.lstrip("@")]
+        if scope_key:
+            prefix = scope_key + ":"
+            sql += " AND substr(uid,1,?)=?"
+            params.extend([len(prefix), prefix])
+        sql += " ORDER BY last_seen DESC LIMIT 1"
+        row = db.execute(sql, tuple(params)).fetchone()
+        return dict(row) if row else None
+
+
+def get_wish_state(uid: str) -> dict:
     with db_session() as db:
         row = db.execute(
-            "SELECT * FROM users WHERE lower(nickname)=lower(?) ORDER BY last_seen DESC LIMIT 1",
-            (nickname.lstrip("@"),)
+            "SELECT pity5,pity4,guaranteed FROM wish_state WHERE uid=?", (uid,)
         ).fetchone()
-        return dict(row) if row else None
+        if row:
+            return {"pity5": int(row["pity5"]), "pity4": int(row["pity4"]),
+                    "guaranteed": bool(row["guaranteed"])}
+        db.execute(
+            "INSERT OR IGNORE INTO wish_state(uid,pity5,pity4,guaranteed,updated_at) VALUES(?,0,0,0,?)",
+            (uid, time.time())
+        )
+        return {"pity5": 0, "pity4": 0, "guaranteed": False}
+
+
+def save_wish_state(uid: str, state: dict):
+    with db_session() as db:
+        db.execute(
+            """INSERT INTO wish_state(uid,pity5,pity4,guaranteed,updated_at)
+               VALUES(?,?,?,?,?) ON CONFLICT(uid) DO UPDATE SET
+               pity5=excluded.pity5,pity4=excluded.pity4,
+               guaranteed=excluded.guaranteed,updated_at=excluded.updated_at""",
+            (uid, int(state["pity5"]), int(state["pity4"]),
+             int(bool(state["guaranteed"])), time.time())
+        )
 
 
 def update_user_field(uid: str, field: str, value: str):
@@ -203,15 +248,19 @@ def save_gift(sender_uid, sender_name, target_uid, target_name, message):
         )
 
 
-def get_top_users(column: str, limit: int = 10):
+def get_top_users(column: str, limit: int = 10, scope_key: str | None = None):
     if column not in {"points", "message_count"}:
         column = "points"
+    sql = f"SELECT nickname,{column} AS value FROM users WHERE {column}>0"
+    params = []
+    if scope_key:
+        prefix = scope_key + ":"
+        sql += " AND substr(uid,1,?)=?"
+        params.extend([len(prefix), prefix])
+    sql += " ORDER BY value DESC LIMIT ?"
+    params.append(limit)
     with db_session() as db:
-        rows = db.execute(
-            f"""SELECT nickname,{column} AS value FROM users
-                WHERE {column}>0 ORDER BY {column} DESC LIMIT ?""",
-            (limit,)
-        ).fetchall()
+        rows = db.execute(sql, tuple(params)).fetchall()
         return [(r["nickname"], int(r["value"])) for r in rows]
 
 
@@ -247,6 +296,7 @@ metrics["api_latency_total_ms"] = 0.0
 metrics["api_latency_last_ms"] = 0.0
 metrics["api_latency_max_ms"] = 0.0
 background_tasks: set[asyncio.Task] = set()
+CLEANUP_TASK: asyncio.Task | None = None
 
 trivia = {}
 number_games = {}
@@ -378,6 +428,59 @@ def get_process_memory() -> tuple[float | None, float | None]:
     return current_mb, peak_mb
 
 
+def get_container_memory_usage() -> str:
+    """Lee el consumo de memoria del contenedor Linux (cgroup v2 o v1)."""
+    candidates = [
+        ("/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.max"),
+        ("/sys/fs/cgroup/memory/memory.usage_in_bytes",
+         "/sys/fs/cgroup/memory/memory.limit_in_bytes")
+    ]
+    for used_path, limit_path in candidates:
+        try:
+            used_raw = Path(used_path).read_text().strip()
+            limit_raw = Path(limit_path).read_text().strip()
+            if not used_raw.isdigit():
+                continue
+            used_mb = int(used_raw) / 1048576
+            if limit_raw.isdigit() and int(limit_raw) < 2**60:
+                limit_mb = int(limit_raw) / 1048576
+                return f"{used_mb:.1f} / {limit_mb:.1f} MB"
+            return f"{used_mb:.1f} MB (límite no informado)"
+        except (OSError, ValueError):
+            continue
+    return "No disponible en este entorno"
+
+
+def cleanup_expired_state():
+    """Elimina cachés, encuestas, partidas y métricas temporales vencidas."""
+    now = time.time()
+    for store in (cache, enka_cache):
+        for key, item in list(store.items()):
+            if not isinstance(item, tuple) or len(item) < 2 or item[0] <= now:
+                store.pop(key, None)
+    for store in (trivia, number_games, polls):
+        for key, item in list(store.items()):
+            if item.get("expires", now + 1) <= now:
+                store.pop(key, None)
+    active_poll_ids = set(polls)
+    for button_key, poll_id in list(poll_button_map.items()):
+        if poll_id not in active_poll_ids:
+            poll_button_map.pop(button_key, None)
+    cutoff = time.monotonic() - 600
+    for key, history in list(send_history_chat.items()):
+        while history and history[0] < cutoff:
+            history.popleft()
+        if not history:
+            send_history_chat.pop(key, None)
+            last_chat_send.pop(key, None)
+
+
+async def cleanup_loop():
+    while True:
+        await asyncio.sleep(300)
+        cleanup_expired_state()
+
+
 def get_database_stats() -> tuple[float, int | None]:
     """Devuelve el tamaño aproximado de SQLite (incluido WAL/SHM) y usuarios."""
     total_bytes = 0
@@ -424,6 +527,7 @@ async def build_status_message(source: str, nickname: str) -> str:
 
     cpu_line = "No disponible (instala psutil)"
     system_memory_line = "No disponible"
+    container_memory_line = get_container_memory_usage()
     if psutil and PROCESS:
         try:
             cpu_line = f"{PROCESS.cpu_percent(interval=None):.1f}% del proceso"
@@ -471,6 +575,7 @@ async def build_status_message(source: str, nickname: str) -> str:
         f"⏱️ Uptime: {uptime}",
         f"🧠 RAM del proceso: {ram_line}",
         f"⚙️ CPU del proceso: {cpu_line}",
+        f"📦 RAM del contenedor: {container_memory_line}",
         f"💻 Memoria del sistema/host: {system_memory_line}",
         "",
         "📊 ACTIVIDAD",
@@ -653,9 +758,12 @@ async def send_message(
         )
 
         if result["status"] == 429:
+            error_data = result.get("data") or {}
+            if not isinstance(error_data, dict):
+                error_data = {}
             retry = (
                 result.get("retry_after")
-                or result["data"].get("retryAfter")
+                or error_data.get("retryAfter")
                 or 2
             )
 
@@ -836,6 +944,10 @@ async def get_enka(uid: str, info_only: bool = False):
             ttl = 300
 
         enka_cache[cache_key] = (time.time() + ttl, data)
+        if len(enka_cache) > 300:
+            cleanup_expired_state()
+            while len(enka_cache) > 300:
+                enka_cache.pop(next(iter(enka_cache)))
         return data, None
 
     except Exception as exc:
@@ -857,13 +969,13 @@ def get_level90(stats):
     return stats.get("90") or stats.get("90+") or stats.get("89")
 
 
-def target_from_message(msg, args):
+def target_from_message(msg, args, scope_key: str | None = None):
     mentions = msg.get("mentions") or []
 
     for mention in mentions:
         if isinstance(mention, dict) and mention.get("uid"):
             return (
-                str(mention["uid"]),
+                scoped_uid(scope_key or "", str(mention["uid"])),
                 str(mention.get("nickname") or mention["uid"])
             )
 
@@ -871,7 +983,7 @@ def target_from_message(msg, args):
 
     if raw:
         nickname = raw.lstrip("@")
-        found = find_user_by_nickname(nickname)
+        found = find_user_by_nickname(nickname, scope_key)
 
         if found:
             return found["uid"], found["nickname"]
@@ -934,18 +1046,26 @@ async def handle_command(event: dict, source: str):
         return
 
     metrics["text_messages_received"] += 1
-    uid = str(author.get("uid") or author.get("nickname") or "unknown")
+    raw_uid = str(author.get("uid") or author.get("nickname") or "unknown")
+    scope_key = f"{source}:{thread}"
+    uid = scoped_uid(scope_key, raw_uid)
+    game_key = scope_key
     nickname = author.get("nickname") or "Viajero"
     message_id = msg.get("messageId")
 
     record_user(uid, nickname, count_message=True)
 
-    if not content.startswith(("!", "-")):
+    prefix_candidates = sorted({PREFIX, "!", "-"}, key=len, reverse=True)
+    used_prefix = next((p for p in prefix_candidates if content.startswith(p)), None)
+    if not used_prefix:
         return
 
     metrics["commands_received"] += 1
     pieces = content.split()
-    command = pieces[0].lower().replace("-", "!", 1)
+    command_token = pieces[0]
+    if not command_token.startswith(used_prefix) or len(command_token) <= len(used_prefix):
+        return
+    command = "!" + command_token[len(used_prefix):].lower()
     args = pieces[1:]
     query = " ".join(args).strip()
     reply = message_id
@@ -987,10 +1107,11 @@ async def handle_command(event: dict, source: str):
             "!azar mínimo máximo | !verdad | !roast @usuario\n"
             "!8ball pregunta | !chiste | !frase | !reto | !suerte\n\n"
             "SISTEMA\n!estado / !diagnostico | !ping | !latencia | !memoria | !uptime\n"
-            "!fecha | !zona America/Santiago | !salas\n"
-            "Los datos sociales se guardan en SQLite. Los perfiles son públicos en este chat."
+            "!fecha | !zona America/Santiago | !salas | !perfilbot Nombre | Estado (admin)\n"
+            "Los perfiles, puntos y actividad se guardan por chat en SQLite."
         )
 
+        answer = answer.replace("!", PREFIX)
         await send_message(thread, answer, source, reply)
         return
 
@@ -1025,7 +1146,7 @@ async def handle_command(event: dict, source: str):
             return
 
         actions = SOCIAL[command[1:]]
-        target_uid, target_name = target_from_message(msg, args)
+        target_uid, target_name = target_from_message(msg, args, scope_key)
 
         if target_uid and target_uid != uid:
             add_affinity(uid, target_uid)
@@ -1039,7 +1160,7 @@ async def handle_command(event: dict, source: str):
         return
 
     if command == "!roast":
-        target_uid, target_name = target_from_message(msg, args)
+        target_uid, target_name = target_from_message(msg, args, scope_key)
         target_name = target_name or next(
             (x.lstrip("@") for x in args if x.startswith("@")), None
         )
@@ -1119,12 +1240,12 @@ async def handle_command(event: dict, source: str):
         return
 
     if command == "!perfil":
-        target_uid, target_name = target_from_message(msg, args)
+        target_uid, target_name = target_from_message(msg, args, scope_key)
 
         if target_uid:
             user = get_user(target_uid)
         elif target_name:
-            user = find_user_by_nickname(target_name)
+            user = find_user_by_nickname(target_name, scope_key)
         else:
             user = get_user(uid)
 
@@ -1324,7 +1445,7 @@ async def handle_command(event: dict, source: str):
     # AFINIDAD Y REGALOS
     # -----------------------------------------------------------------------
     if command in ("!afinidad", "!amistad"):
-        target_uid, target_name = target_from_message(msg, args)
+        target_uid, target_name = target_from_message(msg, args, scope_key)
 
         if not target_name:
             await send_message(
@@ -1357,7 +1478,7 @@ async def handle_command(event: dict, source: str):
         return
 
     if command == "!regalo":
-        target_uid, target_name = target_from_message(msg, args)
+        target_uid, target_name = target_from_message(msg, args, scope_key)
 
         if not target_name:
             await send_message(
@@ -1421,7 +1542,7 @@ async def handle_command(event: dict, source: str):
         return
 
     if command == "!actividad":
-        top = get_top_users("message_count", 10)
+        top = get_top_users("message_count", 10, scope_key)
 
         answer = "ACTIVIDAD DEL CHAT\n\n" + (
             "\n".join(
@@ -1956,9 +2077,12 @@ async def handle_command(event: dict, source: str):
                 )
             ) + 1
 
+            weapon_name = (weapon.get("flat") or {}).get("nameText") or "Arma equipada"
+            weapon_rarity = (weapon.get("flat") or {}).get("rankLevel")
             lines.append(
-                f"Arma equipada: nivel {weapon_data.get('level', '?')} "
-                f"| refinamiento R{refinement_value}"
+                f"Arma: {weapon_name} | nivel {weapon_data.get('level', '?')} "
+                f"| R{refinement_value}"
+                + (f" | {weapon_rarity}★" if weapon_rarity else "")
             )
 
         artifact_slots = {
@@ -1987,11 +2111,34 @@ async def handle_command(event: dict, source: str):
             slot = artifact_slots.get(flat.get("equipType"), "Artefacto")
 
             if val is not None:
-                lines.append(
-                    f"{slot}: "
+                main_text = (
                     f"{prop.replace('FIGHT_PROP_', '').replace('_', ' ')} "
                     f"{float(val):g}"
                 )
+            else:
+                main_text = "Principal no disponible"
+
+            level_info = (item.get("reliquary") or {}).get("level")
+            substats = flat.get("reliquarySubstats") or []
+            sub_text = []
+            for sub in substats[:4]:
+                if not isinstance(sub, dict):
+                    continue
+                sub_name = str(sub.get("appendPropId") or sub.get("propType") or "Substat")
+                sub_value = sub.get("statValue", sub.get("value"))
+                if sub_value is not None:
+                    sub_text.append(
+                        f"{sub_name.replace('FIGHT_PROP_', '').replace('_', ' ')} {float(sub_value):g}"
+                    )
+            set_name = flat.get("setNameText")
+            artifact_line = f"{slot}: {main_text}"
+            if level_info is not None:
+                artifact_line += f" (+{level_info})"
+            if sub_text:
+                artifact_line += " | " + ", ".join(sub_text)
+            if set_name:
+                artifact_line += f" | {set_name}"
+            lines.append(artifact_line)
 
         lines.append(f"Piezas equipadas detectadas: {len(equip)}")
         lines.append(f"Escaparate: https://enka.network/u/{game_uid}/")
@@ -2080,16 +2227,23 @@ async def handle_command(event: dict, source: str):
         reactions = {
             frozenset(("pyro", "hydro")): "Vaporización",
             frozenset(("cryo", "pyro")): "Derretido",
-            frozenset(("dendro", "electro")): "Agravado / Propagación",
-            frozenset(("dendro", "hydro")): "Florecimiento",
-            frozenset(("anemo", "pyro")): "Dispersión",
-            frozenset(("geo", "pyro")): "Cristalización",
+            frozenset(("pyro", "electro")): "Sobrecarga",
+            frozenset(("cryo", "electro")): "Superconductor",
             frozenset(("electro", "hydro")): "Electrocargado",
             frozenset(("cryo", "hydro")): "Congelado",
+            frozenset(("dendro", "hydro")): "Florecimiento",
+            frozenset(("dendro", "pyro")): "Quemadura",
+            frozenset(("dendro", "electro")): "Aceleración (Quicken; permite Agravado y Propagación)",
+            frozenset(("geo", "pyro")): "Cristalización",
+            frozenset(("geo", "hydro")): "Cristalización",
+            frozenset(("geo", "electro")): "Cristalización",
+            frozenset(("geo", "cryo")): "Cristalización",
+            frozenset(("anemo", "pyro")): "Dispersión",
             frozenset(("anemo", "hydro")): "Dispersión",
             frozenset(("anemo", "cryo")): "Dispersión",
             frozenset(("anemo", "electro")): "Dispersión",
-            frozenset(("anemo", "dendro")): "Sin dispersión Dendro"
+            frozenset(("anemo", "dendro")): "Anemo no dispersa Dendro",
+            frozenset(("anemo", "geo")): "No produce una reacción elemental directa"
         }
 
         pair = frozenset(x.lower() for x in args[:2])
@@ -2135,82 +2289,64 @@ async def handle_command(event: dict, source: str):
     # DESEOS SIMULADOS
     # -----------------------------------------------------------------------
     if command == "!deseo":
-        w = wishes[uid]
+        w = get_wish_state(uid)
         w["pity5"] += 1
         w["pity4"] += 1
+        five_star_chance = (
+            1.0 if w["pity5"] >= 90
+            else min(1.0, 0.006 + max(0, w["pity5"] - 73) * 0.06)
+        )
 
-        if (
-            w["pity5"] >= 90
-            or random.random() < (
-                0.006 + max(0, w["pity5"] - 73) * 0.06
-            )
-        ):
-            w.update(pity5=0, pity4=0)
-
-            name = random.choice([
-                "Cyno",
-                "Nahida",
-                "Dehya",
-                "Furina",
-                "Arlecchino"
-            ])
-
-            await send_message(
-                thread,
+        if random.random() < five_star_chance:
+            featured_characters = ["Cyno", "Nahida", "Furina", "Arlecchino", "Mavuika"]
+            standard_characters = ["Jean", "Diluc", "Mona", "Qiqi", "Keqing", "Tighnari", "Dehya"]
+            is_featured = w["guaranteed"] or random.random() < 0.5
+            name = random.choice(featured_characters if is_featured else standard_characters)
+            w.update(pity5=0, pity4=0, guaranteed=not is_featured)
+            save_wish_state(uid, w)
+            result = (
                 f"RESULTADO SIMULADO\n⭐⭐⭐⭐⭐\n{name}\n"
-                "No afecta tu cuenta de Genshin.",
-                source,
-                reply
+                + ("¡Ganaste el destacado!" if is_featured
+                   else "Perdiste el 50/50. Tu próximo 5 estrellas estará garantizado.")
+                + "\nNo afecta tu cuenta real de Genshin."
             )
-
-        elif w["pity4"] >= 10 or random.random() < .051:
+            await send_message(thread, result, source, reply)
+        elif w["pity4"] >= 10 or random.random() < 0.051:
             w["pity4"] = 0
-
+            save_wish_state(uid, w)
             await send_message(
                 thread,
                 "RESULTADO SIMULADO\n⭐⭐⭐⭐\n"
-                + random.choice([
-                    "Bennett",
-                    "Xingqiu",
-                    "Fischl",
-                    "Sucrose",
-                    "Diona"
-                ]),
+                + random.choice(["Bennett", "Xingqiu", "Fischl", "Sucrose", "Diona"]),
                 source,
                 reply
             )
-
         else:
+            save_wish_state(uid, w)
             await send_message(
                 thread,
                 "RESULTADO SIMULADO\n⭐⭐⭐\nArma de 3 estrellas",
                 source,
                 reply
             )
-
         return
 
     if command == "!pity":
-        w = wishes[uid]
-
+        w = get_wish_state(uid)
         await send_message(
             thread,
-            f"DESEOS SIMULADOS\n"
+            "DESEOS SIMULADOS\n"
             f"5 estrellas: {w['pity5']}\n"
             f"4 estrellas: {w['pity4']}\n"
-            "Garantizado: No",
+            f"Garantizado: {'Sí' if w['guaranteed'] else 'No'}",
             source,
             reply
         )
         return
 
     if command == "!resetpity":
-        wishes[uid] = {
-            "pity5": 0,
-            "pity4": 0,
-            "guaranteed": False
-        }
-
+        w = {"pity5": 0, "pity4": 0, "guaranteed": False}
+        save_wish_state(uid, w)
         await send_message(
             thread,
             "Contador simulado reiniciado. No modifica tu cuenta.",
@@ -2225,7 +2361,7 @@ async def handle_command(event: dict, source: str):
     if command == "!trivia":
         q = random.choice(TRIVIA)
 
-        trivia[thread] = {
+        trivia[game_key] = {
             "q": q,
             "tries": 0,
             "expires": time.time() + 120
@@ -2247,10 +2383,10 @@ async def handle_command(event: dict, source: str):
         return
 
     if command == "!responder":
-        game = trivia.get(thread)
+        game = trivia.get(game_key)
 
         if not game or game["expires"] < time.time():
-            trivia.pop(thread, None)
+            trivia.pop(game_key, None)
 
             await send_message(
                 thread,
@@ -2269,7 +2405,7 @@ async def handle_command(event: dict, source: str):
 
         if choice == game["q"][2]:
             add_points(uid, 10)
-            trivia.pop(thread, None)
+            trivia.pop(game_key, None)
             answer = "¡Correcto! Ganaste 10 puntos."
 
         elif game["tries"] >= 3:
@@ -2277,7 +2413,7 @@ async def handle_command(event: dict, source: str):
                 "Se acabaron los intentos. Era: "
                 f"{game['q'][1][game['q'][2]]}."
             )
-            trivia.pop(thread, None)
+            trivia.pop(game_key, None)
 
         else:
             answer = (
@@ -2292,7 +2428,7 @@ async def handle_command(event: dict, source: str):
     # ADIVINAR NÚMERO
     # -----------------------------------------------------------------------
     if command == "!adivina":
-        number_games[thread] = {
+        number_games[game_key] = {
             "number": random.randint(1, 100),
             "tries": 0,
             "expires": time.time() + 300
@@ -2308,7 +2444,7 @@ async def handle_command(event: dict, source: str):
         return
 
     if command == "!intento":
-        game = number_games.get(thread)
+        game = number_games.get(game_key)
 
         try:
             n = int(args[0])
@@ -2316,7 +2452,7 @@ async def handle_command(event: dict, source: str):
             n = 0
 
         if not game or game["expires"] < time.time():
-            number_games.pop(thread, None)
+            number_games.pop(game_key, None)
             answer = "No hay partida activa. Usa !adivina."
 
         elif not 1 <= n <= 100:
@@ -2328,11 +2464,11 @@ async def handle_command(event: dict, source: str):
             if n == game["number"]:
                 add_points(uid, 15)
                 answer = f"¡Correcto! Era {n}. Ganaste 15 puntos."
-                number_games.pop(thread, None)
+                number_games.pop(game_key, None)
 
             elif game["tries"] >= 7:
                 answer = f"Se acabaron los intentos. Era {game['number']}."
-                number_games.pop(thread, None)
+                number_games.pop(game_key, None)
 
             else:
                 answer = "Es mayor." if n < game["number"] else "Es menor."
@@ -2355,7 +2491,7 @@ async def handle_command(event: dict, source: str):
         return
 
     if command in ("!ranking", "!top"):
-        top = get_top_users("points", 10)
+        top = get_top_users("points", 10, scope_key)
 
         answer = "RANKING KATHERINE\n\n" + (
             "\n".join(
@@ -2389,14 +2525,19 @@ async def handle_command(event: dict, source: str):
 
         question = parts[0]
         options = parts[1:6]
-        poll_id = f"{thread}:{int(time.time()*1000)}"
+        poll_id = f"{source}:{thread}:{int(time.time()*1000)}"
 
         polls[poll_id] = {
             "question": question,
             "options": options,
             "votes": {},
-            "source": source
+            "source": source,
+            "created_at": time.time(),
+            "expires": time.time() + 86400
         }
+        if len(polls) > 500:
+            oldest_id = min(polls, key=lambda key: polls[key].get("created_at", 0))
+            polls.pop(oldest_id, None)
 
         buttons = [
             {
@@ -2622,6 +2763,7 @@ async def handle_command(event: dict, source: str):
             answer = "No pude leer la memoria RSS del proceso en este entorno."
         else:
             answer = f"RAM del proceso: {current:.1f} MB RSS"
+            answer += f"\nRAM del contenedor: {get_container_memory_usage()}"
             if peak is not None:
                 answer += f"\nMáximo registrado: {peak:.1f} MB"
             if psutil and PROCESS:
@@ -2695,6 +2837,16 @@ async def handle_command(event: dict, source: str):
             )
             return
 
+        if not ADMIN_UIDS or raw_uid not in ADMIN_UIDS:
+            await send_message(
+                thread,
+                "No tienes permiso para modificar el perfil de Katherine. "
+                "Configura ADMIN_UIDS en Render con los UID autorizados.",
+                source,
+                reply
+            )
+            return
+
         pieces = query.split("|", 1)
         name = pieces[0].strip()
         status = pieces[1].strip() if len(pieces) > 1 else None
@@ -2719,7 +2871,7 @@ async def handle_command(event: dict, source: str):
             {
                 "name": name,
                 "status": None if status == "-" else status,
-                "commandPrefix": "!"
+                "commandPrefix": PREFIX
             }
         )
 
@@ -2980,13 +3132,15 @@ async def health_head():
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def startup():
-    global HTTP_CLIENT
+    global HTTP_CLIENT, CLEANUP_TASK
     HTTP_CLIENT = httpx.AsyncClient(
         timeout=httpx.Timeout(20.0, connect=8.0),
         limits=httpx.Limits(max_connections=40, max_keepalive_connections=20),
         headers={"User-Agent": "Katherine-AnarchyBot/3.0"}
     )
     init_db()
+    cleanup_expired_state()
+    CLEANUP_TASK = asyncio.create_task(cleanup_loop())
 
     logging.info("SQLite activo en %s", DB_PATH)
 
@@ -3026,7 +3180,14 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    global HTTP_CLIENT
+    global HTTP_CLIENT, CLEANUP_TASK
+    if CLEANUP_TASK is not None:
+        CLEANUP_TASK.cancel()
+        try:
+            await CLEANUP_TASK
+        except asyncio.CancelledError:
+            pass
+        CLEANUP_TASK = None
     if HTTP_CLIENT is not None:
         await HTTP_CLIENT.aclose()
         HTTP_CLIENT = None
