@@ -27,6 +27,7 @@ on:
       - "katherine_astra.py"
       - "katherine_ai.py"
       - "katherine_research.py"
+      - "katherine_retention.py"
       - ".github/workflows/tests.yml"
   workflow_dispatch:
 
