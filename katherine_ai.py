@@ -239,15 +239,15 @@ class KatherineAI:
 
     def __init__(
         self,
-        memory_ttl: int = 900,
-        memory_turns: int = 12,
-        analyst_ttl: int = 3600,
-        analyst_limit: int = 200,
+        memory_ttl: int = 600,
+        memory_turns: int = 6,
+        analyst_ttl: int = 900,
+        analyst_limit: int = 60,
     ):
-        self.memory_ttl = max(60, int(memory_ttl))
-        self.memory_turns = max(2, min(30, int(memory_turns)))
-        self.analyst_ttl = max(60, int(analyst_ttl))
-        self.analyst_limit = max(20, min(500, int(analyst_limit)))
+        self.memory_ttl = max(60, min(600, int(memory_ttl)))
+        self.memory_turns = max(2, min(6, int(memory_turns)))
+        self.analyst_ttl = max(60, min(900, int(analyst_ttl)))
+        self.analyst_limit = max(10, min(60, int(analyst_limit)))
         self._memory: dict[str, dict[str, Any]] = {}
         self._analyst_enabled: set[str] = set()
         self._analyst: dict[str, deque] = {}
@@ -337,7 +337,7 @@ class KatherineAI:
             "turns": turns[-self.memory_turns * 2:],
             "expires": time.time() + self.memory_ttl,
         }
-        if len(self._memory) > 500:
+        if len(self._memory) > 300:
             oldest = min(self._memory, key=lambda k: self._memory[k].get("expires", 0))
             self._memory.pop(oldest, None)
 
@@ -382,10 +382,13 @@ class KatherineAI:
             return False
         now = time.time()
         buffer = self._analyst.setdefault(key, deque(maxlen=self.analyst_limit))
+        # Keep only an ephemeral participant label, not a platform nickname.
+        participant = str(nickname or "Usuario")[:60]
+        author_label = hashlib.sha256(participant.casefold().encode("utf-8")).hexdigest()[:8]
         buffer.append({
             "at": now,
-            "author": str(nickname or "Usuario")[:60],
-            "content": text[:700],
+            "author": f"Participante-{author_label}",
+            "content": text[:500],
         })
         cutoff = now - self.analyst_ttl
         while buffer and float(buffer[0].get("at", 0)) < cutoff:
@@ -420,7 +423,11 @@ class KatherineAI:
             if key not in self._analyst_enabled:
                 self._analyst.pop(key, None)
         for key, timestamp in list(self._last_call.items()):
-            if time.monotonic() - timestamp > 3600:
+            if time.monotonic() - timestamp > 600:
+                self._last_call.pop(key, None)
+        if len(self._last_call) > 1000:
+            oldest = sorted(self._last_call.items(), key=lambda item: item[1])
+            for key, _ in oldest[:len(self._last_call) - 1000]:
                 self._last_call.pop(key, None)
 
     @staticmethod
