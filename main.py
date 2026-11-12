@@ -15465,7 +15465,8 @@ async def start_dj_search_with_fallback(
         return False, "No hay pistas disponibles.", None, None
     start = max(0, min(len(tracks) - 1, int(selected_index)))
     last_error = "No pude preparar ninguna pista."
-    for index in range(start, len(tracks)):
+    candidate_order = list(range(start, len(tracks))) + list(range(0, start))
+    for index in candidate_order:
         track = tracks[index]
         ok, message = await start_dj_room(
             thread_id,
