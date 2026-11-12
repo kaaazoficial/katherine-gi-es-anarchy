@@ -1,6 +1,8 @@
 """Regression tests for Katherine's local, deterministic core behavior."""
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 import main as katherine
@@ -285,3 +287,93 @@ def test_external_circuit_breaker_skips_open_host_without_network(monkeypatch):
     assert katherine.metrics["external_circuit_open"] == before + 1
     katherine.SOURCE_HEALTH.pop(host, None)
 
+
+
+
+def test_parse_admin_uids_supports_multiple_delimiters():
+    assert katherine.parse_admin_uids("uid-1, uid-2;uid-3\nuid-4") == {
+        "uid-1", "uid-2", "uid-3", "uid-4"
+    }
+
+
+def test_admin_uid_requires_an_exact_nonempty_uid(monkeypatch):
+    monkeypatch.setattr(katherine, "ADMIN_UIDS", {"trusted-uid"})
+
+    assert katherine.is_admin_uid("trusted-uid")
+    assert not katherine.is_admin_uid("")
+    assert not katherine.is_admin_uid("Trusted Nickname")
+    assert not katherine.is_admin_uid("trusted-uid-extra")
+
+
+@pytest.mark.parametrize("command", sorted(katherine.ADMIN_ONLY_COMMANDS))
+def test_privileged_system_commands_reject_non_admins(
+    monkeypatch, database, command
+):
+    monkeypatch.setattr(katherine, "ADMIN_UIDS", {"trusted-uid"})
+    sent = []
+
+    async def fake_send_message(thread_id, content, source, reply_id=None, buttons=None):
+        sent.append(str(content))
+        return {"ok": True}
+
+    monkeypatch.setattr(katherine, "send_message", fake_send_message)
+    event = {
+        "threadId": "admin-guard-room",
+        "message": {
+            "content": command,
+            "author": {"uid": "untrusted-uid", "nickname": "Viajero"},
+        },
+    }
+
+    asyncio.run(katherine.handle_command(event, "community"))
+
+    assert sent
+    assert "Acceso restringido" in sent[0]
+
+
+def test_nickname_cannot_impersonate_an_admin_uid(monkeypatch, database):
+    monkeypatch.setattr(katherine, "ADMIN_UIDS", {"Admin Visible"})
+    sent = []
+
+    async def fake_send_message(thread_id, content, source, reply_id=None, buttons=None):
+        sent.append(str(content))
+        return {"ok": True}
+
+    monkeypatch.setattr(katherine, "send_message", fake_send_message)
+    event = {
+        "threadId": "admin-guard-room",
+        "message": {
+            "content": "!estado",
+            "author": {"nickname": "Admin Visible"},
+        },
+    }
+
+    asyncio.run(katherine.handle_command(event, "community"))
+
+    assert sent and "Acceso restringido" in sent[0]
+
+
+def test_admin_uid_can_run_privileged_system_status(monkeypatch, database):
+    monkeypatch.setattr(katherine, "ADMIN_UIDS", {"trusted-uid"})
+    sent = []
+
+    async def fake_build_status_message(source, nickname, thread_id):
+        return "ESTADO INTERNO AUTORIZADO"
+
+    async def fake_send_message(thread_id, content, source, reply_id=None, buttons=None):
+        sent.append(str(content))
+        return {"ok": True}
+
+    monkeypatch.setattr(katherine, "build_status_message", fake_build_status_message)
+    monkeypatch.setattr(katherine, "send_message", fake_send_message)
+    event = {
+        "threadId": "admin-guard-room",
+        "message": {
+            "content": "!estado",
+            "author": {"uid": "trusted-uid", "nickname": "Admin"},
+        },
+    }
+
+    asyncio.run(katherine.handle_command(event, "community"))
+
+    assert sent == ["ESTADO INTERNO AUTORIZADO"]
