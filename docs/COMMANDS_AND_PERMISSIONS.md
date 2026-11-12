@@ -1,0 +1,27 @@
+# Katherine · Catálogo y permisos de comandos
+
+El catálogo de usuario se genera con `!ayuda` y `!comandos` en `main.py`. Debe mantenerse sincronizado con los manejadores reales.
+
+## Administración por UID
+
+Los comandos marcados como `[ADMIN]` solo aceptan el UID entregado por Anarchy Apps en `message.author.uid`. No se usa el nickname como sustituto para otorgar permisos.
+
+En Render, configura la variable `ADMIN_UIDS` con uno o más UID. Se aceptan separadores de coma, punto y coma o salto de línea. Para conocer tu identificador ejecuta `!miuid` y copia el valor recibido. Tras modificar la variable, aplica los cambios y reinicia/despliega el servicio.
+
+## Comandos privilegiados
+
+- `!estado`, `!fuentes`, `!saludfuentes`, `!autotest`
+- `!centro`, `!nexus`
+- `!admin`, `!paneladmin`, `!guardian`
+- `!antispam`, `!advertir`, `!advertencias`, `!quitaradvertencia`
+- `!perfilbot`, `!avatarbot`
+- `!respuestas`, `!respuesta`
+- `!ia probar`, `!ia guardian`, `!ia analista`, `!ia diagnostico`
+
+Los eventos se crean libremente; solo su creador o un UID administrador puede cerrarlos. Los comandos generales de fecha, zona horaria, menú, economía, traducción y multimedia siguen disponibles para todos.
+
+## Protección adicional
+
+- Si el evento no contiene un UID real, se deniega cualquier comando privilegiado aunque el nickname coincida con un UID configurado.
+- Las comprobaciones del panel interactivo vuelven a validar el UID al pulsar botones.
+- Los UID configurados se comparan como cadenas exactas y no se aceptan valores vacíos.
