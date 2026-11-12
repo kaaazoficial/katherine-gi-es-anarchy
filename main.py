@@ -600,7 +600,7 @@ def check_antispam_message(event: dict, source: str):
     digest = hashlib.sha256(content.encode("utf-8", errors="ignore")).hexdigest()
     activity.append((now, digest))
     repeated = sum(1 for _, item_digest in activity if item_digest == digest)
-    link_count = len(re.findall(r"(?:https?://|www\\.)\\S+", content, flags=re.I))
+    link_count = len(re.findall(r"(?:https?://|www\.)\S+", content, flags=re.I))
     mention_count = len(message.get("mentions") or [])
     reason = ""
     if link_count > config["max_links"]:
@@ -13660,7 +13660,9 @@ async def handle_command(event: dict, source: str):
         if not query:
             await send_message(
                 thread,
-                "ENCICLOPEDIA DE TEYVAT\\nConsulta personajes, armas, artefactos, enemigos, materiales, comida, dominios, regiones y elementos.\\nUso: !enciclopedia <nombre>",
+                """ENCICLOPEDIA DE TEYVAT
+Consulta personajes, armas, artefactos, enemigos, materiales, comida, dominios, regiones y elementos.
+Uso: !enciclopedia <nombre>""",
                 source,
                 reply
             )
@@ -15026,7 +15028,7 @@ async def handle_command(event: dict, source: str):
             if not sep:
                 await send_message(thread, "Uso: !playlist agregar <nombre> | <archivo local o favorito:<id>>.", source, reply)
                 return
-            favorite_match = re.fullmatch(r"favorito:(\\d+)", track_name, flags=re.I)
+            favorite_match = re.fullmatch(r"favorito:(\d+)", track_name, flags=re.I)
             if favorite_match:
                 favorite_id = int(favorite_match.group(1))
                 favorite = next(
@@ -15073,7 +15075,7 @@ async def handle_command(event: dict, source: str):
             }
             for item in tracks:
                 source_value = str(item.get("source") or "")
-                favorite_match = re.fullmatch(r"favorite:(\\d+)", source_value)
+                favorite_match = re.fullmatch(r"favorite:(\d+)", source_value)
                 if favorite_match:
                     favorite = owner_favorites.get(int(favorite_match.group(1)))
                     if not favorite:
