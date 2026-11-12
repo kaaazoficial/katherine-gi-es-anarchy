@@ -1,4 +1,4 @@
-# Katherine - Bot de Anarchy Apps (Python)
+ne - Bot de Anarchy Apps (Python)
 # Requiere Python 3.11+
 import os
 import re
@@ -11,6 +11,13 @@ import asyncio
 import logging
 import sqlite3
 import sys
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
 from contextlib import contextmanager
 from pathlib import Path
 from collections import defaultdict, deque
@@ -36,6 +43,12 @@ COMMUNITY_SECRET = os.getenv("COMMUNITY_WEBHOOK_SECRET", "").strip()
 PREFIX = os.getenv("COMMAND_PREFIX", "!").strip() or "!"
 STARTED = time.time()
 STARTED_MONOTONIC = time.monotonic()
+HTTP_CLIENT: httpx.AsyncClient | None = None
+PROCESS = psutil.Process(os.getpid()) if psutil else None
+LAST_EVENT_AT = None
+LAST_COMMAND_AT = None
+LAST_COMMAND_NAME = None
+LAST_COMMAND_USER = None
 
 if not BOT_TOKEN:
     logging.warning("Falta BOT_TOKEN.")
@@ -230,6 +243,9 @@ enka_cache: dict[str, tuple[float, Any]] = {}
 
 # Contadores del proceso actual. Se reinician cuando Render reinicia el servicio.
 metrics = defaultdict(int)
+metrics["api_latency_total_ms"] = 0.0
+metrics["api_latency_last_ms"] = 0.0
+metrics["api_latency_max_ms"] = 0.0
 background_tasks: set[asyncio.Task] = set()
 
 trivia = {}
@@ -388,11 +404,10 @@ def get_database_stats() -> tuple[float, int | None]:
 
 
 async def build_status_message(source: str, nickname: str) -> str:
-    """Construye un informe del bot y verifica en vivo la API de Anarchy."""
+    """Informe técnico con métricas reales del proceso y prueba de API."""
     started_check = time.perf_counter()
     result = await api("GET", "/me", source)
     api_latency_ms = (time.perf_counter() - started_check) * 1000
-
     api_ok = bool(result.get("ok"))
     api_status = result.get("status", "?")
     response_data = result.get("data") or {}
@@ -407,13 +422,22 @@ async def build_status_message(source: str, nickname: str) -> str:
     db_size_mb, user_count = get_database_stats()
     uptime = format_duration(time.monotonic() - STARTED_MONOTONIC)
 
-    ram_line = (
-        f"{current_ram:.1f} MB RSS"
-        if current_ram is not None
-        else "No disponible"
-    )
+    cpu_line = "No disponible (instala psutil)"
+    system_memory_line = "No disponible"
+    if psutil and PROCESS:
+        try:
+            cpu_line = f"{PROCESS.cpu_percent(interval=None):.1f}% del proceso"
+            vm = psutil.virtual_memory()
+            system_memory_line = (
+                f"{vm.percent:.1f}% usada "
+                f"({vm.used / 1048576:.0f}/{vm.total / 1048576:.0f} MB)"
+            )
+        except (psutil.Error, OSError):
+            pass
+
+    ram_line = f"{current_ram:.1f} MB RSS" if current_ram is not None else "No disponible"
     if peak_ram is not None:
-        ram_line += f" | Máximo: {peak_ram:.1f} MB"
+        ram_line += f" | pico {peak_ram:.1f} MB"
 
     db_line = f"{db_size_mb:.2f} MB"
     if user_count is not None:
@@ -421,54 +445,79 @@ async def build_status_message(source: str, nickname: str) -> str:
 
     api_line = (
         f"🟢 Conectada · {api_latency_ms:.0f} ms (HTTP {api_status})"
-        if api_ok
-        else f"🔴 Sin conexión · {api_latency_ms:.0f} ms (HTTP {api_status})"
+        if api_ok else f"🔴 Sin conexión · {api_latency_ms:.0f} ms (HTTP {api_status})"
     )
     bot_info = response_data.get("bot") or {}
     bot_name = bot_info.get("name") if isinstance(bot_info, dict) else None
-    bot_name_line = f"• Nombre en Anarchy: {bot_name}" if bot_name else None
-
-    community_token_line = "Configurado" if COMMUNITY_TOKEN else "No configurado"
-    developer_token_line = "Configurado" if BOT_TOKEN else "No configurado"
+    avg_api = (
+        metrics["api_latency_total_ms"] / metrics["api_requests"]
+        if metrics["api_requests"] else 0
+    )
+    last_event = (
+        format_duration(time.time() - LAST_EVENT_AT) + " atrás"
+        if LAST_EVENT_AT else "Sin eventos"
+    )
+    last_command = (
+        f"{LAST_COMMAND_NAME} por {LAST_COMMAND_USER}"
+        if LAST_COMMAND_NAME else "Ninguno desde el inicio"
+    )
 
     lines = [
         "╔════ KATHERINE · ESTADO ════╗",
         f"👋 Solicitud de: {nickname}",
         f"🤖 Proceso: {'🟢 Operativo' if api_ok else '🟡 Activo, API no disponible'}",
-        f"📡 API de Anarchy: {api_line}",
-        *([bot_name_line] if bot_name_line else []),
-        f"⏱️ Tiempo activo: {uptime}",
+        f"📡 Anarchy API: {api_line}",
+        f"• Bot: {bot_name or 'No informado por API'}",
+        f"⏱️ Uptime: {uptime}",
         f"🧠 RAM del proceso: {ram_line}",
+        f"⚙️ CPU del proceso: {cpu_line}",
+        f"💻 Memoria del sistema/host: {system_memory_line}",
         "",
-        "📊 ACTIVIDAD DEL PROCESO",
-        f"• Eventos webhook aceptados: {metrics['webhook_events']}",
-        f"• Mensajes de texto recibidos: {metrics['text_messages_received']}",
+        "📊 ACTIVIDAD",
+        f"• Webhooks aceptados: {metrics['webhook_events']}",
+        f"• Mensajes recibidos: {metrics['text_messages_received']}",
         f"• Comandos recibidos: {metrics['commands_received']}",
-        f"• Interacciones recibidas: {metrics['interactions_received']}",
+        f"• Último comando: {last_command}",
+        f"• Último evento: {last_event}",
+        f"• Interacciones: {metrics['interactions_received']}",
         f"• Respuestas enviadas: {metrics['messages_sent']}",
-        f"• Solicitudes a Anarchy API: {metrics['api_requests']}",
-        f"• Errores de API Anarchy: {metrics['api_errors']}",
+        f"• Tareas activas: {len(background_tasks)}",
+        f"• Partidas activas: {len(trivia) + len(number_games)}",
         "",
-        "💾 ALMACENAMIENTO Y CACHÉ",
+        "🌐 API Y RENDIMIENTO",
+        f"• Solicitudes API: {metrics['api_requests']}",
+        f"• Errores API: {metrics['api_errors']}",
+        f"• Latencia API reciente: {metrics['api_latency_last_ms']:.0f} ms",
+        f"• Latencia API promedio: {avg_api:.0f} ms",
+        f"• Latencia API máxima: {metrics['api_latency_max_ms']:.0f} ms",
+        "",
+        "💾 DATOS",
         f"• SQLite: {db_line}",
-        f"• Caché Genshin-DB: {len(cache)} entradas",
+        f"• Caché Genshin: {len(cache)} entradas",
         f"• Caché Enka: {len(enka_cache)} entradas",
-        f"• Tareas de eventos activas: {len(background_tasks)}",
         "",
-        "⚙️ ENTORNO",
-        f"• Python: {sys.version.split()[0]}",
-        f"• PID: {os.getpid()}",
-        f"• Bot desarrollador: {developer_token_line}",
-        f"• Bot de comunidad: {community_token_line}",
-        f"• Chats vinculados a este token: {len(thread_ids)}",
-        "",
-        "Los contadores de actividad corresponden a este proceso desde el último reinicio."
+        "🔐 CONFIGURACIÓN",
+        f"• Python: {sys.version.split()[0]} | PID: {os.getpid()}",
+        f"• Token desarrollador: {'Configurado' if BOT_TOKEN else 'No configurado'}",
+        f"• Token comunidad: {'Configurado' if COMMUNITY_TOKEN else 'No configurado'}",
+        f"• Chats vinculados al token: {len(thread_ids)}",
+        "Los contadores corresponden a este proceso desde su último reinicio."
     ]
     return "\n".join(lines)[:1950]
 
 
+
 def clean_text(value: Any) -> str:
     return re.sub(r"[`*_]", "", str(value or "")).strip()
+
+
+async def external_request(method: str, url: str, **kwargs):
+    """Reutiliza conexiones HTTP durante la vida del proceso."""
+    if HTTP_CLIENT is not None:
+        return await HTTP_CLIENT.request(method, url, **kwargs)
+    async with httpx.AsyncClient(timeout=20) as temporary_client:
+        return await temporary_client.request(method, url, **kwargs)
+
 
 
 async def api(method: str, path: str, source="developer", body=None):
@@ -487,13 +536,20 @@ async def api(method: str, path: str, source="developer", body=None):
 
     try:
         metrics["api_requests"] += 1
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.request(
-                method,
-                API + path,
-                headers=headers,
-                json=body
-            )
+        request_started = time.perf_counter()
+        response = await external_request(
+            method,
+            API + path,
+            headers=headers,
+            json=body,
+            timeout=20
+        )
+        elapsed_ms = (time.perf_counter() - request_started) * 1000
+        metrics["api_latency_last_ms"] = elapsed_ms
+        metrics["api_latency_total_ms"] += elapsed_ms
+        metrics["api_latency_max_ms"] = max(
+            metrics["api_latency_max_ms"], elapsed_ms
+        )
 
         try:
             data = response.json()
@@ -517,6 +573,12 @@ async def api(method: str, path: str, source="developer", body=None):
         }
 
     except Exception as exc:
+        elapsed_ms = (time.perf_counter() - request_started) * 1000 if "request_started" in locals() else 0.0
+        metrics["api_latency_last_ms"] = elapsed_ms
+        metrics["api_latency_total_ms"] += elapsed_ms
+        metrics["api_latency_max_ms"] = max(
+            metrics["api_latency_max_ms"], elapsed_ms
+        )
         metrics["api_errors"] += 1
         logging.exception("Error de conexion con Anarchy")
         return {
@@ -643,13 +705,11 @@ async def game_data(folder: str, query: str):
     }
 
     try:
-        async with httpx.AsyncClient(timeout=18) as client:
-            r = await client.get(
-                f"{GAME_API}/{folder}",
-                params=params
-            )
-            r.raise_for_status()
-            data = r.json()
+        r = await external_request(
+            "GET", f"{GAME_API}/{folder}", params=params, timeout=18
+        )
+        r.raise_for_status()
+        data = r.json()
 
         if isinstance(data, dict):
             data = data.get("data", data.get("result", data))
@@ -719,13 +779,11 @@ async def character_stats(query: str):
     }
 
     try:
-        async with httpx.AsyncClient(timeout=18) as client:
-            response = await client.get(
-                f"{GAME_API}/stats",
-                params=params
-            )
-            response.raise_for_status()
-            data = response.json()
+        response = await external_request(
+            "GET", f"{GAME_API}/stats", params=params, timeout=18
+        )
+        response.raise_for_status()
+        data = response.json()
 
         if isinstance(data, dict):
             cache[key] = (time.time() + 21600, data)
@@ -762,8 +820,9 @@ async def get_enka(uid: str, info_only: bool = False):
     }
 
     try:
-        async with httpx.AsyncClient(timeout=20, headers=headers) as client:
-            response = await client.get(url)
+        response = await external_request(
+            "GET", url, headers=headers, timeout=20
+        )
 
         if response.status_code != 200:
             return None, response.status_code
@@ -863,6 +922,8 @@ BUILD_TEAMS = {
 # GESTOR PRINCIPAL DE COMANDOS
 # ---------------------------------------------------------------------------
 async def handle_command(event: dict, source: str):
+    global LAST_EVENT_AT, LAST_COMMAND_AT, LAST_COMMAND_NAME, LAST_COMMAND_USER
+    LAST_EVENT_AT = time.time()
     msg = event.get("message") or {}
     author = msg.get("author") or {}
 
@@ -888,6 +949,9 @@ async def handle_command(event: dict, source: str):
     args = pieces[1:]
     query = " ".join(args).strip()
     reply = message_id
+    LAST_COMMAND_AT = time.time()
+    LAST_COMMAND_NAME = command
+    LAST_COMMAND_USER = nickname
 
     logging.info(
         "[COMANDO] %s | %s | %s",
@@ -902,7 +966,8 @@ async def handle_command(event: dict, source: str):
     if command in ("!ayuda", "!comandos"):
         answer = (
             "KATHERINE — COMANDOS\n\nGENSHIN IMPACT\n"
-            "!personaje nombre | !materiales nombre | !comparar nombre 1 | nombre 2\n"
+            "!personaje nombre | !estadisticas nombre | !materiales nombre | !ascension nombre\n"
+            "!talentos nombre | !pasivas nombre | !comparar nombre 1 | nombre 2\n"
             "!build nombre (requiere UID vinculado) | !equipos personaje | !rotacion personaje\n"
             "!calculadora cv CR CD | !calculadora critico CR CD\n"
             "!arma nombre | !artefacto nombre | !dominio nombre | !enemigo nombre\n"
@@ -919,8 +984,10 @@ async def handle_command(event: dict, source: str):
             "ENTRETENIMIENTO\n!trivia | !responder 1-4 | !adivina | !intento número\n"
             "!puntos | !ranking | !encuesta pregunta | opción 1 | opción 2\n"
             "!elige | !duelo @usuario | !ship usuario1 usuario2 | !dado | !moneda\n"
+            "!azar mínimo máximo | !verdad | !roast @usuario\n"
             "!8ball pregunta | !chiste | !frase | !reto | !suerte\n\n"
-            "SISTEMA\n!estado | !ping | !uptime | !fecha | !zona America/Santiago | !salas\n"
+            "SISTEMA\n!estado / !diagnostico | !ping | !latencia | !memoria | !uptime\n"
+            "!fecha | !zona America/Santiago | !salas\n"
             "Los datos sociales se guardan en SQLite. Los perfiles son públicos en este chat."
         )
 
@@ -968,6 +1035,27 @@ async def handle_command(event: dict, source: str):
             f"{nickname} {random.choice(actions)} {target}.",
             source,
             reply
+        )
+        return
+
+    if command == "!roast":
+        target_uid, target_name = target_from_message(msg, args)
+        target_name = target_name or next(
+            (x.lstrip("@") for x in args if x.startswith("@")), None
+        )
+        if not target_name:
+            await send_message(thread, "Uso: !roast @usuario", source, reply)
+            return
+        roasts = [
+            "tiene menos suerte que una cuenta con 0 de resina.",
+            "farmea tanto DEF que hasta sus enemigos sienten pena.",
+            "necesita una guía para encontrar el botón de iniciar.",
+            "hace tanto daño que los slimes se quedan esperando.",
+            "su build tiene potencial… escondido muy profundamente."
+        ]
+        await send_message(
+            thread, f"🔥 Katherine contraataca: {target_name} {random.choice(roasts)}",
+            source, reply
         )
         return
 
@@ -1397,10 +1485,67 @@ async def handle_command(event: dict, source: str):
         await send_message(thread, answer[:1950], source, reply)
         return
 
+    if command in ("!estadisticas", "!statspersonaje"):
+        if not query:
+            await send_message(thread, "Uso: !estadisticas nombre", source, reply)
+            return
+        data, stats = await asyncio.gather(
+            get_character(query), character_stats(query)
+        )
+        base = get_level90(stats)
+        if not isinstance(data, dict) or not isinstance(base, dict):
+            await send_message(
+                thread, f"No pude obtener las estadísticas de {query}.",
+                source, reply
+            )
+            return
+        answer = (
+            f"ESTADÍSTICAS BASE — {data.get('name', query)} · NIVEL 90\n"
+            f"Vida: {format_number(base.get('hp'))}\n"
+            f"ATQ: {format_number(base.get('attack'))}\n"
+            f"DEF: {format_number(base.get('defense'))}\n"
+            f"Atributo de ascensión: {base.get('specialized', 'No informado')}\n"
+            "Valores base; no incluyen armas, artefactos ni bonificaciones."
+        )
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command in ("!talentos", "!pasivas"):
+        if not query:
+            await send_message(thread, f"Uso: {command} nombre del personaje", source, reply)
+            return
+        data = await get_character(query)
+        if not isinstance(data, dict):
+            await send_message(thread, f"No encontré a {query}.", source, reply)
+            return
+        if command == "!talentos":
+            entries = data.get("skillTalents") or data.get("talents") or []
+            heading = "TALENTOS DE COMBATE"
+        else:
+            entries = data.get("passiveTalents") or []
+            heading = "TALENTOS PASIVOS"
+        if isinstance(entries, dict):
+            entries = list(entries.values())
+        if not isinstance(entries, list) or not entries:
+            await send_message(
+                thread, "La base de datos no entregó esa información.",
+                source, reply
+            )
+            return
+        lines = [f"{heading} — {data.get('name', query)}"]
+        for item in entries[:6]:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name") or item.get("unlock") or "Talento"
+            desc = re.sub(r"<[^>]+>", "", str(item.get("description") or ""))
+            lines.append(f"\n{name}\n{desc[:350]}")
+        await send_message(thread, "\n".join(lines)[:1900], source, reply)
+        return
+
     # -----------------------------------------------------------------------
     # GENSHIN IMPACT: MATERIALES DE ASCENSIÓN
     # -----------------------------------------------------------------------
-    if command == "!materiales":
+    if command in ("!materiales", "!ascension"):
         if not query:
             await send_message(
                 thread,
@@ -2198,7 +2343,7 @@ async def handle_command(event: dict, source: str):
     # -----------------------------------------------------------------------
     # PUNTOS Y RANKING
     # -----------------------------------------------------------------------
-    if command == "!puntos":
+    if command in ("!puntos", "!reputacion"):
         user = get_user(uid) or {}
 
         await send_message(
@@ -2209,7 +2354,7 @@ async def handle_command(event: dict, source: str):
         )
         return
 
-    if command == "!ranking":
+    if command in ("!ranking", "!top"):
         top = get_top_users("points", 10)
 
         answer = "RANKING KATHERINE\n\n" + (
@@ -2327,6 +2472,31 @@ async def handle_command(event: dict, source: str):
         await send_message(thread, answer, source, reply)
         return
 
+    if command == "!azar":
+        parts = query.replace(",", " ").split()
+        try:
+            if len(parts) != 2:
+                raise ValueError
+            low, high = map(int, parts)
+            if low > high or high - low > 1_000_000:
+                raise ValueError
+            answer = f"🎲 Resultado aleatorio: {random.randint(low, high)}"
+        except ValueError:
+            answer = "Uso: !azar mínimo máximo (rango máximo: 1.000.000)."
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!verdad":
+        truths = [
+            "¿Qué personaje de Genshin representa mejor tu personalidad?",
+            "¿Cuál fue tu peor decisión gastando Protogemas?",
+            "¿Qué personaje te gusta aunque casi nunca lo uses?",
+            "¿Qué juego te da vergüenza admitir que disfrutas?",
+            "¿Cuál es tu mayor manía cuando juegas?"
+        ]
+        await send_message(thread, "VERDAD\n" + random.choice(truths), source, reply)
+        return
+
     if command == "!dado":
         await send_message(
             thread,
@@ -2413,7 +2583,7 @@ async def handle_command(event: dict, source: str):
     # -----------------------------------------------------------------------
     # SISTEMA Y ESTADO DEL BOT
     # -----------------------------------------------------------------------
-    if command == "!estado":
+    if command in ("!estado", "!diagnostico", "!statsbot"):
         answer = await build_status_message(source, nickname)
         await send_message(thread, answer, source, reply)
         return
@@ -2431,6 +2601,34 @@ async def handle_command(event: dict, source: str):
         else:
             answer = f"Anarchy respondió HTTP {result['status']}."
 
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!latencia":
+        started = time.perf_counter()
+        result = await api("GET", "/me", source)
+        elapsed = (time.perf_counter() - started) * 1000
+        state = "🟢 API disponible" if result["ok"] else "🔴 API no disponible"
+        await send_message(
+            thread,
+            f"{state}\nLatencia de Anarchy: {elapsed:.0f} ms\nHTTP: {result['status']}",
+            source, reply
+        )
+        return
+
+    if command == "!memoria":
+        current, peak = get_process_memory()
+        if current is None:
+            answer = "No pude leer la memoria RSS del proceso en este entorno."
+        else:
+            answer = f"RAM del proceso: {current:.1f} MB RSS"
+            if peak is not None:
+                answer += f"\nMáximo registrado: {peak:.1f} MB"
+            if psutil and PROCESS:
+                try:
+                    answer += f"\nCPU del proceso: {PROCESS.cpu_percent(interval=None):.1f}%"
+                except psutil.Error:
+                    pass
         await send_message(thread, answer, source, reply)
         return
 
@@ -2682,6 +2880,7 @@ def verify_webhook(raw: bytes, headers, secret: str):
 
 
 async def webhook(request: Request, source: str):
+    global LAST_EVENT_AT
     secret = (
         COMMUNITY_SECRET
         if source == "community"
@@ -2712,6 +2911,7 @@ async def webhook(request: Request, source: str):
         })
 
     metrics["webhook_events"] += 1
+    LAST_EVENT_AT = time.time()
     if event.get("type") == "interaction":
         metrics["interactions_received"] += 1
 
@@ -2780,6 +2980,12 @@ async def health_head():
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def startup():
+    global HTTP_CLIENT
+    HTTP_CLIENT = httpx.AsyncClient(
+        timeout=httpx.Timeout(20.0, connect=8.0),
+        limits=httpx.Limits(max_connections=40, max_keepalive_connections=20),
+        headers={"User-Agent": "Katherine-AnarchyBot/3.0"}
+    )
     init_db()
 
     logging.info("SQLite activo en %s", DB_PATH)
@@ -2816,6 +3022,14 @@ async def startup():
                     me["status"],
                     me["data"]
                 )
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    global HTTP_CLIENT
+    if HTTP_CLIENT is not None:
+        await HTTP_CLIENT.aclose()
+        HTTP_CLIENT = None
 
 
 if __name__ == "__main__":
