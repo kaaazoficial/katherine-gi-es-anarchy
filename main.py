@@ -12648,6 +12648,7 @@ async def handle_command(event: dict, source: str):
     if command in ("!ayuda", "!comandos"):
         help_sections = [
             ("00 · INICIO RÁPIDO", [
+                "También puedes hablarle directamente: «Katherine, ...». Sin invocarla, no responde a conversación normal.",
                 f"{PREFIX}ayuda — abre este catálogo de comandos.",
                 f"{PREFIX}comandos — alias de ayuda.",
                 f"{PREFIX}miuid — muestra tu UID para configurar permisos.",
@@ -12756,6 +12757,9 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}tts menciones on/off — configura lectura de menciones.",
                 f"{PREFIX}volumenlectura / subirvolumenlectura / bajarvolumenlectura — controles rápidos TTS.",
                 f"{PREFIX}dj buscar <tema> — busca en Internet Archive, Commons y Jamendo.",
+                f"{PREFIX}dj ambiente <mood> — recomienda música para estudiar, trabajar, dormir, jugar o relajarse.",
+                f"{PREFIX}dj favorito lista/guardar <número>/reproducir <id>/quitar <id> — gestiona favoritos.",
+
                 f"{PREFIX}dj fuentes — muestra catálogos disponibles y su configuración.",
                 f"{PREFIX}buscar <tema> — alias de búsqueda musical.",
                 f"{PREFIX}dj <archivo.mp3> [bucle] — reproduce un archivo local.",
@@ -12763,6 +12767,8 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}dj añadir <archivo> — agrega una pista a la cola.",
                 f"{PREFIX}dj lista — muestra audios locales.",
                 f"{PREFIX}playlist crear/agregar/ver/reproducir/borrar — administra listas.",
+                "Las playlists aceptan archivos locales y favoritos remotos: agregar <nombre> | favorito:<id>.",
+
                 f"{PREFIX}volumen [0-100] — consulta o ajusta la música.",
                 f"{PREFIX}subirvolumen / bajarvolumen [cantidad] — cambia el volumen.",
                 f"{PREFIX}silencio — silencia la música.",
@@ -12777,6 +12783,9 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}economia — explica el sistema de puntos.",
                 f"{PREFIX}autotest — ejecuta pruebas internas.",
                 f"{PREFIX}admin — abre el panel de administración.",
+                f"{PREFIX}guardian — alias del panel de protección y moderación.",
+                f"{PREFIX}antispam enlaces <2-12> / menciones <3-20> — ajusta límites del Guardian.",
+
                 f"{PREFIX}advertir @usuario motivo — registra una advertencia.",
                 f"{PREFIX}advertencias @usuario — consulta advertencias.",
                 f"{PREFIX}quitaradvertencia <ID> — retira una advertencia.",
