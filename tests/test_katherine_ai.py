@@ -538,3 +538,11 @@ async def test_ai_plan_rejects_entire_sequence_if_one_step_is_forbidden(monkeypa
     assert result["kind"] == "answer"
     assert result["fallback"] is True
     assert "No ejecutaré una secuencia parcial" in result["answer"]
+
+
+def test_structured_ai_schema_requires_bounded_steps_array():
+    assert "steps" in ACTION_SCHEMA["required"]
+    assert ACTION_SCHEMA["properties"]["steps"]["maxItems"] == 3
+    assert ACTION_SCHEMA["properties"]["steps"]["items"]["required"] == [
+        "command", "args"
+    ]
