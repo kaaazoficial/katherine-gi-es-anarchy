@@ -13,6 +13,7 @@ on:
       - main
     paths:
       - "main.py"
+      - "requirements.txt"
       - "tests/**"
       - "requirements-test.txt"
       - ".github/workflows/tests.yml"
