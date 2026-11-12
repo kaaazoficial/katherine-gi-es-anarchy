@@ -56,6 +56,7 @@ from katherine_nexus import (
     extract_message_id,
     format_source_health,
     interpret_natural_request,
+    parse_command_invocation,
     toggle_community_participant,
 )
 from katherine_astra import (
@@ -78,6 +79,7 @@ COMMUNITY_SECRET = os.getenv("COMMUNITY_WEBHOOK_SECRET", "").strip()
 PREFIX = os.getenv("COMMAND_PREFIX", "!").strip() or "!"
 if len(PREFIX) > 3 or any(ch.isspace() for ch in PREFIX):
     PREFIX = "!"
+COMMAND_PREFIXES = tuple(sorted({PREFIX, "!", "-"}, key=len, reverse=True))
 ADMIN_UIDS = {x.strip() for x in (os.getenv("ADMIN_UIDS") or os.getenv("ADMINUIDS") or "").split(",") if x.strip()}
 STARTED = time.time()
 STARTED_MONOTONIC = time.monotonic()
@@ -12452,26 +12454,20 @@ async def handle_command(event: dict, source: str):
     record_user(uid, nickname, count_message=True)
     record_chat_activity(thread, uid, nickname)
 
-    prefix_candidates = sorted({PREFIX, "!", "-"}, key=len, reverse=True)
-    used_prefix = next((p for p in prefix_candidates if content.startswith(p)), None)
+    used_prefix = next(
+        (candidate for candidate in COMMAND_PREFIXES if content.startswith(candidate)),
+        None,
+    )
     if not used_prefix:
         await maybe_send_auto_reply(thread, raw_uid, nickname, content)
         return
 
-    metrics["commands_received"] += 1
-    pieces = content.split()
-    command_token = pieces[0]
-    if not command_token.startswith(used_prefix) or len(command_token) <= len(used_prefix):
+    parsed_command = parse_command_invocation(content, used_prefix)
+    if not parsed_command:
         return
-    command = "!" + command_token[len(used_prefix):].lower()
-    args = pieces[1:]
 
-    # Alias sencillo para buscar música: !buscar piano equivale a !dj buscar piano.
-    if command == "!buscar":
-        command = "!dj"
-        args = ["buscar", *args]
-    if command == "!guardian":
-        command = "!admin"
+    metrics["commands_received"] += 1
+    command, args = parsed_command
 
     query = " ".join(args).strip()
     reply = message_id
