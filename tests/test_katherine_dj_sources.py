@@ -99,3 +99,35 @@ def test_archive_download_rejects_untrusted_storage_host():
     )
     assert url == "https://archive.org/download/sample_item/track.mp3"
 
+def test_chat_output_removes_urls_but_keeps_readable_text():
+    text = katherine.sanitize_chat_text(
+        "Guía: https://example.com/guia y www.example.org/manual"
+    )
+    assert text == "Guía: y"
+
+
+def test_chat_output_keeps_markdown_and_html_link_labels():
+    assert katherine.sanitize_chat_text(
+        "[Abrir guía](https://example.com/guia)"
+    ) == "Abrir guía"
+    assert katherine.sanitize_chat_text(
+        '<a href="https://example.com">Documentación</a>'
+    ) == "Documentación"
+
+
+def test_chat_output_removes_bare_domains_without_corrupting_emails_or_code_files():
+    text = katherine.sanitize_chat_text(
+        "Contacto user@example.com; archivo main.py; entra discord.gg/abc123"
+    )
+    assert "user@example.com" in text
+    assert "main.py" in text
+    assert "discord.gg" not in text
+    assert "abc123" not in text
+
+
+def test_chat_output_keeps_plain_text_and_internal_commands():
+    text = katherine.sanitize_chat_text(
+        "Usa !dj buscar ambient y luego !dj cola."
+    )
+    assert text == "Usa !dj buscar ambient y luego !dj cola."
+
