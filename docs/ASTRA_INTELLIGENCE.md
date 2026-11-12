@@ -23,7 +23,7 @@ Variables:
 Sin clave, la IA informa que no está conectada y los comandos clásicos siguen disponibles. No se inserta una clave ficticia ni se copia una credencial al repositorio. Las solicitudes envían \`store: false\`.
 
 ## Comandos
-- \`!ia estado\`, \`!ia ayuda\`, \`!ia olvidar\`.
+- \`!ia estado\`, \`!ia probar\` (administrador; valida la conexión real con OpenAI), \`!ia ayuda\`, \`!ia olvidar\`.
 - \`!ia preguntar <consulta>\`, \`!ia genshin <consulta>\`.
 - \`!ia musica <descripción>\`, \`!ia traducir idioma | texto\`.
 - \`!ia guardian revisar <texto>\` (administradores).
