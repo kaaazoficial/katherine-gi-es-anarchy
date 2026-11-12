@@ -404,7 +404,9 @@ def create_dj_playlist(thread_id: str, name: str, creator_uid: str) -> bool:
         return False
 
 
-def add_dj_playlist_track(thread_id: str, playlist_name: str, track_name: str) -> bool:
+def add_dj_playlist_track(
+    thread_id: str, playlist_name: str, track_name: str, source: str | None = None
+) -> bool:
     key = re.sub(r"\s+", " ", str(playlist_name or "")).strip().casefold()
     with db_session() as db:
         row = db.execute(
@@ -415,7 +417,7 @@ def add_dj_playlist_track(thread_id: str, playlist_name: str, track_name: str) -
             return False
         db.execute(
             "INSERT INTO dj_playlist_tracks(playlist_id,title,source,created_at) VALUES(?,?,?,?)",
-            (int(row["id"]), str(track_name)[:160], str(track_name), time.time())
+            (int(row["id"]), str(track_name)[:160], str(source or track_name), time.time())
         )
         return True
 
@@ -435,7 +437,7 @@ def get_dj_playlist(thread_id: str, playlist_name: str):
     key = re.sub(r"\s+", " ", str(playlist_name or "")).strip().casefold()
     with db_session() as db:
         playlist = db.execute(
-            "SELECT id,name FROM dj_playlists WHERE thread_id=? AND name_key=?",
+            "SELECT id,name,created_by FROM dj_playlists WHERE thread_id=? AND name_key=?",
             (str(thread_id), key)
         ).fetchone()
         if not playlist:
@@ -15021,11 +15023,33 @@ async def handle_command(event: dict, source: str):
         elif sub in ("agregar", "añadir"):
             playlist_name, sep, track_name = rest.partition("|")
             track_name = track_name.strip()
-            path = resolve_dj_track(track_name)
-            if not sep or not path:
-                await send_message(thread, "Uso: !playlist agregar <nombre> | <archivo existente en music/>.", source, reply)
-            elif add_dj_playlist_track(thread, playlist_name, track_name):
-                await send_message(thread, f"«{track_name}» añadida a «{playlist_name.strip()}».", source, reply)
+            if not sep:
+                await send_message(thread, "Uso: !playlist agregar <nombre> | <archivo local o favorito:<id>>.", source, reply)
+                return
+            favorite_match = re.fullmatch(r"favorito:(\\d+)", track_name, flags=re.I)
+            if favorite_match:
+                favorite_id = int(favorite_match.group(1))
+                favorite = next(
+                    (item for item in list_dj_favorites(thread, raw_uid, 50)
+                     if item["id"] == favorite_id),
+                    None
+                )
+                if not favorite:
+                    await send_message(thread, "No encontré ese favorito.", source, reply)
+                    return
+                added = add_dj_playlist_track(
+                    thread, playlist_name, favorite["title"], source=f"favorite:{favorite_id}"
+                )
+                display_track = favorite["title"]
+            else:
+                path = resolve_dj_track(track_name)
+                if not path:
+                    await send_message(thread, "No encuentro ese archivo en music/ ni ese favorito.", source, reply)
+                    return
+                added = add_dj_playlist_track(thread, playlist_name, track_name, source=str(path))
+                display_track = track_name
+            if added:
+                await send_message(thread, f"«{display_track}» añadida a «{playlist_name.strip()}».", source, reply)
             else:
                 await send_message(thread, "No existe esa playlist. Créala primero.", source, reply)
         elif sub == "ver":
@@ -15043,18 +15067,40 @@ async def handle_command(event: dict, source: str):
                 await send_message(thread, "La playlist no existe o no contiene canciones.", source, reply)
                 return
             valid_tracks = []
+            favorite_owner = str(playlist.get("created_by") or raw_uid)
+            owner_favorites = {
+                item["id"]: item for item in list_dj_favorites(thread, favorite_owner, 50)
+            }
             for item in tracks:
-                path = resolve_dj_track(item["source"])
+                source_value = str(item.get("source") or "")
+                favorite_match = re.fullmatch(r"favorite:(\\d+)", source_value)
+                if favorite_match:
+                    favorite = owner_favorites.get(int(favorite_match.group(1)))
+                    if not favorite:
+                        continue
+                    metadata = {
+                        "title": favorite["title"], "creator": favorite["creator"],
+                        "license": favorite["license"], "source": favorite["source"],
+                        "extension": favorite["extension"], "url": favorite["url"]
+                    }
+                    valid_tracks.append((favorite["url"], metadata))
+                    continue
+                path = resolve_dj_track(source_value) or resolve_dj_track(item["title"])
                 if path:
-                    valid_tracks.append(path)
+                    valid_tracks.append((path, None))
             if not valid_tracks:
-                await send_message(thread, "No quedan archivos válidos de esa playlist en music/.", source, reply)
+                await send_message(thread, "No quedan pistas válidas en esa playlist.", source, reply)
                 return
-            ok, message = await start_dj_room(thread, valid_tracks[0], False)
+            first_path, first_metadata = valid_tracks[0]
+            ok, message = await start_dj_room(
+                thread, first_path, False, track_metadata=first_metadata
+            )
             added = 0
             if ok:
-                for path in valid_tracks[1:]:
-                    queued_ok, _ = await start_dj_room(thread, path, False, enqueue=True)
+                for path, metadata in valid_tracks[1:]:
+                    queued_ok, _ = await start_dj_room(
+                        thread, path, False, track_metadata=metadata, enqueue=True
+                    )
                     if queued_ok:
                         added += 1
             await send_message(
