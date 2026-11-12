@@ -12,7 +12,7 @@ from typing import Any, Awaitable, Callable
 RequestFunc = Callable[..., Awaitable[Any]]
 
 AI_ALLOWED_COMMANDS = frozenset({
-    "ayuda", "menu", "centro", "estado", "fuentes", "evento", "fecha", "zona",
+    "ayuda", "menu", "centro", "estado", "fuentes", "fecha", "zona",
     "perfil", "puntos", "ranking", "actividad", "enciclopedia", "guia",
     "equipos", "rotacion", "materiales", "reacciones", "buscargenshin",
     "banner", "calendario", "dj", "multimedia", "traducir", "join", "leer",
@@ -42,7 +42,7 @@ del DJ. Para horarios usa fecha/zona. Para consultas que exijan fuentes que el b
 tiene, explica la limitación y no inventes una respuesta.
 
 Las herramientas disponibles son únicamente comandos preexistentes y no destructivos:
-ayuda, menu, centro, estado, fuentes, evento, fecha, zona, perfil, puntos, ranking,
+ayuda, menu, centro, estado, fuentes, fecha, zona, perfil, puntos, ranking,
 actividad, enciclopedia, guia, equipos, rotacion, materiales, reacciones, buscargenshin,
 banner, calendario, dj, multimedia, traducir, join, leer y noleer.
 No intentes utilizar comandos administrativos, sanciones, transferencias, pagos,
@@ -125,7 +125,7 @@ def validate_ai_tool_call(command: str, arguments: str) -> str | None:
         return None
     elif name in {
         "join", "leer", "noleer", "menu", "centro", "ayuda", "estado",
-        "fuentes", "evento", "fecha", "ranking", "puntos", "banner", "calendario",
+        "fuentes", "fecha", "ranking", "puntos", "banner", "calendario",
     } and args:
         return None
     return f"{name} {args}".strip()
