@@ -693,6 +693,36 @@ async def api(method: str, path: str, source="developer", body=None):
         }
 
 
+def split_message_content(content: str, limit: int = 500) -> list[str]:
+    """Divide mensajes en bloques de hasta 'limit' caracteres."""
+    text = clean_text(content)
+    if not text:
+        return []
+
+    chunks = []
+    while len(text) > limit:
+        newline_at = text.rfind("\n", 0, limit + 1)
+        space_at = text.rfind(" ", 0, limit + 1)
+        cut = max(newline_at, space_at)
+
+        # Evita crear un bloque demasiado corto por un salto temprano.
+        if cut < limit // 2:
+            cut = limit
+
+        chunk = text[:cut].rstrip()
+        if not chunk:
+            cut = limit
+            chunk = text[:cut]
+
+        chunks.append(chunk)
+        text = text[cut:].lstrip()
+
+    if text:
+        chunks.append(text)
+
+    return chunks
+
+
 async def send_message(
     thread_id: str,
     content: str,
@@ -702,10 +732,12 @@ async def send_message(
 ):
     global last_bot_send
 
-    content = clean_text(content)[:2000]
+    if not thread_id:
+        return None
 
-    if not thread_id or not content:
-        return
+    parts = split_message_content(content, 500)
+    if not parts:
+        return None
 
     if buttons:
         buttons = [
@@ -714,63 +746,48 @@ async def send_message(
                 "label": str(b["label"])[:40]
             }
             for b in buttons[:5]
+            if isinstance(b, dict) and b.get("id") is not None
         ]
 
+    last_result = None
+
+    # El bloqueo cubre toda la secuencia para respetar el límite global
+    # y evitar que dos respuestas se mezclen entre sí.
     async with send_lock:
-        now = time.monotonic()
+        for index, part in enumerate(parts):
+            now = time.monotonic()
 
-        wait = max(
-            0,
-            1.05 - (now - last_bot_send),
-            2.05 - (now - last_chat_send[f"{source}:{thread_id}"])
-        )
-
-        while send_history_bot and send_history_bot[0] < now - 3600:
-            send_history_bot.popleft()
-
-        history = send_history_chat[f"{source}:{thread_id}"]
-
-        while history and history[0] < now - 600:
-            history.popleft()
-
-        if len(send_history_bot) >= 300:
-            wait = max(wait, send_history_bot[0] + 3600 - now)
-
-        if len(history) >= 60:
-            wait = max(wait, history[0] + 600 - now)
-
-        if wait > 0:
-            await asyncio.sleep(wait)
-
-        body = {"content": content}
-
-        if reply_id:
-            body["replyMessageId"] = str(reply_id)
-
-        if buttons:
-            body["buttons"] = buttons
-
-        result = await api(
-            "POST",
-            f"/threads/{thread_id}/messages",
-            source,
-            body
-        )
-
-        if result["status"] == 429:
-            error_data = result.get("data") or {}
-            if not isinstance(error_data, dict):
-                error_data = {}
-            retry = (
-                result.get("retry_after")
-                or error_data.get("retryAfter")
-                or 2
+            wait = max(
+                0,
+                1.05 - (now - last_bot_send),
+                2.05 - (now - last_chat_send[f"{source}:{thread_id}"])
             )
 
-            try:
-                await asyncio.sleep(min(float(retry), 60))
-            except (ValueError, TypeError):
-                await asyncio.sleep(2)
+            while send_history_bot and send_history_bot[0] < now - 3600:
+                send_history_bot.popleft()
+
+            history = send_history_chat[f"{source}:{thread_id}"]
+            while history and history[0] < now - 600:
+                history.popleft()
+
+            if len(send_history_bot) >= 300:
+                wait = max(wait, send_history_bot[0] + 3600 - now)
+
+            if len(history) >= 60:
+                wait = max(wait, history[0] + 600 - now)
+
+            if wait > 0:
+                await asyncio.sleep(wait)
+
+            body = {"content": part}
+
+            # La respuesta al mensaje original se aplica solo al primer bloque.
+            if reply_id and index == 0:
+                body["replyMessageId"] = str(reply_id)
+
+            # Los botones van al último bloque para que aparezcan debajo del texto.
+            if buttons and index == len(parts) - 1:
+                body["buttons"] = buttons
 
             result = await api(
                 "POST",
@@ -779,18 +796,48 @@ async def send_message(
                 body
             )
 
-        if result["ok"]:
-            metrics["messages_sent"] += 1
-            now = time.monotonic()
-            last_bot_send = now
-            last_chat_send[f"{source}:{thread_id}"] = now
+            if result.get("status") == 429:
+                error_data = result.get("data") or {}
+                if not isinstance(error_data, dict):
+                    error_data = {}
 
-            send_history_bot.append(now)
-            send_history_chat[f"{source}:{thread_id}"].append(now)
-        else:
-            logging.error("No se pudo enviar mensaje: %s", result)
+                retry = (
+                    result.get("retry_after")
+                    or error_data.get("retryAfter")
+                    or 2
+                )
 
-        return result
+                try:
+                    await asyncio.sleep(min(float(retry), 60))
+                except (ValueError, TypeError):
+                    await asyncio.sleep(2)
+
+                result = await api(
+                    "POST",
+                    f"/threads/{thread_id}/messages",
+                    source,
+                    body
+                )
+
+            last_result = result
+
+            if result.get("ok"):
+                metrics["messages_sent"] += 1
+                now = time.monotonic()
+                last_bot_send = now
+                last_chat_send[f"{source}:{thread_id}"] = now
+                send_history_bot.append(now)
+                send_history_chat[f"{source}:{thread_id}"].append(now)
+            else:
+                logging.error(
+                    "No se pudo enviar el bloque %s/%s: %s",
+                    index + 1,
+                    len(parts),
+                    result
+                )
+                return result
+
+    return last_result
 
 
 # ---------------------------------------------------------------------------
@@ -972,17 +1019,38 @@ def get_level90(stats):
 def target_from_message(msg, args, scope_key: str | None = None):
     mentions = msg.get("mentions") or []
 
+    # La API puede entregar distintos campos según el tipo de mención.
     for mention in mentions:
-        if isinstance(mention, dict) and mention.get("uid"):
+        if not isinstance(mention, dict):
+            continue
+
+        raw_uid = (
+            mention.get("uid")
+            or mention.get("userId")
+            or mention.get("id")
+        )
+        nickname = (
+            mention.get("nickname")
+            or mention.get("username")
+            or mention.get("displayName")
+            or mention.get("name")
+        )
+
+        if raw_uid:
             return (
-                scoped_uid(scope_key or "", str(mention["uid"])),
-                str(mention.get("nickname") or mention["uid"])
+                scoped_uid(scope_key or "", str(raw_uid)),
+                str(nickname or raw_uid).lstrip("@")
             )
 
-    raw = next((x for x in args if x.startswith("@")), None)
+        if nickname:
+            return None, str(nickname).lstrip("@")
 
-    if raw:
-        nickname = raw.lstrip("@")
+    # También reconoce menciones escritas como @usuario o <@usuario>.
+    raw_text = " ".join(str(x) for x in (args or []))
+    match = re.search(r"@([^\s,;]+)", raw_text)
+
+    if match:
+        nickname = match.group(1).rstrip(">.,;:!?)")
         found = find_user_by_nickname(nickname, scope_key)
 
         if found:
@@ -1084,35 +1152,122 @@ async def handle_command(event: dict, source: str):
     # AYUDA
     # -----------------------------------------------------------------------
     if command in ("!ayuda", "!comandos"):
-        answer = (
-            "KATHERINE — COMANDOS\n\nGENSHIN IMPACT\n"
-            "!personaje nombre | !estadisticas nombre | !materiales nombre | !ascension nombre\n"
-            "!talentos nombre | !pasivas nombre | !comparar nombre 1 | nombre 2\n"
-            "!build nombre (requiere UID vinculado) | !equipos personaje | !rotacion personaje\n"
-            "!calculadora cv CR CD | !calculadora critico CR CD\n"
-            "!arma nombre | !artefacto nombre | !dominio nombre | !enemigo nombre\n"
-            "!comida nombre | !material nombre | !logro nombre | !talento nombre\n"
-            "!constelacion nombre | !reaccion elemento elemento | !ficha [UID] | !abismo [UID]\n"
-            "!genshinuid 123456789 | !curiosidad | !deseo | !pity | !resetpity\n\n"
-            "SOCIAL\n!perfil [@usuario] | !bio texto | !miestado texto\n"
-            "!afinidad @usuario | !amistad @usuario | !regalo @usuario [mensaje] | !muro | !actividad\n"
-            "!abrazo @usuario | !beso @usuario | !patada @usuario | !golpe @usuario\n"
-            "!cachetada | !acariciar | !mimar | !morder | !consolar | !felicitar\n"
-            "!saludar | !proteger | !bailar | !cosquillas | !highfive | !ayudar\n"
-            "!regalar | !acompañar | !asustar | !curar | !cargar | !empujar\n"
-            "!regañar | !admirar | !apoyar | !dormir | !ignorar | !mirar | !invitar\n\n"
-            "ENTRETENIMIENTO\n!trivia | !responder 1-4 | !adivina | !intento número\n"
-            "!puntos | !ranking | !encuesta pregunta | opción 1 | opción 2\n"
-            "!elige | !duelo @usuario | !ship usuario1 usuario2 | !dado | !moneda\n"
-            "!azar mínimo máximo | !verdad | !roast @usuario\n"
-            "!8ball pregunta | !chiste | !frase | !reto | !suerte\n\n"
-            "SISTEMA\n!estado / !diagnostico | !ping | !latencia | !memoria | !uptime\n"
-            "!fecha | !zona America/Santiago | !salas | !perfilbot Nombre | Estado (admin)\n"
-            "Los perfiles, puntos y actividad se guardan por chat en SQLite."
-        )
+        help_lines = [
+            "KATHERINE — AYUDA COMPLETA",
+            f"Prefijo principal: {PREFIX} (también se reconocen ! y -).",
+            "",
+            "GENSHIN IMPACT",
+            f"{PREFIX}personaje <nombre> / {PREFIX}ficha-personaje <nombre> — ficha general del personaje.",
+            f"{PREFIX}estadisticas <nombre> / {PREFIX}statspersonaje <nombre> — estadísticas base al nivel 90.",
+            f"{PREFIX}talentos <nombre> — talentos de combate del personaje.",
+            f"{PREFIX}pasivas <nombre> — habilidades pasivas del personaje.",
+            f"{PREFIX}materiales <nombre> / {PREFIX}ascension <nombre> — materiales para ascenderlo.",
+            f"{PREFIX}comparar <personaje 1> | <personaje 2> — compara dos personajes.",
+            f"{PREFIX}equipos <personaje> — recomienda un equipo predefinido.",
+            f"{PREFIX}rotacion <personaje> — explica la rotación sugerida del equipo.",
+            f"{PREFIX}calculadora cv <CR> <CD> — calcula el valor crítico de artefactos.",
+            f"{PREFIX}calculadora critico <CR> <CD> — calcula la relación entre Prob. y Daño CRIT.",
+            f"{PREFIX}build <UID> [personaje] — consulta la build pública de Enka Network.",
+            f"{PREFIX}arma <nombre> — consulta información de armas.",
+            f"{PREFIX}artefacto <nombre> — consulta información de artefactos.",
+            f"{PREFIX}dominio <nombre> — consulta información de dominios.",
+            f"{PREFIX}enemigo <nombre> — consulta información de enemigos.",
+            f"{PREFIX}comida <nombre> — consulta platos y comida.",
+            f"{PREFIX}material <nombre> — consulta materiales del juego.",
+            f"{PREFIX}logro <nombre> — busca información de logros.",
+            f"{PREFIX}talento <nombre> — busca materiales/libros de talento.",
+            f"{PREFIX}constelacion <personaje> — muestra las constelaciones.",
+            f"{PREFIX}reaccion <elemento 1> <elemento 2> — explica la reacción elemental.",
+            f"{PREFIX}genshinuid <UID> — vincula tu cuenta; usa 'borrar' para desvincularla.",
+            f"{PREFIX}ficha [UID] — muestra la información pública del perfil de Genshin.",
+            f"{PREFIX}abismo [UID] — consulta los datos públicos del Abismo.",
+            f"{PREFIX}curiosidad — muestra un dato curioso de Genshin.",
+            f"{PREFIX}deseo — simula un deseo del banner y guarda el pity.",
+            f"{PREFIX}pity — consulta tus contadores y garantía del simulador.",
+            f"{PREFIX}resetpity — reinicia el pity del simulador.",
+            "",
+            "SOCIAL Y PERFILES",
+            f"{PREFIX}perfil [@usuario] — muestra tu perfil o el de otra persona.",
+            f"{PREFIX}bio <texto> — cambia la biografía de tu perfil.",
+            f"{PREFIX}miestado <texto> — actualiza tu estado personal.",
+            f"{PREFIX}afinidad @usuario / {PREFIX}amistad @usuario — consulta la afinidad entre usuarios.",
+            f"{PREFIX}regalo @usuario [mensaje] — envía un regalo simbólico.",
+            f"{PREFIX}muro — muestra los regalos recibidos.",
+            f"{PREFIX}actividad — muestra el ranking de actividad del chat.",
+            f"{PREFIX}roast @usuario — lanza una broma amistosa sobre alguien.",
+            "",
+            "INTERACCIONES",
+            f"{PREFIX}abrazo / {PREFIX}abrazar @usuario — da un abrazo.",
+            f"{PREFIX}beso / {PREFIX}besar @usuario — da un beso.",
+            f"{PREFIX}patada @usuario — da una patada de broma.",
+            f"{PREFIX}golpe @usuario — golpea de forma ficticia.",
+            f"{PREFIX}cachetada @usuario — da una cachetada de broma.",
+            f"{PREFIX}acariciar @usuario — acaricia a alguien.",
+            f"{PREFIX}mimar @usuario — trata con cariño a alguien.",
+            f"{PREFIX}morder @usuario — muerde de forma ficticia.",
+            f"{PREFIX}consolar @usuario — ofrece consuelo.",
+            f"{PREFIX}felicitar @usuario — felicita a alguien.",
+            f"{PREFIX}saludar @usuario — saluda a alguien.",
+            f"{PREFIX}proteger @usuario — protege a alguien.",
+            f"{PREFIX}bailar @usuario — baila con alguien.",
+            f"{PREFIX}cosquillas @usuario — hace cosquillas.",
+            f"{PREFIX}chocar / {PREFIX}highfive @usuario — choca los cinco.",
+            f"{PREFIX}ayudar @usuario — ayuda a alguien.",
+            f"{PREFIX}regalar @usuario — hace un regalo simbólico.",
+            f"{PREFIX}acompañar @usuario — acompaña a alguien.",
+            f"{PREFIX}asustar @usuario — intenta asustar.",
+            f"{PREFIX}curar @usuario — cura de forma ficticia.",
+            f"{PREFIX}cargar @usuario — carga a alguien.",
+            f"{PREFIX}empujar @usuario — empuja de forma ficticia.",
+            f"{PREFIX}regañar @usuario — regaña a alguien.",
+            f"{PREFIX}admirar @usuario — expresa admiración.",
+            f"{PREFIX}apoyar @usuario — muestra apoyo.",
+            f"{PREFIX}dormir @usuario — duerme junto a alguien.",
+            f"{PREFIX}ignorar @usuario — ignora de forma ficticia.",
+            f"{PREFIX}mirar @usuario — mira a alguien.",
+            f"{PREFIX}invitar @usuario — invita a alguien.",
+            "",
+            "ENTRETENIMIENTO Y JUEGOS",
+            f"{PREFIX}trivia — inicia una pregunta de trivia.",
+            f"{PREFIX}responder <1-4> — responde la trivia activa.",
+            f"{PREFIX}adivina — inicia el juego de adivinar un número.",
+            f"{PREFIX}intento <número> — prueba un número del 1 al 100.",
+            f"{PREFIX}puntos / {PREFIX}reputacion — consulta tus puntos.",
+            f"{PREFIX}ranking / {PREFIX}top — muestra el ranking de puntos.",
+            f"{PREFIX}encuesta <pregunta> | <opción 1> | <opción 2> — crea una encuesta con botones.",
+            f"{PREFIX}elige <opción 1> | <opción 2> — elige al azar entre opciones.",
+            f"{PREFIX}duelo @usuario — reta a otra persona.",
+            f"{PREFIX}ship <usuario 1> <usuario 2> — calcula compatibilidad ficticia.",
+            f"{PREFIX}dado — lanza un dado.",
+            f"{PREFIX}moneda — lanza una moneda.",
+            f"{PREFIX}azar <mínimo> <máximo> — genera un número aleatorio.",
+            f"{PREFIX}verdad — entrega una pregunta de verdad.",
+            f"{PREFIX}8ball <pregunta> — responde como bola mágica.",
+            f"{PREFIX}chiste — cuenta un chiste.",
+            f"{PREFIX}frase — muestra una frase aleatoria.",
+            f"{PREFIX}reto — propone un reto de Genshin.",
+            f"{PREFIX}suerte — entrega un mensaje de suerte.",
+            "",
+            "SISTEMA Y KATHERINE",
+            f"{PREFIX}estado / {PREFIX}diagnostico / {PREFIX}statsbot — muestra estado, recursos y actividad del bot.",
+            f"{PREFIX}ping — comprueba conexión y latencia de la API.",
+            f"{PREFIX}latencia — mide el tiempo de respuesta de Anarchy.",
+            f"{PREFIX}memoria — muestra uso de RAM y CPU del proceso.",
+            f"{PREFIX}uptime — muestra cuánto lleva activa Katherine.",
+            f"{PREFIX}fecha — muestra fecha y hora de Chile.",
+            f"{PREFIX}zona <Area/Ciudad> — muestra la hora de una zona horaria.",
+            f"{PREFIX}salas — consulta las salas en vivo de comunidad.",
+            f"{PREFIX}perfilbot <Nombre> | <Estado> — modifica el perfil del bot (solo administradores).",
+            "",
+            "Los mensajes de Katherine se envían en bloques de máximo 500 caracteres."
+        ]
 
-        answer = answer.replace("!", PREFIX)
-        await send_message(thread, answer, source, reply)
+        await send_message(
+            thread,
+            "\n".join(help_lines),
+            source,
+            reply
+        )
         return
 
     # -----------------------------------------------------------------------
@@ -1161,22 +1316,56 @@ async def handle_command(event: dict, source: str):
 
     if command == "!roast":
         target_uid, target_name = target_from_message(msg, args, scope_key)
-        target_name = target_name or next(
-            (x.lstrip("@") for x in args if x.startswith("@")), None
-        )
+
+        # Respaldo: algunas variantes del evento incluyen la mención sin UID.
         if not target_name:
-            await send_message(thread, "Uso: !roast @usuario", source, reply)
+            for mention in (msg.get("mentions") or []):
+                if not isinstance(mention, dict):
+                    continue
+                target_name = (
+                    mention.get("nickname")
+                    or mention.get("username")
+                    or mention.get("displayName")
+                    or mention.get("name")
+                    or mention.get("uid")
+                    or mention.get("userId")
+                    or mention.get("id")
+                )
+                if target_name:
+                    target_name = str(target_name).lstrip("@")
+                    break
+
+        # Acepta @usuario, <@usuario> y también un nickname escrito directamente.
+        if not target_name and args:
+            raw_target = str(args[0]).strip()
+            target_name = re.sub(r"^(?:<@!?|@)", "", raw_target).rstrip(">.,;:!?")
+
+        if not target_name:
+            await send_message(
+                thread,
+                f"Uso: {PREFIX}roast @usuario",
+                source,
+                reply
+            )
             return
+
         roasts = [
-            "tiene menos suerte que una cuenta con 0 de resina.",
-            "farmea tanto DEF que hasta sus enemigos sienten pena.",
-            "necesita una guía para encontrar el botón de iniciar.",
-            "hace tanto daño que los slimes se quedan esperando.",
-            "su build tiene potencial… escondido muy profundamente."
+            "tiene menos suerte que una cuenta sin resina.",
+            "farmea tanta DEF que los artefactos ya le tienen cariño.",
+            "necesita una guía hasta para encontrar el botón de iniciar.",
+            "hace tan poco daño que los slimes piden que no se contenga.",
+            "su build tiene potencial… algún día lo encontraremos.",
+            "sus artefactos tienen más DEF que ganas de cooperar.",
+            "cuando ve un crítico, piensa que fue un error visual.",
+            "su rotación es tan caótica que ni Cyno encuentra el chiste.",
+            "el Abismo lo vio entrar y decidió cerrar por mantenimiento."
         ]
+
         await send_message(
-            thread, f"🔥 Katherine contraataca: {target_name} {random.choice(roasts)}",
-            source, reply
+            thread,
+            f"🔥 Katherine contraataca: {target_name}, {random.choice(roasts)}",
+            source,
+            reply
         )
         return
 
