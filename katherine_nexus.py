@@ -47,7 +47,7 @@ def interpret_natural_request(value: str) -> str | None:
         (r"^(?:entra|entrar|unete|unirse) (?:a )?(?:la )?(?:llamada|sala de voz)$", "join"),
         (r"^(?:lee|leer) (?:los )?mensajes en voz alta$", "leer"),
         (r"^(?:deja de leer|desactiva la lectura en voz alta)$", "noleer"),
-        (r"^(?:que )?hora es en ([a-z0-9_+\\-/]+)$", None),
+        (r"^(?:que )?hora es en ([a-z0-9_+/-]+)$", None),
     )
     for pattern, command in patterns:
         match = re.fullmatch(pattern, text)
@@ -55,7 +55,7 @@ def interpret_natural_request(value: str) -> str | None:
             if command is not None:
                 return command
             zone = match.group(1).strip()
-            return f"zona {zone}" if re.fullmatch(r"[a-z0-9_+\\-/]{2,64}", zone) else None
+            return f"zona {zone}" if re.fullmatch(r"[a-z0-9_+/-]{2,64}", zone) else None
 
     subject_patterns = (
         (r"^(?:dame|muestra|busca)?\s*(?:una )?guia (?:de |del )?(.+)$", "guia"),
