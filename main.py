@@ -1330,8 +1330,10 @@ async def external_request(method: str, url: str, **kwargs):
         "requests": 0, "successes": 0, "failures": 0,
         "last_status": None, "last_latency_ms": 0.0,
         "last_success_at": None, "last_error": None,
-        "consecutive_failures": 0, "circuit_open_until": 0.0
+        "consecutive_failures": 0, "circuit_open_until": 0.0,
+        "last_seen_at": time.time()
     })
+    host_state["last_seen_at"] = time.time()
     if float(host_state.get("circuit_open_until", 0) or 0) > time.time():
         metrics["external_circuit_open"] += 1
         raise RuntimeError(f"Fuente {host} temporalmente aislada por fallos consecutivos.")
@@ -1358,6 +1360,7 @@ async def external_request(method: str, url: str, **kwargs):
                         "last_success_at": None, "last_error": None
                     })
                     state["requests"] += 1
+                    state["last_seen_at"] = time.time()
                     state["last_status"] = response.status_code
                     state["last_latency_ms"] = elapsed_ms
 
@@ -1402,6 +1405,7 @@ async def external_request(method: str, url: str, **kwargs):
                         "last_success_at": None, "last_error": None
                     })
                     state["requests"] += 1
+                    state["last_seen_at"] = time.time()
                     state["failures"] += 1
                     state["last_latency_ms"] = (time.perf_counter() - started) * 1000
                     state["last_error"] = type(exc).__name__
