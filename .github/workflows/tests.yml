@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - "main.py"
+      - "requirements.txt"
       - "katherine_nexus.py"
       - "tests/**"
       - "requirements-test.txt"
