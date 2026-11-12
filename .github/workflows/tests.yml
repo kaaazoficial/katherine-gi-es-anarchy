@@ -9,6 +9,7 @@ on:
       - "katherine_astra.py"
       - "katherine_ai.py"
       - "katherine_research.py"
+      - "katherine_retention.py"
       - "tests/**"
       - "requirements-test.txt"
       - "pytest.ini"
@@ -57,7 +58,7 @@ jobs:
         run: python -m pip install --upgrade pip && python -m pip install -r requirements-test.txt
 
       - name: Compile bot source
-        run: python -m py_compile main.py katherine_nexus.py katherine_astra.py katherine_ai.py katherine_research.py
+        run: python -m py_compile main.py katherine_nexus.py katherine_astra.py katherine_ai.py katherine_research.py katherine_retention.py
 
       - name: Run automated tests
         run: python -m pytest -q
