@@ -1161,7 +1161,7 @@ async def build_status_message(source: str, nickname: str, thread_id: str | None
         f"• Caché Genshin: {len(cache)} entradas",
         f"• DJ: {metrics['dj_tracks_started']} pistas iniciadas · {metrics['dj_fallback_tracks_started']} alternativas automáticas",
         f"• DJ: {metrics['dj_fallback_tracks_skipped']} pistas inválidas omitidas · {metrics['dj_playback_retries']} reintentos",
-        f"• TTS: {metrics['tts_duplicates_skipped']} duplicados omitidos",
+        f"• TTS: {metrics['tts_priority_enqueued']} prioritarios · {metrics['tts_regular_enqueued']} normales · {metrics['tts_duplicates_skipped']} duplicados omitidos",
         "",
         "🔐 CONFIGURACIÓN Y PROCESO",
         f"• Python: {sys.version.split()[0]} | PID: {os.getpid()}",
