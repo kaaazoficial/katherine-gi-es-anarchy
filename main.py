@@ -11911,40 +11911,35 @@ async def handle_command(event: dict, source: str):
     # -----------------------------------------------------------------------
     if command in ("!ayuda", "!comandos"):
         help_sections = [
-            [
-                "KATHERINE · CENTRO DE COMANDOS",
-                f"Prefijo principal: {PREFIX} (también se reconocen ! y -).",
-                f"{PREFIX}ayuda — muestra todos los comandos.",
+            ("00 · INICIO RÁPIDO", [
+                f"{PREFIX}ayuda — abre este catálogo de comandos.",
                 f"{PREFIX}comandos — alias de ayuda.",
-                f"{PREFIX}miuid — muestra tu UID para configurar permisos de administrador."
-            ],
-            [
-                "GENSHIN IMPACT · GUÍA Y CONSULTAS",
-                f"{PREFIX}guia <personaje> — guía completa: estadísticas, sets, stats principales, substats, armas, equipos, talentos, constelaciones y materiales.",
-                f"{PREFIX}cobertura <personaje> — muestra qué apartados de su guía están disponibles, cuáles faltan y sus fuentes.",
+                f"{PREFIX}miuid — muestra tu UID para configurar permisos.",
+            ]),
+            ("01 · GENSHIN IMPACT / GUÍAS", [
+                f"{PREFIX}guia <personaje> — guía completa: estadísticas, sets, armas, equipos, talentos, constelaciones y materiales.",
+                f"{PREFIX}cobertura <personaje> — apartados disponibles, faltantes y fuentes de la guía.",
                 f"{PREFIX}equipos <personaje> — composiciones publicadas para el personaje.",
-                f"{PREFIX}rotacion <personaje> — rotaciones y combos cuando la guía los documenta.",
-                f"{PREFIX}sinergia <personaje 1>, <personaje 2> — busca equipos publicados que incluyan a ambos.",
-                f"{PREFIX}materiales <personaje> — materiales de ascensión y talentos disponibles en la base.",
-                f"{PREFIX}jefes — lista de jefes reconocidos por la base de datos.",
-                f"{PREFIX}banner — disponibilidad de banners cuando exista una fuente oficial verificable.",
-                f"{PREFIX}calendario — eventos y fechas solo cuando se puedan verificar.",
+                f"{PREFIX}rotacion <personaje> — rotaciones y combos documentados.",
+                f"{PREFIX}sinergia <personaje 1>, <personaje 2> — busca equipos que incluyan a ambos.",
+                f"{PREFIX}materiales <personaje> — materiales de ascensión y talentos.",
+                f"{PREFIX}jefes — lista de jefes reconocidos.",
+                f"{PREFIX}banner — banners con fuente oficial verificable.",
+                f"{PREFIX}calendario — eventos y fechas verificables.",
                 f"{PREFIX}buscargenshin <texto> — busca personajes y objetos.",
-                f"{PREFIX}lista <categoría> [página] — lista personajes, armas, enemigos y otros datos.",
+                f"{PREFIX}lista personajes|enemigos [página] — consulta listados.",
                 f"{PREFIX}enemigo <nombre> — ficha de enemigo o jefe.",
                 f"{PREFIX}geografia <nombre> — ubicaciones y regiones.",
                 f"{PREFIX}elemento <nombre> — información de elementos.",
-                f"{PREFIX}curiosidad — muestra un dato de Genshin."
-            ],
-            [
-                "GENSHIN IMPACT · CÁLCULOS Y SIMULACIÓN",
-                f"{PREFIX}reacciones <elemento> — muestra las reacciones de un elemento.",
+                f"{PREFIX}curiosidad — dato aleatorio de Genshin.",
+            ]),
+            ("02 · GENSHIN IMPACT / SIMULACIÓN", [
+                f"{PREFIX}reacciones <elemento> — consulta las reacciones de un elemento.",
                 f"{PREFIX}deseo — simulador de deseos con pity guardado.",
                 f"{PREFIX}pity — consulta el pity del simulador.",
                 f"{PREFIX}resetpity — reinicia el pity simulado.",
-            ],
-            [
-                "SOCIAL Y PERFILES",
+            ]),
+            ("03 · SOCIAL Y PERFILES", [
                 f"{PREFIX}perfil [@usuario] — muestra un perfil.",
                 f"{PREFIX}bio <texto> — cambia tu biografía.",
                 f"{PREFIX}miestado <texto> — cambia tu estado.",
@@ -11952,24 +11947,20 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}amistad @usuario — alias de afinidad.",
                 f"{PREFIX}regalo @usuario [mensaje] — envía un regalo simbólico.",
                 f"{PREFIX}muro — muestra los regalos recibidos.",
-                f"{PREFIX}actividad [hoy|semana] — actividad por periodo, horas pico y usuarios activos.",
+                f"{PREFIX}actividad [hoy|semana] — estadísticas, horas pico y usuarios activos.",
                 f"{PREFIX}interaccion @usuario — abre acciones sociales con botones.",
                 f"{PREFIX}diario — reclama la recompensa diaria.",
-                f"{PREFIX}trabajar — gana puntos con cooldown.",
+                f"{PREFIX}trabajar — gana puntos con tiempo de espera.",
                 f"{PREFIX}pagar @usuario cantidad — transfiere puntos.",
-                f"{PREFIX}roast @usuario — broma amistosa."
-            ],
-            [
-                "INTERACCIONES",
-                f"{PREFIX}abrazo @usuario — abraza.",
-                f"{PREFIX}abrazar @usuario — alias de abrazo.",
-                f"{PREFIX}beso @usuario — da un beso.",
-                f"{PREFIX}besar @usuario — alias de beso.",
+                f"{PREFIX}roast @usuario — broma amistosa.",
+            ]),
+            ("04 · INTERACCIONES", [
+                f"{PREFIX}abrazo / abrazar @usuario — abrazo.",
+                f"{PREFIX}beso / besar @usuario — beso.",
                 f"{PREFIX}patada @usuario — patada ficticia.",
                 f"{PREFIX}golpe @usuario — golpe ficticio.",
                 f"{PREFIX}cachetada @usuario — cachetada de broma.",
-                f"{PREFIX}acariciar @usuario — acaricia.",
-                f"{PREFIX}mimar @usuario — trata con cariño.",
+                f"{PREFIX}acariciar / mimar @usuario — gesto cariñoso.",
                 f"{PREFIX}morder @usuario — mordida ficticia.",
                 f"{PREFIX}consolar @usuario — ofrece consuelo.",
                 f"{PREFIX}felicitar @usuario — felicita.",
@@ -11977,8 +11968,7 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}proteger @usuario — protege.",
                 f"{PREFIX}bailar @usuario — baila.",
                 f"{PREFIX}cosquillas @usuario — hace cosquillas.",
-                f"{PREFIX}chocar @usuario — choca los cinco.",
-                f"{PREFIX}highfive @usuario — alias de chocar.",
+                f"{PREFIX}chocar / highfive @usuario — choca los cinco.",
                 f"{PREFIX}ayudar @usuario — ayuda.",
                 f"{PREFIX}acompañar @usuario — acompaña.",
                 f"{PREFIX}asustar @usuario — intenta asustar.",
@@ -11991,24 +11981,21 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}dormir @usuario — duerme junto a alguien.",
                 f"{PREFIX}ignorar @usuario — ignora de forma ficticia.",
                 f"{PREFIX}mirar @usuario — mira.",
-                f"{PREFIX}invitar @usuario — invita."
-            ],
-            [
-                "ENTRETENIMIENTO Y JUEGOS",
+                f"{PREFIX}invitar @usuario — invita.",
+            ]),
+            ("05 · JUEGOS Y ENTRETENIMIENTO", [
                 f"{PREFIX}trivia — inicia una trivia.",
                 f"{PREFIX}responder <1-4> — responde la trivia.",
                 f"{PREFIX}adivina — inicia el juego del número.",
                 f"{PREFIX}intento <número> — intenta adivinar.",
-                f"{PREFIX}puntos — consulta tus puntos.",
-                f"{PREFIX}reputacion — alias de puntos.",
-                f"{PREFIX}ranking — ranking de puntos.",
-                f"{PREFIX}top — alias de ranking.",
-                f"{PREFIX}encuesta pregunta | opción 1 | opción 2 [| duracion=15m | anonima] — crea una encuesta configurable.",
-                f"{PREFIX}encuesta resultados <ID> / cerrar <ID> — consulta o cierra una encuesta.",
-                f"{PREFIX}elige opción 1 | opción 2 — elige aleatoriamente.",
-                f"{PREFIX}duelo @usuario — reto con botones para aceptar o rechazar.",
-                f"{PREFIX}ship <usuario 1> <usuario 2> — compatibilidad ficticia.",
+                f"{PREFIX}puntos / reputacion — consulta tus puntos.",
+                f"{PREFIX}ranking / top — ranking de puntos.",
+                f"{PREFIX}encuesta pregunta | opción 1 | opción 2 — crea una encuesta.",
+                f"{PREFIX}encuesta resultados <ID> — consulta resultados.",
+                f"{PREFIX}encuesta cerrar <ID> — cierra tu encuesta.",
                 f"{PREFIX}elige opción 1 | opción 2 — elección mediante botones.",
+                f"{PREFIX}duelo @usuario — reto para aceptar o rechazar.",
+                f"{PREFIX}ship <usuario 1> <usuario 2> — compatibilidad ficticia.",
                 f"{PREFIX}azar <mínimo> <máximo> — número aleatorio.",
                 f"{PREFIX}dado — lanza un dado.",
                 f"{PREFIX}moneda — lanza una moneda.",
@@ -12017,55 +12004,82 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}chiste — cuenta un chiste.",
                 f"{PREFIX}frase — frase aleatoria.",
                 f"{PREFIX}suerte — mensaje de suerte.",
-                f"{PREFIX}reto — propone un reto de Genshin."
-            ],
-            [
-                "SISTEMA Y KATHERINE",
-                f"{PREFIX}estado — panel único con API, latencia, CPU/RAM, procesos, errores, caché, SQLite, conexiones y salud de fuentes.",
+                f"{PREFIX}reto — propone un reto de Genshin.",
+            ]),
+            ("06 · VOZ Y REPRODUCTOR", [
+                f"{PREFIX}join — entra en la llamada de esta sala.",
+                f"{PREFIX}leer — activa la lectura en voz alta.",
+                f"{PREFIX}noleer — desactiva la lectura.",
+                f"{PREFIX}tts ajustes — consulta voz, velocidad y filtros.",
+                f"{PREFIX}tts voces — muestra voces disponibles.",
+                f"{PREFIX}tts voz <nombre> — cambia la voz.",
+                f"{PREFIX}tts velocidad <-50 a 100> — ajusta la velocidad.",
+                f"{PREFIX}tts volumen <0-100> — ajusta el volumen de lectura.",
+                f"{PREFIX}tts enlaces on/off — activa o desactiva lectura de enlaces.",
+                f"{PREFIX}tts menciones on/off — configura lectura de menciones.",
+                f"{PREFIX}volumenlectura / subirvolumenlectura / bajarvolumenlectura — controles rápidos TTS.",
+                f"{PREFIX}dj buscar <tema> — busca música pública y licenciada.",
+                f"{PREFIX}buscar <tema> — alias de búsqueda musical.",
+                f"{PREFIX}dj <archivo.mp3> [bucle] — reproduce un archivo local.",
+                f"{PREFIX}dj pausa / reanudar / saltar / cola — controles del reproductor.",
+                f"{PREFIX}dj añadir <archivo> — agrega una pista a la cola.",
+                f"{PREFIX}dj lista — muestra audios locales.",
+                f"{PREFIX}playlist crear/agregar/ver/reproducir/borrar — administra listas.",
+                f"{PREFIX}volumen [0-100] — consulta o ajusta la música.",
+                f"{PREFIX}subirvolumen / bajarvolumen [cantidad] — cambia el volumen.",
+                f"{PREFIX}silencio — silencia la música.",
+                f"{PREFIX}djdetener / salirsala — detiene el audio y sale de la sala.",
+                f"{PREFIX}salas — consulta salas en vivo.",
+            ]),
+            ("07 · SISTEMA Y ADMINISTRACIÓN", [
+                f"{PREFIX}estado — diagnóstico completo de Katherine.",
                 f"{PREFIX}fecha — fecha y hora de Chile.",
                 f"{PREFIX}zona <Area/Ciudad> — hora de una zona.",
-                f"{PREFIX}salas — consulta salas en vivo.",
-                f"{PREFIX}join — entra en la llamada asociada a esta sala.",
-                f"{PREFIX}leer — activa la lectura en voz alta de mensajes de texto.",
-                f"{PREFIX}noleer — desactiva la lectura sin salir de la llamada.",
-                f"{PREFIX}tts ajustes — consulta voz, velocidad y filtros de lectura.",
-                f"{PREFIX}tts voz <nombre> / velocidad <-50 a 100> — configura la lectura.",
-                f"{PREFIX}tts volumen <0-100> — ajusta el volumen de voz de Katherine.",
-                f"{PREFIX}volumenlectura / subirvolumenlectura / bajarvolumenlectura — controles de volumen TTS.",
-                f"{PREFIX}tts enlaces on/off y menciones on/off — elige qué leer.",
-                f"{PREFIX}dj pausa / reanudar / saltar / cola — controles de reproducción.",
-                f"{PREFIX}dj añadir <archivo> — agrega una pista local a la cola.",
-                f"{PREFIX}playlist crear/agregar/ver/reproducir/borrar — administra playlists.",
+                f"{PREFIX}menu — abre el menú interactivo.",
+                f"{PREFIX}economia — explica el sistema de puntos.",
+                f"{PREFIX}autotest — ejecuta pruebas internas.",
+                f"{PREFIX}admin — abre el panel de administración.",
                 f"{PREFIX}advertir @usuario motivo — registra una advertencia.",
                 f"{PREFIX}advertencias @usuario — consulta advertencias.",
-                f"{PREFIX}quitaradvertencia <id> — retira una advertencia.",
-                f"{PREFIX}antispam estado/on/off — configura el antispam de esta sala.",
-                f"{PREFIX}salirsala — desconecta a Katherine de la llamada.",
-                f"{PREFIX}dj lista — muestra audios locales e instrucciones.",
-                f"{PREFIX}dj buscar <tema> — busca música pública y licenciada.",
-                f"{PREFIX}buscar <tema> — alias rápido de {PREFIX}dj buscar.",
-                f"{PREFIX}dj archivo.mp3 [bucle] — reproduce audio local (comunidad).",
-                f"{PREFIX}djdetener — detiene la reproducción y sale de la sala.",
-                f"{PREFIX}volumen [0-100] — consulta o ajusta el volumen de música.",
-                f"{PREFIX}subirvolumen [cantidad] — aumenta el volumen (10% por defecto).",
-                f"{PREFIX}bajarvolumen [cantidad] — reduce el volumen (10% por defecto).",
-                f"{PREFIX}silencio — silencia la música; !volumen restaurar recupera el nivel anterior.",
-                f"{PREFIX}menu — abre el menú interactivo.",
-                f"{PREFIX}economia — muestra el sistema de puntos.",
-                f"{PREFIX}perfilbot <Nombre> | <Estado> — modifica el perfil (administradores).",
-                f"{PREFIX}avatarbot <URL|eliminar> — cambia o retira el avatar con una imagen o artículo (administradores).",
-                f"{PREFIX}autotest — pruebas internas de Katherine.",
-                f"{PREFIX}admin — abre el panel de control de administradores.",
-                f"{PREFIX}traducir idioma | texto — traduce con detección aproximada del idioma de origen.",
-                f"{PREFIX}multimedia imagen|video|audio <consulta> — busca recursos públicos y sus fuentes.",
-                f"{PREFIX}imagen / video / audio <consulta> — accesos directos al buscador multimedia.",
+                f"{PREFIX}quitaradvertencia <ID> — retira una advertencia.",
+                f"{PREFIX}antispam estado/on/off — configura el antispam.",
+                f"{PREFIX}perfilbot <Nombre> | <Estado> — modifica el perfil del bot.",
+                f"{PREFIX}avatarbot <URL> — cambia el avatar del bot.",
+                f"{PREFIX}traducir idioma | texto — traduce texto con detección aproximada.",
+                f"{PREFIX}multimedia imagen|video|audio <consulta> — busca recursos públicos.",
+                f"{PREFIX}imagen / video / audio <consulta> — accesos directos multimedia.",
                 f"{PREFIX}respuestas on/off — activa o pausa respuestas contextuales.",
-                f"{PREFIX}respuesta añadir/lista/eliminar — administra reglas de respuesta automática."
-            ]
+                f"{PREFIX}respuesta añadir/lista/eliminar — administra respuestas automáticas.",
+            ]),
         ]
-        for section in help_sections:
-            await send_message(thread, "\n".join(section), source, reply)
-            reply = None
+
+        page_count = len(help_sections)
+        await send_message(
+            thread,
+            "╭━━━━━━━━━━━━━━━━━━━━━━━━━━━━╮\n"
+            "│       K A T H E R I N E       │\n"
+            "│     COMMAND DIRECTORY     │\n"
+            "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n"
+            f"Prefijo: {PREFIX}  ·  También se aceptan ! y -\n"
+            "Usa los ejemplos tal como aparecen.",
+            source,
+            reply
+        )
+        reply = None
+
+        for page_index, (section_title, entries) in enumerate(help_sections, 1):
+            panel_lines = [
+                "╭━━━━━━━━━━━━━━━━━━━━━━━━━━━━╮",
+                f"│  {section_title}",
+                f"│  PÁGINA {page_index:02d}/{page_count:02d}",
+                "├────────────────────────────",
+            ]
+            panel_lines.extend(f"│  ✦ {entry}" for entry in entries)
+            panel_lines.extend([
+                "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯",
+                "Katherine · Centro de ayuda"
+            ])
+            await send_message(thread, "\n".join(panel_lines), source, reply)
         return
 
     if command in ("!menu", "!menú"):
