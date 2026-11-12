@@ -7538,6 +7538,39 @@ TALENT_PRIORITIES = {
 # ---------------------------------------------------------------------------
 # GESTOR PRINCIPAL DE COMANDOS
 # ---------------------------------------------------------------------------
+
+CONSTELLATION_GUIDES = {
+    "cyno": ("C2 es una mejora ofensiva importante; C0 ya funciona.", "C1 mejora fluidez y C2 potencia Electro; no son necesarias."),
+    "nahida": ("C2 es su constelación de mayor impacto general.", "C0 ya ofrece gran utilidad; C1 y C2 son mejoras opcionales."),
+    "hu tao": ("C1 mejora comodidad y ejecución; C0 funciona.", "Reduce el coste de resistencia de ataques cargados durante su habilidad."),
+    "raiden": ("C2 es una mejora opcional de daño personal.", "C0 cumple como soporte y conductora."),
+    "neuvillette": ("C1 destaca por resistencia a interrupción y comodidad.", "C0 ya es fuerte con protección adecuada."),
+    "arlecchino": ("C1 es una mejora ofensiva notable; C0 es funcional.", "No es requisito para aprovechar su rol."),
+    "furina": ("C2 mejora mucho la acumulación de Fanfarria.", "C0 ya aporta daño y potenciación."),
+    "yelan": ("C1 mejora la disponibilidad de habilidad; C2 potencia aplicación y daño.", "C0 funciona bien."),
+    "xingqiu": ("C6 es una de sus constelaciones más destacadas.", "Las copias se consiguen con el tiempo; no es requisito."),
+    "xiangling": ("C4 es su constelación más destacada.", "Aumenta la duración de Pyronado; C0 funciona."),
+    "kazuha": ("C0 suele ser suficiente para su rol de soporte.", "Las constelaciones no son necesarias para su función principal."),
+    "fischl": ("C6 aporta una mejora importante con ataques coordinados.", "C0 ya es una gran sub-DPS."),
+    "alhaitham": ("C0 es suficiente para su rol principal.", "Prioriza equipo, arma y estadísticas."),
+    "navia": ("C0 es funcional; C1 ayuda a energía y rotación.", "Las constelaciones son mejoras opcionales."),
+    "nilou": ("C0 activa su mecánica central.", "C2 puede potenciar reacciones, pero C0 cumple su función."),
+    "ayaka": ("C0 funciona; las constelaciones altas requieren mucha inversión.", "C2 puede potenciar su definitiva en situaciones adecuadas."),
+    "ganyu": ("C0 es completamente jugable; C1 mejora daño y energía.", "No son obligatorias para sus equipos."),
+    "xiao": ("C0 es suficiente; C6 es muy específica.", "No priorices C6 como primera inversión."),
+    "wanderer": ("C0 es suficiente; C1 y C2 son mejoras progresivas.", "La prioridad sigue siendo una buena build.")
+}
+CHARACTER_GUIDE_ALIASES = {
+    "hutao": "hu tao", "shogun raiden": "raiden", "raiden shogun": "raiden",
+    "kamisato ayaka": "ayaka", "kaedehara kazuha": "kazuha",
+    "alhacén": "alhaitham", "alhacen": "alhaitham",
+    "errante": "wanderer", "scaramouche": "wanderer",
+    "arconte dendro": "nahida"
+}
+def normalize_character_guide_key(name: str) -> str:
+    key = re.sub(r"\s+", " ", str(name).casefold().strip())
+    return CHARACTER_GUIDE_ALIASES.get(key, key)
+
 async def handle_command(event: dict, source: str):
     global LAST_EVENT_AT, LAST_COMMAND_AT, LAST_COMMAND_NAME, LAST_COMMAND_USER
     LAST_EVENT_AT = time.time()
@@ -8087,179 +8120,6 @@ async def handle_command(event: dict, source: str):
         return
 
     # -----------------------------------------------------------------------
-    # GENSHIN IMPACT: PERSONAJES
-    # -----------------------------------------------------------------------
-    if command in ("!personaje", "!ficha-personaje"):
-        if not query:
-            await send_message(
-                thread,
-                "Uso: !personaje nombre",
-                source,
-                reply
-            )
-            return
-
-        data = await get_character(query)
-
-        if not isinstance(data, dict):
-            await send_message(
-                thread,
-                f"No encontré al personaje «{query}».",
-                source,
-                reply
-            )
-            return
-
-        stats = await character_stats(query)
-        base = get_level90(stats)
-        answer = describe_game(data, query)
-
-        if isinstance(base, dict):
-            answer += "\n\nESTADÍSTICAS BASE — NIVEL 90\n"
-            answer += (
-                f"Vida: {format_number(base.get('hp'))} | "
-                f"ATQ: {format_number(base.get('attack'))} | "
-                f"DEF: {format_number(base.get('defense'))}"
-            )
-
-            if base.get("specialized") is not None:
-                answer += (
-                    f"\nAtributo de ascensión: "
-                    f"{float(base['specialized'])*100:.1f}% (si es porcentual)"
-                )
-
-        answer += (
-            "\n\nUsa !materiales "
-            + str(data.get("name") or query)
-            + " para ver la ascensión."
-        )
-
-        await send_message(thread, answer, source, reply)
-        return
-
-    if command in ("!estadisticas", "!statspersonaje"):
-        if not query:
-            await send_message(thread, "Uso: !estadisticas nombre", source, reply)
-            return
-        data, stats = await asyncio.gather(
-            get_character(query), character_stats(query)
-        )
-        base = get_level90(stats)
-        if not isinstance(data, dict) or not isinstance(base, dict):
-            await send_message(
-                thread, f"No pude obtener las estadísticas de {query}.",
-                source, reply
-            )
-            return
-        answer = (
-            f"ESTADÍSTICAS BASE — {data.get('name', query)} · NIVEL 90\n"
-            f"Vida: {format_number(base.get('hp'))}\n"
-            f"ATQ: {format_number(base.get('attack'))}\n"
-            f"DEF: {format_number(base.get('defense'))}\n"
-            f"Atributo de ascensión: {base.get('specialized', 'No informado')}\n"
-            "Valores base; no incluyen armas, artefactos ni bonificaciones."
-        )
-        await send_message(thread, answer, source, reply)
-        return
-
-    if command in ("!talentos", "!pasivas"):
-        if not query:
-            await send_message(thread, f"Uso: {command} nombre del personaje", source, reply)
-            return
-        data = await get_character(query)
-        if not isinstance(data, dict):
-            await send_message(thread, f"No encontré a {query}.", source, reply)
-            return
-        if command == "!talentos":
-            entries = data.get("skillTalents") or data.get("talents") or []
-            heading = "TALENTOS DE COMBATE"
-        else:
-            entries = data.get("passiveTalents") or []
-            heading = "TALENTOS PASIVOS"
-        if isinstance(entries, dict):
-            entries = list(entries.values())
-        if not isinstance(entries, list) or not entries:
-            await send_message(
-                thread, "La base de datos no entregó esa información.",
-                source, reply
-            )
-            return
-        lines = [f"{heading} — {data.get('name', query)}"]
-        for item in entries[:6]:
-            if not isinstance(item, dict):
-                continue
-            name = item.get("name") or item.get("unlock") or "Talento"
-            desc = re.sub(r"<[^>]+>", "", str(item.get("description") or ""))
-            lines.append(f"\n{name}\n{desc[:350]}")
-        await send_message(thread, "\n".join(lines), source, reply)
-        return
-
-    # -----------------------------------------------------------------------
-    # GENSHIN IMPACT: MATERIALES DE ASCENSIÓN
-    # -----------------------------------------------------------------------
-    if command in ("!materiales", "!ascension"):
-        if not query:
-            await send_message(
-                thread,
-                "Uso: !materiales nombre del personaje",
-                source,
-                reply
-            )
-            return
-
-        data = await get_character(query)
-        costs = data.get("costs") if isinstance(data, dict) else None
-
-        if not isinstance(costs, dict):
-            await send_message(
-                thread,
-                f"No encontré los materiales de ascensión de «{query}».",
-                source,
-                reply
-            )
-            return
-
-        totals = defaultdict(int)
-
-        for stage in costs.values():
-            if isinstance(stage, list):
-                for item in stage:
-                    if isinstance(item, dict) and item.get("name"):
-                        try:
-                            totals[str(item["name"])] += int(item.get("count", 0))
-                        except (TypeError, ValueError):
-                            pass
-
-        if not totals:
-            await send_message(
-                thread,
-                "La base de datos no devolvió materiales de ascensión para ese personaje.",
-                source,
-                reply
-            )
-            return
-
-        lines = [
-            f"MATERIALES DE ASCENSIÓN — {data.get('name', query)}",
-            "Totales para subir al nivel 90:"
-        ]
-
-        lines.extend(
-            f"• {name}: {format_number(amount)}"
-            for name, amount in totals.items()
-        )
-
-        lines.append("\nNo incluye materiales para subir talentos.")
-
-        await send_message(
-            thread,
-            "\n".join(lines),
-            source,
-            reply
-        )
-        return
-
-    # -----------------------------------------------------------------------
     # GENSHIN IMPACT: COMPARAR PERSONAJES
     # -----------------------------------------------------------------------
     if command == "!comparar":
@@ -8335,662 +8195,104 @@ async def handle_command(event: dict, source: str):
         return
 
     # -----------------------------------------------------------------------
-    # GENSHIN IMPACT: EQUIPOS Y ROTACIONES
-    # -----------------------------------------------------------------------
-    if command == "!equipos":
-        key = query.casefold().strip()
-        team = BUILD_TEAMS.get(key)
-
-        if not team:
-            await send_message(
-                thread,
-                "Aún no tengo una composición guardada para ese personaje. "
-                "Prueba Cyno, Nahida, Hu Tao, Raiden, Neuvillette o Arlecchino.",
-                source,
-                reply
-            )
-            return
-
-        await send_message(
-            thread,
-            f"EQUIPO ORIENTATIVO — {query}\n"
-            f"{team[0]}\n\n"
-            f"Sinergia: {team[1]}\n\n"
-            "Es una propuesta general, no una simulación de daño.",
-            source,
-            reply
-        )
-        return
-
-    if command == "!rotacion":
-        key = query.casefold().strip()
-        team = BUILD_TEAMS.get(key)
-
-        if not team:
-            await send_message(
-                thread,
-                "No tengo una rotación guardada para ese personaje. "
-                "Prueba Cyno, Nahida, Hu Tao, Raiden, Neuvillette o Arlecchino.",
-                source,
-                reply
-            )
-            return
-
-        await send_message(
-            thread,
-            f"ROTACIÓN ORIENTATIVA — {query}\n"
-            f"Equipo: {team[0]}\n\n"
-            f"{team[1]}\n\n"
-            "Ajusta el orden según energía, duración de habilidades y enemigos.",
-            source,
-            reply
-        )
-        return
-
-    # -----------------------------------------------------------------------
     # GENSHIN IMPACT: CALCULADORA
     # -----------------------------------------------------------------------
-    if command == "!calculadora":
-        parts = query.split()
-
-        if len(parts) != 3:
-            await send_message(
-                thread,
-                "Uso: !calculadora cv 10.5 21 o !calculadora critico 75 160",
-                source,
-                reply
-            )
-            return
-
-        mode = parts[0].lower()
-
-        try:
-            first = float(parts[1].replace(",", "."))
-            second = float(parts[2].replace(",", "."))
-
-            if not (0 <= first <= 1000 and 0 <= second <= 1000):
-                raise ValueError
-
-        except ValueError:
-            await send_message(
-                thread,
-                "Introduce dos números válidos.",
-                source,
-                reply
-            )
-            return
-
-        if mode == "cv":
-            answer = (
-                "VALOR CRÍTICO (CV)\n"
-                f"CR: {first:g}% | CD: {second:g}%\n"
-                f"CV = 2 × CR + CD = {2*first+second:.1f}"
-            )
-
-        elif mode in ("critico", "crítico", "media"):
-            if first > 100 or second > 400:
-                await send_message(
-                    thread,
-                    "Para critico usa CR entre 0 y 100 y CD entre 0 y 400.",
-                    source,
-                    reply
-                )
-                return
-
-            average = 1 + (first / 100) * (second / 100)
-
-            answer = (
-                "DAÑO MEDIO ESPERADO\n"
-                f"CR: {first:g}% | CD: {second:g}%\n"
-                f"Multiplicador medio crítico: ×{average:.3f}\n"
-                "No incluye DEF, RES, reacción ni bonificaciones."
-            )
-
-        else:
-            await send_message(
-                thread,
-                "Modos disponibles: cv o critico.",
-                source,
-                reply
-            )
-            return
-
-        await send_message(thread, answer, source, reply)
-        return
-
     # -----------------------------------------------------------------------
     # GUÍAS, ESTADÍSTICAS Y BÚSQUEDA AMPLIADA DE GENSHIN
     # -----------------------------------------------------------------------
-    if command == "!statsarma":
-        if not query:
-            await send_message(thread, f"Uso: {PREFIX}statsarma nombre del arma", source, reply)
-            return
-
-        weapon, stats = await asyncio.gather(
-            game_data("weapons", query),
-            weapon_stats(query)
-        )
-        base = get_level90(stats)
-
-        if not isinstance(weapon, dict) or not isinstance(base, dict):
-            await send_message(
-                thread,
-                f"No pude obtener la ficha y las estadísticas de «{query}».",
-                source,
-                reply
-            )
-            return
-
-        answer = (
-            f"ESTADÍSTICAS DEL ARMA — {weapon.get('name', query)}\n"
-            f"Rareza: {weapon.get('rarity', '?')}★\n"
-            f"Tipo: {weapon.get('weaponText', 'No disponible')}\n"
-            f"Ataque base nivel 90: {format_number(base.get('attack'))}\n"
-            f"Atributo de ascensión: {weapon.get('mainStatText') or 'Ninguno'}\n"
-            f"Valor de ascensión nivel 90: {base.get('specialized', 'No disponible')}\n"
-            "Valores de la base de datos; no incluyen refinamiento ni bonificaciones."
-        )
-        await send_message(thread, answer, source, reply)
-        return
-
-    if command == "!materialesarma":
-        if not query:
-            await send_message(thread, f"Uso: {PREFIX}materialesarma nombre del arma", source, reply)
-            return
-
-        weapon = await game_data("weapons", query)
-        costs = weapon.get("costs") if isinstance(weapon, dict) else None
-
-        if not isinstance(costs, dict):
-            await send_message(thread, f"No encontré los materiales de «{query}».", source, reply)
-            return
-
-        totals = defaultdict(int)
-        for stage in costs.values():
-            if isinstance(stage, list):
-                for item in stage:
-                    if isinstance(item, dict) and item.get("name"):
-                        try:
-                            totals[str(item["name"])] += int(item.get("count", 0))
-                        except (TypeError, ValueError):
-                            continue
-
-        if not totals:
-            await send_message(thread, "La API no devolvió materiales de ascensión para esa arma.", source, reply)
-            return
-
-        lines = [
-            f"MATERIALES DEL ARMA — {weapon.get('name', query)}",
-            "Totales para ascenderla al máximo:"
-        ]
-        lines.extend(f"• {name}: {amount}" for name, amount in totals.items())
-        await send_message(thread, "\n".join(lines), source, reply)
-        return
-
     if command == "!guia":
         if not query:
             await send_message(thread, f"Uso: {PREFIX}guia nombre del personaje", source, reply)
             return
-
-        character, stats = await asyncio.gather(
-            get_character(query),
-            character_stats(query)
-        )
-        if not isinstance(character, dict):
-            await send_message(thread, f"No encontré al personaje «{query}».", source, reply)
-            return
-
-        parts = [describe_game(character, query, "characters")]
-        base = get_level90(stats)
-        if isinstance(base, dict):
-            parts.append(
-                "ESTADÍSTICAS BASE NIVEL 90\n"
-                f"Vida: {format_number(base.get('hp'))} | "
-                f"ATQ: {format_number(base.get('attack'))} | "
-                f"DEF: {format_number(base.get('defense'))}"
-            )
-
-        talents = character.get("skillTalents") or character.get("talents") or []
-        if isinstance(talents, dict):
-            talents = list(talents.values())
-        if isinstance(talents, list) and talents:
-            names = [
-                clean_game_text(x.get("name") or x.get("unlock") or "")
-                for x in talents[:6] if isinstance(x, dict)
-            ]
-            names = [x for x in names if x]
-            if names:
-                parts.append("TALENTOS\n" + "\n".join(f"• {x}" for x in names))
-
-        await send_message(thread, "\n\n".join(parts), source, reply)
-        return
-
-    # -----------------------------------------------------------------------
-    # GENSHIN: HERRAMIENTAS AVANZADAS
-    # -----------------------------------------------------------------------
-    if command == "!statsnivel":
-        if len(args) < 3:
-            await send_message(
-                thread,
-                f"Uso: {PREFIX}statsnivel personaje Cyno 80+ o {PREFIX}statsnivel arma Staff of Homa 90",
-                source,
-                reply
-            )
-            return
-
-        kind = args[0].casefold()
-        level = args[-1].strip()
-        target_name = " ".join(args[1:-1]).strip()
-        folder = "characters" if kind in ("personaje", "personajes", "char") else (
-            "weapons" if kind in ("arma", "armas", "weapon") else None
-        )
-        if folder is None or not target_name:
-            await send_message(
-                thread,
-                "Indica personaje o arma, nombre y nivel. Ejemplo: !statsnivel personaje Cyno 80+",
-                source,
-                reply
-            )
-            return
-
-        stats = await game_stats(folder, target_name)
-        selected = get_level_stats(stats, level)
-        if not selected:
-            available = ", ".join(
-                key for key in stats.keys()
-                if re.fullmatch(r"\d{1,2}\+?", str(key))
-            ) if isinstance(stats, dict) else ""
-            await send_message(
-                thread,
-                f"No encontré el nivel {level} para {target_name}. "
-                + (f"Niveles disponibles: {available}" if available else "Comprueba el nombre y el nivel."),
-                source,
-                reply
-            )
-            return
-
-        details = [
-            f"ESTADÍSTICAS — {target_name} · NIVEL {level}",
-            f"Vida: {format_number(selected.get('hp'))}",
-            f"ATQ: {format_number(selected.get('attack'))}",
-            f"DEF: {format_number(selected.get('defense'))}"
-        ]
-        if selected.get("specialized") is not None:
-            details.append(f"Atributo de ascensión: {selected.get('specialized')}")
-        details.append("Valores base; no incluyen armas, artefactos, talentos ni bonificaciones.")
-        await send_message(thread, "\n".join(details), source, reply)
-        return
-
-    if command == "!talentoguia":
-        if not query:
-            await send_message(thread, f"Uso: {PREFIX}talentoguia nombre del personaje", source, reply)
-            return
-        character = await get_character(query)
-        if not isinstance(character, dict):
-            await send_message(thread, f"No encontré al personaje «{query}».", source, reply)
-            return
-        await send_message(
-            thread,
-            describe_talent_guide(character, query),
-            source,
-            reply
-        )
-        return
-
-    if command == "!materialesdetalle":
-        if not query:
-            await send_message(thread, f"Uso: {PREFIX}materialesdetalle nombre", source, reply)
-            return
-        character = await get_character(query)
-        costs = character.get("costs") if isinstance(character, dict) else None
-        if not isinstance(costs, dict):
-            await send_message(thread, f"No encontré los materiales de «{query}».", source, reply)
-            return
-        await send_message(
-            thread,
-            describe_cost_stages(
-                costs,
-                f"MATERIALES DETALLADOS — {character.get('name', query)}"
-            ),
-            source,
-            reply
-        )
-        return
-
-    if command == "!farm":
-        if not query:
-            await send_message(thread, f"Uso: {PREFIX}farm nombre del personaje", source, reply)
-            return
-        character, stats = await asyncio.gather(
-            get_character(query),
-            character_stats(query)
-        )
-        if not isinstance(character, dict):
-            await send_message(thread, f"No encontré al personaje «{query}».", source, reply)
-            return
-
-        sections = [
-            f"PLAN DE PROGRESIÓN — {character.get('name', query)}",
-            f"Rareza: {character.get('rarity', '?')}★ · "
-            f"{character.get('elementText', 'Elemento no informado')} · "
-            f"{character.get('weaponText', 'Arma no informada')}"
-        ]
-        level90 = get_level90(stats)
-        if isinstance(level90, dict):
-            sections.append(
-                "ESTADÍSTICAS BASE NIVEL 90\n"
-                f"Vida: {format_number(level90.get('hp'))} · "
-                f"ATQ: {format_number(level90.get('attack'))} · "
-                f"DEF: {format_number(level90.get('defense'))}"
-            )
-        costs = character.get("costs")
-        if isinstance(costs, dict):
-            totals = aggregate_material_costs(costs)
-            sections.append(
-                "MATERIALES DE ASCENSIÓN\n"
-                + ("\n".join(f"• {name}: {amount}" for name, amount in sorted(totals.items()))
-                   if totals else "La API no entregó totales de materiales.")
-            )
-        sections.append(
-            f"Usa {PREFIX}materialesdetalle {character.get('name', query)} "
-            "para revisar cada fase por separado."
-        )
-        await send_message(thread, "\n\n".join(sections), source, reply)
-        return
-
-    if command in ("!drops", "!recompensas"):
-        if not query:
-            await send_message(thread, f"Uso: {PREFIX}drops nombre del enemigo", source, reply)
-            return
-        enemy = await game_data("enemies", query)
-        if not isinstance(enemy, dict):
-            await send_message(thread, f"No encontré al enemigo «{query}».", source, reply)
-            return
-
-        drops = (
-            enemy.get("rewardPreview")
-            or enemy.get("drops")
-            or enemy.get("rewards")
-            or enemy.get("reward")
-        )
-        rendered = game_items_text(drops, limit=25)
-        if not rendered:
-            await send_message(
-                thread,
-                f"RECOMPENSAS — {enemy.get('name', query)}\n"
-                "La base consultada no publicó una lista de drops para este enemigo.",
-                source,
-                reply
-            )
-            return
-        await send_message(
-            thread,
-            f"RECOMPENSAS REGISTRADAS — {enemy.get('name', query)}\n"
-            + "\n".join(f"• {item}" for item in rendered)
-            + "\n\nLos drops pueden variar según nivel, mundo y dificultad.",
-            source,
-            reply
-        )
-        return
-
-    if command == "!artefactos":
-        if not query:
-            await send_message(thread, f"Uso: {PREFIX}artefactos nombre del personaje", source, reply)
-            return
-        key = query.casefold().strip()
-        guide = ARTIFACT_GUIDES.get(key)
-        if not guide:
-            guide = next(
-                (value for name, value in ARTIFACT_GUIDES.items()
-                 if name in key or key in name),
-                None
-            )
-        if not guide:
-            await send_message(
-                thread,
-                "Todavía no tengo una guía guardada para ese personaje. "
-                "Puedes consultar conjuntos con !artefacto nombre del set.",
-                source,
-                reply
-            )
-            return
-        answer = (
-            f"GUÍA DE ARTEFACTOS — {guide['name']}\n"
-            f"Conjuntos: {guide['sets']}\n"
-            f"Estadísticas principales: {guide['main']}\n"
-            f"Subestadísticas: {guide['subs']}\n"
-            f"Nota: {guide['note']}\n\n"
-            "Guía orientativa: ajusta Recarga, EM y estadísticas según arma, "
-            "constelaciones, equipo y rotación."
-        )
-        await send_message(thread, answer, source, reply)
-        return
-
-    # -----------------------------------------------------------------------
-    # RECOMENDACIONES DE ARMAS Y PRIORIDAD DE TALENTOS
-    # -----------------------------------------------------------------------
-    def normalize_character_guide_key(name):
-        key = re.sub(r"\s+", " ", name.casefold().strip())
-        aliases = {
-            "hu tao": "hu tao",
-            "hutao": "hu tao",
-            "shogun raiden": "raiden",
-            "raiden shogun": "raiden",
-            "kamisato ayaka": "ayaka",
-            "kaedehara kazuha": "kazuha",
-            "alhacén": "alhaitham",
-            "alhacen": "alhaitham",
-            "errante": "wanderer",
-            "scaramouche": "wanderer",
-            "shikanoin heizou": "heizou"
-        }
-        return aliases.get(key, key)
-
-    def resolve_character_guide(name):
-        key = normalize_character_guide_key(name)
-        guide = WEAPON_GUIDES.get(key)
-        if not guide:
-            guide = next(
-                (value for alias, value in WEAPON_GUIDES.items()
-                 if alias in key or key in alias),
-                None
-            )
-        return guide
-
-    if command == "!mejorarma":
-        if not query:
-            await send_message(thread, f"Uso: {PREFIX}mejorarma nombre del personaje", source, reply)
-            return
-        guide = resolve_character_guide(query)
-        if not guide:
-            await send_message(
-                thread,
-                "Todavía no tengo una selección curada para ese personaje. "
-                "Consulta !arma nombre para revisar cualquier arma de la base.",
-                source,
-                reply
-            )
-            return
-        await send_message(
-            thread,
-            f"ARMAS RECOMENDADAS — {guide['name']}\n"
-            + "\n".join(f"{i}. {name}" for i, name in enumerate(guide["weapons"], 1))
-            + f"\n\nConsideración: {guide['note']}\n"
-            "La mejor opción cambia según refinamiento, equipo y estadísticas disponibles.",
-            source,
-            reply
-        )
-        return
-
-    if command == "!prioridadtalentos":
-        if not query:
-            await send_message(thread, f"Uso: {PREFIX}prioridadtalentos nombre del personaje", source, reply)
-            return
-        key = normalize_character_guide_key(query)
-        guide = TALENT_PRIORITIES.get(key)
-        if not guide:
-            await send_message(
-                thread,
-                "No tengo una prioridad guardada para ese personaje. "
-                "Puedes consultar sus habilidades con !talentoguia nombre.",
-                source,
-                reply
-            )
-            return
-        await send_message(
-            thread,
-            f"PRIORIDAD DE TALENTOS — {query}\n"
-            f"Orden orientativo: {guide[0]}\n"
-            f"Motivo: {guide[1]}\n"
-            "La prioridad puede cambiar según el rol, la constelación y el equipo.",
-            source,
-            reply
-        )
-        return
-
-    if command == "!recomendacion":
-        if not query:
-            await send_message(thread, f"Uso: {PREFIX}recomendacion nombre del personaje", source, reply)
-            return
-        character, stats = await asyncio.gather(
-            get_character(query),
-            character_stats(query)
-        )
+        character, stats = await asyncio.gather(get_character(query), character_stats(query))
         if not isinstance(character, dict):
             await send_message(thread, f"No encontré al personaje «{query}».", source, reply)
             return
 
         name = clean_game_text(character.get("name") or query)
-        key = normalize_character_guide_key(query)
-        weapon_guide = resolve_character_guide(key)
-        artifact_guide = ARTIFACT_GUIDES.get(key)
-        talent_guide = TALENT_PRIORITIES.get(key)
-        team = BUILD_TEAMS.get(key)
+        key = normalize_character_guide_key(name)
+        sections = [f"╔══ GUÍA COMPLETA · {name.upper()} ══╗", describe_game(character, name, "characters")]
+
         base = get_level90(stats)
-
-        lines = [
-            f"RECOMENDACIÓN GENERAL — {name}",
-            f"Elemento: {character.get('elementText', 'No informado')}",
-            f"Arma: {character.get('weaponText', 'No informada')}"
-        ]
         if isinstance(base, dict):
-            lines.append(
-                f"Base Nv. 90: Vida {format_number(base.get('hp'))} · "
-                f"ATQ {format_number(base.get('attack'))} · "
-                f"DEF {format_number(base.get('defense'))}"
+            sections.append(
+                "ESTADÍSTICAS BASE · NIVEL 90\n"
+                f"Vida: {format_number(base.get('hp'))} · ATQ: {format_number(base.get('attack'))} · "
+                f"DEF: {format_number(base.get('defense'))}\n"
+                f"Atributo de ascensión: {base.get('specialized', 'No informado')}"
             )
-        if weapon_guide:
-            lines.append("\nARMAS")
-            lines.extend(f"• {item}" for item in weapon_guide["weapons"][:4])
-            lines.append(weapon_guide["note"])
-        if artifact_guide:
-            lines.append(
-                "\nARTEFACTOS\n"
-                f"Sets: {artifact_guide['sets']}\n"
-                f"Principal: {artifact_guide['main']}\n"
-                f"Substats: {artifact_guide['subs']}"
+
+        artifact = ARTIFACT_GUIDES.get(key)
+        if artifact:
+            sections.append(
+                "ARTEFACTOS RECOMENDADOS\n"
+                f"Sets: {artifact['sets']}\n"
+                f"Reloj / Copa / Corona: {artifact['main']}\n"
+                f"Substats: {artifact['subs']}\n"
+                f"Consejo: {artifact['note']}"
             )
-        if talent_guide:
-            lines.append(f"\nTALENTOS\n{talent_guide[0]}")
+        else:
+            sections.append("ARTEFACTOS\nNo hay una recomendación curada para este personaje todavía.")
+
+        weapons = WEAPON_GUIDES.get(key)
+        if weapons:
+            sections.append(
+                "ARMAS RECOMENDADAS\n"
+                + "\n".join(f"{i}. {v}" for i,v in enumerate(weapons["weapons"],1))
+                + f"\nNota: {weapons['note']}"
+            )
+        else:
+            sections.append("ARMAS\nNo hay una lista curada para este personaje todavía.")
+
+        team = BUILD_TEAMS.get(key)
         if team:
-            lines.append(f"\nEQUIPO ORIENTATIVO\n{team[0]}")
-        lines.append(
-            "\nGuía general, no una simulación. Ajusta Recarga, EM y CRIT a tu equipo."
-        )
-        await send_message(thread, "\n".join(lines), source, reply)
-        return
+            sections.append(f"EQUIPO RECOMENDADO\n{team[0]}\nSinergia: {team[1]}")
 
-    # -----------------------------------------------------------------------
-    # COMPARADORES DIRECTOS DE EQUIPO Y ARTEFACTOS
-    # -----------------------------------------------------------------------
-    if command == "!comparararmas":
-        parts = [part.strip() for part in query.split("|") if part.strip()]
-        if len(parts) != 2:
-            await send_message(thread, f"Uso: {PREFIX}comparararmas arma 1 | arma 2", source, reply)
-            return
-        weapon_a, weapon_b, stats_a, stats_b = await asyncio.gather(
-            game_data("weapons", parts[0]),
-            game_data("weapons", parts[1]),
-            weapon_stats(parts[0]),
-            weapon_stats(parts[1])
-        )
-        if not isinstance(weapon_a, dict) or not isinstance(weapon_b, dict):
-            await send_message(
-                thread,
-                "No pude encontrar ambas armas. Revisa los nombres en la base de Genshin.",
-                source,
-                reply
+        priority = TALENT_PRIORITIES.get(key)
+        if priority:
+            sections.append(f"PRIORIDAD DE TALENTOS\n{priority[0]}\nMotivo: {priority[1]}")
+
+        talent_lines = ["HABILIDADES Y PASIVAS"]
+        for index, entry in enumerate(character.get("skillTalents") or character.get("talents") or [], 1):
+            if not isinstance(entry, dict):
+                continue
+            title = clean_game_text(entry.get("name") or entry.get("unlock") or f"Habilidad {index}")
+            desc = clean_game_text(entry.get("description") or "")
+            talent_lines.append(f"{index}. {title}")
+            if desc:
+                talent_lines.append(game_excerpt(desc, 300))
+        for index, entry in enumerate(character.get("passiveTalents") or [], 1):
+            if not isinstance(entry, dict):
+                continue
+            title = clean_game_text(entry.get("name") or f"Pasiva {index}")
+            desc = clean_game_text(entry.get("description") or "")
+            talent_lines.append(f"Pasiva {index}. {title}")
+            if desc:
+                talent_lines.append(game_excerpt(desc, 200))
+        if len(talent_lines) > 1:
+            sections.append("\n".join(talent_lines))
+
+        constellation = CONSTELLATION_GUIDES.get(key)
+        if constellation:
+            sections.append(
+                f"CONSTELACIONES RECOMENDADAS\n{constellation[0]}\n{constellation[1]}\n"
+                "C0 es un punto de partida válido; las constelaciones son opcionales."
             )
-            return
+        else:
+            sections.append("CONSTELACIONES\nC0 es un punto de partida válido. No son obligatorias para completar contenido.")
 
-        level_a, level_b = get_level90(stats_a), get_level90(stats_b)
-        def weapon_summary(weapon, level, fallback):
-            lines = [
-                f"{weapon.get('name', fallback)}",
-                f"Rareza: {weapon.get('rarity', '?')}★",
-                f"Tipo: {weapon.get('weaponText', 'No informado')}",
-                f"ATQ Nv. 90: {format_number(level.get('attack')) if isinstance(level, dict) else 'No disponible'}",
-                f"Secundaria: {weapon.get('baseStatText') or weapon.get('mainStatText') or 'No informada'}",
-                f"Pasiva: {weapon.get('effectName') or 'No informada'}"
-            ]
-            refine = weapon.get("r1")
-            if isinstance(refine, dict):
-                description = refine.get("description") or refine.get("effectDescription")
-                if description:
-                    lines.append("R1: " + game_excerpt(description, 220))
-            return "\n".join(lines)
-
-        answer = (
-            "COMPARACIÓN DE ARMAS\n\n"
-            + weapon_summary(weapon_a, level_a, parts[0])
-            + "\n\nVS.\n\n"
-            + weapon_summary(weapon_b, level_b, parts[1])
-            + "\n\nLa comparación no simula el daño final: depende del personaje y la rotación."
-        )
-        await send_message(thread, answer, source, reply)
-        return
-
-    if command == "!compararartefactos":
-        parts = [part.strip() for part in query.split("|") if part.strip()]
-        if len(parts) != 2:
-            await send_message(thread, f"Uso: {PREFIX}compararartefactos set 1 | set 2", source, reply)
-            return
-        first, second = await asyncio.gather(
-            game_data("artifacts", parts[0]),
-            game_data("artifacts", parts[1])
-        )
-        if not isinstance(first, dict) or not isinstance(second, dict):
-            await send_message(
-                thread,
-                "No encontré ambos conjuntos de artefactos.",
-                source,
-                reply
-            )
-            return
-
-        def artifact_summary(item, fallback):
-            title = clean_game_text(item.get("name") or fallback)
-            two = clean_game_text(item.get("effect2Pc") or "Sin efecto de 2 piezas disponible.")
-            four = clean_game_text(item.get("effect4Pc") or "Sin efecto de 4 piezas disponible.")
-            rarity = item.get("rarityList") or item.get("rarity") or "No informada"
-            if isinstance(rarity, list):
-                rarity = ", ".join(str(value) + "★" for value in rarity)
-            return (
-                f"{title}\nRareza: {rarity}\n"
-                f"2 piezas: {game_excerpt(two, 350)}\n"
-                f"4 piezas: {game_excerpt(four, 500)}"
+        totals = aggregate_material_costs(character.get("costs"))
+        if totals:
+            sections.append(
+                "MATERIALES DE ASCENSIÓN · TOTAL\n"
+                + "\n".join(f"• {material}: {amount}" for material,amount in totals.items())
             )
 
-        await send_message(
-            thread,
-            "COMPARACIÓN DE ARTEFACTOS\n\n"
-            + artifact_summary(first, parts[0])
-            + "\n\nVS.\n\n"
-            + artifact_summary(second, parts[1])
-            + "\n\nLa eficiencia del set depende de las habilidades y composición del personaje.",
-            source,
-            reply
+        sections.append(
+            "RECOMENDACIÓN FINAL\nAjusta la build a tu equipo, rotación y armas disponibles. "
+            "Estas recomendaciones son orientativas, no una simulación de daño."
         )
+        await send_message(thread, "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n".join(sections), source, reply)
         return
 
     if command in ("!cv", "!valorcritico"):
@@ -9595,101 +8897,6 @@ async def handle_command(event: dict, source: str):
         await send_message(
             thread,
             describe_game(data, query, object_commands[command]),
-            source,
-            reply
-        )
-        return
-
-    if command == "!constelacion" and len(args) > 1:
-        character_query = " ".join(args[:-1]).strip()
-        selected = args[-1].upper()
-        match = re.fullmatch(r"C?([1-6])", selected)
-        if not match:
-            await send_message(thread, "Usa C1, C2, C3, C4, C5 o C6.", source, reply)
-            return
-        character = await get_character(character_query)
-        constellations = (
-            character.get("constellations") or character.get("Constellations")
-            if isinstance(character, dict) else None
-        )
-        entries = list(constellations.values()) if isinstance(constellations, dict) else []
-        index = int(match.group(1)) - 1
-        if index >= len(entries) or not isinstance(entries[index], dict):
-            await send_message(thread, f"No encontré C{index + 1} para {character_query}.", source, reply)
-            return
-        entry = entries[index]
-        await send_message(
-            thread,
-            f"CONSTELACIÓN C{index + 1} — {character.get('name', character_query)}\n"
-            f"{entry.get('name', 'Sin nombre')}\n"
-            f"{clean_game_text(entry.get('description') or 'Sin descripción disponible.')}",
-            source,
-            reply
-        )
-        return
-
-    if command == "!constelacion":
-        data = await game_data("characters", query)
-
-        if isinstance(data, dict):
-            consts = (
-                data.get("constellations")
-                or data.get("Constellations")
-            )
-
-            if isinstance(consts, dict):
-                answer = (
-                    f"CONSTELACIONES — {data.get('name', query)}\n"
-                    + "\n".join(
-                        f"{i}. {v.get('name', '')} — {v.get('description', '')}"
-                        for i, v in enumerate(consts.values(), 1)
-                    )
-                )
-            else:
-                answer = describe_game(data, query)
-        else:
-            answer = f"No encontré el personaje {query}."
-
-        await send_message(thread, answer, source, reply)
-        return
-
-    if command == "!reaccion":
-        if len(args) < 2:
-            await send_message(
-                thread,
-                "Uso: !reaccion electro dendro",
-                source,
-                reply
-            )
-            return
-
-        reactions = {
-            frozenset(("pyro", "hydro")): "Vaporización",
-            frozenset(("cryo", "pyro")): "Derretido",
-            frozenset(("pyro", "electro")): "Sobrecarga",
-            frozenset(("cryo", "electro")): "Superconductor",
-            frozenset(("electro", "hydro")): "Electrocargado",
-            frozenset(("cryo", "hydro")): "Congelado",
-            frozenset(("dendro", "hydro")): "Florecimiento",
-            frozenset(("dendro", "pyro")): "Quemadura",
-            frozenset(("dendro", "electro")): "Aceleración (Quicken; permite Agravado y Propagación)",
-            frozenset(("geo", "pyro")): "Cristalización",
-            frozenset(("geo", "hydro")): "Cristalización",
-            frozenset(("geo", "electro")): "Cristalización",
-            frozenset(("geo", "cryo")): "Cristalización",
-            frozenset(("anemo", "pyro")): "Dispersión",
-            frozenset(("anemo", "hydro")): "Dispersión",
-            frozenset(("anemo", "cryo")): "Dispersión",
-            frozenset(("anemo", "electro")): "Dispersión",
-            frozenset(("anemo", "dendro")): "Anemo no dispersa Dendro",
-            frozenset(("anemo", "geo")): "No produce una reacción elemental directa"
-        }
-
-        pair = frozenset(x.lower() for x in args[:2])
-
-        await send_message(
-            thread,
-            f"Reacción: {reactions.get(pair, 'No se reconoce una reacción directa clásica.')}",
             source,
             reply
         )
