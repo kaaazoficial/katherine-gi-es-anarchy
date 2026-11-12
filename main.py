@@ -38,7 +38,7 @@ from pathlib import Path
 from collections import defaultdict, deque
 from typing import Any
 from html.parser import HTMLParser
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
@@ -383,6 +383,17 @@ DJ_ROOMS: dict[str, dict] = {}
 DJ_READY_EVENTS: dict[str, asyncio.Event] = {}
 DJ_MUSIC_DIR = Path(os.getenv("DJ_MUSIC_DIR", "music")).resolve()
 DJ_AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".opus"}
+DJ_SEARCH_RESULTS: dict[str, dict] = {}
+DJ_ARCHIVE_CACHE: dict[str, dict] = {}
+IA_BASE = "https://archive.org"
+IA_ALLOWED_LICENSES = {
+    "creativecommons.org/publicdomain/zero/1.0": "CC0 · Dominio público",
+    "creativecommons.org/publicdomain/mark/1.0": "Public Domain Mark",
+    "creativecommons.org/licenses/by/4.0": "CC BY 4.0 · Requiere atribución",
+    "creativecommons.org/licenses/by-sa/4.0": "CC BY-SA 4.0 · Requiere atribución",
+    "creativecommons.org/licenses/by/3.0": "CC BY 3.0 · Requiere atribución",
+    "creativecommons.org/licenses/by-sa/3.0": "CC BY-SA 3.0 · Requiere atribución"
+}
 
 # Contadores del proceso actual. Se reinician cuando Render reinicia el servicio.
 metrics = defaultdict(int)
@@ -1233,6 +1244,200 @@ def resolve_dj_track(name: str) -> Path | None:
     return path
 
 
+def clean_archive_value(value: Any, limit: int = 120) -> str:
+    if isinstance(value, list):
+        value = ", ".join(str(part) for part in value[:4])
+    value = html.unescape(str(value or ""))
+    value = re.sub(r"<[^>]*>", "", value)
+    value = re.sub(r"[\x00-\x1f\x7f]", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value[:limit]
+
+
+def archive_license_label(license_url: str) -> str | None:
+    normalized = str(license_url or "").strip().lower().rstrip("/")
+    for marker, label in IA_ALLOWED_LICENSES.items():
+        if marker in normalized:
+            return label
+    return None
+
+
+async def archive_item_details(identifier: str) -> dict | None:
+    """Obtiene metadatos públicos y valida licencia y formato antes de ofrecer audio."""
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,120}", str(identifier or "")):
+        return None
+
+    cached = DJ_ARCHIVE_CACHE.get(identifier)
+    if cached and cached.get("expires", 0) > time.time():
+        return cached.get("track")
+
+    response = await external_request(
+        "GET",
+        f"{IA_BASE}/metadata/{quote(identifier, safe='')}",
+        headers={"Accept": "application/json", "User-Agent": "KatherineBot/1.0"},
+        timeout=25
+    )
+    if not response.is_success:
+        return None
+
+    try:
+        payload = response.json()
+    except Exception:
+        return None
+
+    metadata = payload.get("metadata") or {}
+    license_url = metadata.get("licenseurl") or metadata.get("license_url") or ""
+    license_label = archive_license_label(str(license_url))
+    if not license_label:
+        # No se reproduce contenido sin una licencia inequívoca en sus metadatos.
+        return None
+
+    allowed_files = []
+    for audio_file in payload.get("files") or []:
+        if not isinstance(audio_file, dict):
+            continue
+        filename = str(audio_file.get("name") or "")
+        extension = Path(filename).suffix.lower()
+        if extension not in {".mp3", ".ogg", ".wav", ".flac", ".m4a", ".opus"}:
+            continue
+        if "/" in filename or "\\" in filename or filename.startswith("."):
+            continue
+        try:
+            file_size = int(audio_file.get("size") or 0)
+        except (TypeError, ValueError):
+            file_size = 0
+        if file_size and file_size > 150 * 1024 * 1024:
+            continue
+        if audio_file.get("private") == "true":
+            continue
+        allowed_files.append((filename, file_size))
+
+    if not allowed_files:
+        return None
+
+    extension_priority = {
+        ".mp3": 0, ".ogg": 1, ".m4a": 2,
+        ".opus": 3, ".wav": 4, ".flac": 5
+    }
+    allowed_files.sort(
+        key=lambda pair: (
+            extension_priority.get(Path(pair[0]).suffix.lower(), 99),
+            pair[1] if pair[1] else 10**15
+        )
+    )
+    filename = allowed_files[0][0]
+    title = clean_archive_value(metadata.get("title") or identifier)
+    creator = clean_archive_value(
+        metadata.get("creator") or metadata.get("artist") or "Autor no indicado"
+    )
+    year = clean_archive_value(metadata.get("year") or "", 12)
+    item_url = f"{IA_BASE}/details/{quote(identifier, safe='')}"
+    audio_url = (
+        f"{IA_BASE}/download/{quote(identifier, safe='')}/"
+        f"{quote(filename, safe='')}"
+    )
+    track = {
+        "identifier": identifier,
+        "title": title or identifier,
+        "creator": creator,
+        "year": year,
+        "license": license_label,
+        "license_url": str(license_url),
+        "item_url": item_url,
+        "url": audio_url,
+        "filename": filename
+    }
+    DJ_ARCHIVE_CACHE[identifier] = {
+        "track": track,
+        "expires": time.time() + 21600
+    }
+    if len(DJ_ARCHIVE_CACHE) > 500:
+        oldest = min(
+            DJ_ARCHIVE_CACHE,
+            key=lambda key: DJ_ARCHIVE_CACHE[key].get("expires", 0)
+        )
+        DJ_ARCHIVE_CACHE.pop(oldest, None)
+    return track
+
+
+async def search_archive_audio(query: str, limit: int = 5) -> list[dict]:
+    """Busca audio en Internet Archive y solo devuelve pistas con licencias permitidas."""
+    query = clean_archive_value(query, 80)
+    terms = re.findall(r"[\wáéíóúñü-]+", query, flags=re.I)[:5]
+    if not terms:
+        return []
+
+    normalized_query = " ".join(terms).casefold()
+    cached = DJ_ARCHIVE_CACHE.get("search:" + normalized_query)
+    if cached and cached.get("expires", 0) > time.time():
+        return cached.get("tracks", [])[:limit]
+
+    phrase = " ".join(terms)
+    escaped_phrase = phrase.replace('"', "")
+    lucene_query = (
+        'mediatype:audio AND ('
+        f'title:"{escaped_phrase}" OR '
+        f'subject:"{escaped_phrase}" OR '
+        f'description:"{escaped_phrase}")'
+    )
+    params = [
+        ("q", lucene_query),
+        ("fl[]", "identifier"),
+        ("fl[]", "title"),
+        ("fl[]", "creator"),
+        ("rows", "35"),
+        ("page", "1"),
+        ("output", "json"),
+        ("sort[]", "downloads desc")
+    ]
+    response = await external_request(
+        "GET",
+        f"{IA_BASE}/advancedsearch.php",
+        params=params,
+        headers={"Accept": "application/json", "User-Agent": "KatherineBot/1.0"},
+        timeout=30
+    )
+    if not response.is_success:
+        raise RuntimeError(f"Internet Archive respondió HTTP {response.status_code}.")
+
+    try:
+        documents = (
+            response.json().get("response", {}).get("docs", [])
+        )
+    except Exception as exc:
+        raise RuntimeError("No pude interpretar los resultados de Internet Archive.") from exc
+
+    identifiers = []
+    for document in documents:
+        identifier = str(document.get("identifier") or "")
+        if identifier and identifier not in identifiers:
+            identifiers.append(identifier)
+
+    semaphore = asyncio.Semaphore(3)
+
+    async def get_checked(identifier: str):
+        async with semaphore:
+            try:
+                return await archive_item_details(identifier)
+            except Exception:
+                logging.exception("[DJ] No se pudo validar el item IA %s", identifier)
+                return None
+
+    checked = await asyncio.gather(*(get_checked(identifier) for identifier in identifiers))
+    tracks = [track for track in checked if track]
+    DJ_ARCHIVE_CACHE["search:" + normalized_query] = {
+        "tracks": tracks,
+        "expires": time.time() + 900
+    }
+    if len(DJ_ARCHIVE_CACHE) > 500:
+        oldest = min(
+            DJ_ARCHIVE_CACHE,
+            key=lambda key: DJ_ARCHIVE_CACHE[key].get("expires", 0)
+        )
+        DJ_ARCHIVE_CACHE.pop(oldest, None)
+    return tracks[:limit]
+
+
 async def stop_dj_room(
     thread_id: str,
     request_leave: bool = True,
@@ -1270,15 +1475,29 @@ async def stop_dj_room(
         await api("POST", f"/live-rooms/{thread_id}/leave", "community")
 
 
-async def dj_playback_loop(thread_id: str, file_path: Path, looping: bool, audio_source):
+async def dj_playback_loop(
+    thread_id: str,
+    file_path: Path | str,
+    looping: bool,
+    audio_source,
+    display_name: str | None = None
+):
     state = DJ_ROOMS.get(str(thread_id))
     if not state:
         return
     stop_event = state["stop_event"]
+    audio_source_url = str(file_path)
+    track_label = display_name or (
+        file_path.name if isinstance(file_path, Path) else "audio remoto"
+    )
 
     try:
         while not stop_event.is_set():
-            container = pyav.open(str(file_path), mode="r")
+            container = pyav.open(audio_source_url, mode="r", options={
+                "rw_timeout": "15000000",
+                "reconnect": "1",
+                "reconnect_streamed": "1"
+            })
             try:
                 audio_stream = next(
                     (stream for stream in container.streams if stream.type == "audio"),
@@ -1303,8 +1522,12 @@ async def dj_playback_loop(thread_id: str, file_path: Path, looping: bool, audio
                             chunk = samples[offset:offset + 480]
                             if not len(chunk):
                                 continue
-                            audio_frame = livekit_rtc.AudioFrame.create(48000, 1, len(chunk))
-                            destination = np.frombuffer(audio_frame.data, dtype=np.int16)
+                            audio_frame = livekit_rtc.AudioFrame.create(
+                                48000, 1, len(chunk)
+                            )
+                            destination = np.frombuffer(
+                                audio_frame.data, dtype=np.int16
+                            )
                             destination[:len(chunk)] = chunk
                             await audio_source.capture_frame(audio_frame)
                     if stop_event.is_set():
@@ -1318,7 +1541,7 @@ async def dj_playback_loop(thread_id: str, file_path: Path, looping: bool, audio
     except asyncio.CancelledError:
         raise
     except Exception:
-        logging.exception("[DJ] Falló la reproducción de %s", file_path.name)
+        logging.exception("[DJ] Falló la reproducción de %s", track_label)
     finally:
         if DJ_ROOMS.get(str(thread_id)) is state:
             await stop_dj_room(
@@ -1328,7 +1551,12 @@ async def dj_playback_loop(thread_id: str, file_path: Path, looping: bool, audio
             )
 
 
-async def start_dj_room(thread_id: str, file_path: Path, looping: bool):
+async def start_dj_room(
+    thread_id: str,
+    file_path: Path | str,
+    looping: bool,
+    track_metadata: dict | None = None
+):
     if not COMMUNITY_TOKEN:
         return False, "Falta COMMUNITY_BOT_TOKEN en Render."
     if livekit_rtc is None or pyav is None or np is None:
@@ -1370,19 +1598,30 @@ async def start_dj_room(thread_id: str, file_path: Path, looping: bool):
                 source=livekit_rtc.TrackSource.SOURCE_MICROPHONE
             )
         )
+        display_name = (
+            (track_metadata or {}).get("title")
+            or (file_path.name if isinstance(file_path, Path) else "Audio remoto")
+        )
         state = {
             "room": room,
             "audio_source": audio_source,
             "audio_track": audio_track,
             "stop_event": asyncio.Event(),
             "task": None,
-            "filename": file_path.name,
+            "filename": display_name,
+            "track": track_metadata,
             "looping": looping,
             "started_at": time.time()
         }
         DJ_ROOMS[str(thread_id)] = state
         state["task"] = asyncio.create_task(
-            dj_playback_loop(str(thread_id), file_path, looping, audio_source)
+            dj_playback_loop(
+                str(thread_id),
+                file_path,
+                looping,
+                audio_source,
+                display_name
+            )
         )
         return True, "Reproducción iniciada."
     except asyncio.TimeoutError:
@@ -1402,7 +1641,6 @@ async def start_dj_room(thread_id: str, file_path: Path, looping: bool):
         return False, f"No pude iniciar el reproductor: {type(exc).__name__}."
     finally:
         DJ_READY_EVENTS.pop(str(thread_id), None)
-
 
 # ---------------------------------------------------------------------------
 # GENSHIN DATABASE API
@@ -9961,8 +10199,9 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}fecha — fecha y hora de Chile.",
                 f"{PREFIX}zona <Area/Ciudad> — hora de una zona.",
                 f"{PREFIX}salas — consulta salas en vivo.",
-                f"{PREFIX}dj lista — muestra audios disponibles para la sala.",
-                f"{PREFIX}dj archivo.mp3 [bucle] — reproduce audio local (comunidad).",
+                f"{PREFIX}dj lista — muestra audios locales e instrucciones.",
+                f"{PREFIX}dj buscar <tema> — busca música pública y licenciada.",
+                f"{PREFIX}dj archivo.mp3 [bucle] — reproduce audio local (comunidad).
                 f"{PREFIX}djdetener — detiene la reproducción y sale de la sala.",
                 f"{PREFIX}menu — abre el menú interactivo.",
                 f"{PREFIX}economia — muestra el sistema de puntos.",
@@ -11605,26 +11844,120 @@ async def handle_command(event: dict, source: str):
 
         if not args or args[0].lower() in ("lista", "list"):
             tracks = list_dj_tracks()
-            answer = (
-                "KATHERINE DJ\nArchivos disponibles:\n"
-                + ("\n".join(f"• {name}" for name in tracks) if tracks else "No hay pistas todavía.")
-                + "\n\nColoca audio propio o con licencia en music/ y usa !dj archivo.mp3 [bucle]."
+            await send_message(
+                thread,
+                "KATHERINE DJ\n"
+                + ("Archivos locales:\n" + "\n".join(f"• {name}" for name in tracks)
+                   if tracks else "No hay audios locales.")
+                + "\n\nPara buscar música pública: !dj buscar <tema>\n"
+                "Ejemplos: !dj buscar jazz, !dj buscar piano, !dj buscar ambient.\n"
+                "También puedes reproducir archivos locales con !dj archivo.mp3.",
+                source,
+                reply
             )
-            await send_message(thread, answer, source, reply)
+            return
+
+        if args[0].lower() in ("buscar", "search"):
+            search_term = " ".join(args[1:]).strip()
+            if not search_term:
+                await send_message(
+                    thread,
+                    "Uso: !dj buscar <tema o género>. Ejemplos: jazz, piano, ambient, clásica.",
+                    source,
+                    reply
+                )
+                return
+            try:
+                results = await search_archive_audio(search_term, limit=5)
+            except Exception as exc:
+                logging.exception("[DJ] Búsqueda en Internet Archive fallida")
+                await send_message(
+                    thread,
+                    f"No pude consultar el catálogo musical ahora mismo ({type(exc).__name__}).",
+                    source,
+                    reply
+                )
+                return
+
+            if not results:
+                await send_message(
+                    thread,
+                    "No encontré pistas reproducibles con licencias permitidas para esa búsqueda. "
+                    "Prueba con otro género o palabra.",
+                    source,
+                    reply
+                )
+                return
+
+            DJ_SEARCH_RESULTS[thread] = {
+                "tracks": results,
+                "expires": time.time() + 900
+            }
+            for old_thread, saved in list(DJ_SEARCH_RESULTS.items()):
+                if saved.get("expires", 0) <= time.time():
+                    DJ_SEARCH_RESULTS.pop(old_thread, None)
+
+            buttons = register_buttons(
+                source,
+                thread,
+                "dj_select",
+                [
+                    {
+                        "label": f"{index + 1}. {track['title']}"[:40],
+                        "value": str(index)
+                    }
+                    for index, track in enumerate(results)
+                ],
+                ttl=900
+            )
+            listing = "\n".join(
+                f"{index + 1}. {track['title']} — {track['creator']} "
+                f"({track['license']})"
+                for index, track in enumerate(results)
+            )
+            await send_message(
+                thread,
+                f"CATÁLOGO MUSICAL · INTERNET ARCHIVE\nBúsqueda: {search_term}\n\n"
+                f"{listing}\n\nSelecciona una pista para reproducirla en la sala:",
+                source,
+                reply,
+                buttons
+            )
+            return
+
+        if args[0].lower() in ("detener", "stop", "parar"):
+            if thread not in DJ_ROOMS:
+                await send_message(
+                    thread,
+                    "Katherine no está reproduciendo audio en esta sala.",
+                    source,
+                    reply
+                )
+                return
+            await stop_dj_room(thread, request_leave=True)
+            await send_message(
+                thread,
+                "⏹️ Reproducción detenida. Katherine salió de la sala.",
+                source,
+                reply
+            )
             return
 
         track_path = resolve_dj_track(args[0])
         if not track_path:
             await send_message(
                 thread,
-                "No encuentro ese archivo en music/ o su formato no está permitido. "
-                "Usa !dj lista para ver las pistas disponibles.",
+                "No encuentro ese archivo en music/. También puedes buscar audio público "
+                "con !dj buscar <tema>.",
                 source,
                 reply
             )
             return
 
-        looping = any(value.lower() in ("bucle", "loop", "repetir") for value in args[1:])
+        looping = any(
+            value.lower() in ("bucle", "loop", "repetir")
+            for value in args[1:]
+        )
         room_id = thread
         if len(args) > 1 and args[-1].isdigit():
             room_id = args[-1]
@@ -11844,6 +12177,50 @@ async def handle_interaction(event: dict, source: str):
                     f"No es correcto. Te quedan {3 - game['tries']} intentos.",
                     source
                 )
+        return
+
+    if action_type == "dj_select":
+        BUTTON_ACTIONS.pop(button_id, None)
+        await remove_pressed_buttons(event, source, remove=True)
+        if source != "community":
+            await send_message(
+                thread_id,
+                "La reproducción de audio solo está disponible en el bot de comunidad.",
+                source
+            )
+            return
+
+        saved = DJ_SEARCH_RESULTS.get(thread_id) or {}
+        if saved.get("expires", 0) <= time.time():
+            DJ_SEARCH_RESULTS.pop(thread_id, None)
+            await send_message(
+                thread_id,
+                "Los resultados de búsqueda caducaron. Usa !dj buscar <tema> otra vez.",
+                source
+            )
+            return
+        try:
+            selected_index = int(choice)
+            track = saved.get("tracks", [])[selected_index]
+        except (TypeError, ValueError, IndexError):
+            await send_message(thread_id, "Esa selección ya no está disponible.", source)
+            return
+
+        ok, message = await start_dj_room(
+            thread_id,
+            track["url"],
+            looping=False,
+            track_metadata=track
+        )
+        if ok:
+            credit = (
+                f"🎧 Ahora suena: {track['title']} — {track['creator']}\n"
+                f"Licencia: {track['license']}\n"
+                "Fuente: Internet Archive."
+            )
+            await send_message(thread_id, credit, source)
+        else:
+            await send_message(thread_id, f"DJ: {message}", source)
         return
 
     if action_type == "choose_option":
