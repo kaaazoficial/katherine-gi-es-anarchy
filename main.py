@@ -12661,28 +12661,66 @@ def verify_webhook(raw: bytes, headers, secret: str):
         return None
 
 
-async def webhook(request: Request, source: str):
+async def webhook(request: Request, source: str | None):
     global LAST_EVENT_AT
-    secret = (
-        COMMUNITY_SECRET
-        if source == "community"
-        else WEBHOOK_SECRET
-    )
-
-    if not secret:
-        raise HTTPException(
-            status_code=503,
-            detail="Webhook secret no configurado."
-        )
-
     raw = await request.body()
-    event = verify_webhook(raw, request.headers, secret)
+    event = None
+    verified_source = source
 
-    if event is None:
+    # El endpoint raíz acepta webhooks de ambos bots. Esto evita que un
+    # webhook comunitario configurado por error en "/" sea validado con
+    # WEBHOOK_SECRET en vez de COMMUNITY_WEBHOOK_SECRET.
+    candidates = (
+        (source,)
+        if source in ("developer", "community")
+        else ("developer", "community")
+    )
+    valid_sources = []
+    for candidate in candidates:
+        secret = COMMUNITY_SECRET if candidate == "community" else WEBHOOK_SECRET
+        if not secret:
+            continue
+        candidate_event = verify_webhook(raw, request.headers, secret)
+        if candidate_event is not None:
+            valid_sources.append((candidate, candidate_event))
+
+    if not valid_sources:
+        configured = {
+            "developer": bool(WEBHOOK_SECRET),
+            "community": bool(COMMUNITY_SECRET)
+        }
+        logging.warning(
+            "[WEBHOOK] Firma rechazada en %s | secretos configurados: %s",
+            request.url.path,
+            configured
+        )
+        if not any(configured.values()):
+            raise HTTPException(
+                status_code=503,
+                detail="Ningún secreto de webhook está configurado."
+            )
         raise HTTPException(
             status_code=401,
-            detail="Firma inválida."
+            detail="Firma inválida para los bots configurados."
         )
+
+    if len(valid_sources) == 1:
+        verified_source, event = valid_sources[0]
+    else:
+        # Si por configuración ambos secretos coinciden, el botId permite
+        # identificar el emisor sin confiar en datos no firmados.
+        candidate_event = valid_sources[0][1]
+        bot_id = str(candidate_event.get("botId") or "")
+        matched = next(
+            (
+                item for item in valid_sources
+                if str(
+                    (BOT_IDENTITIES.get(item[0]) or {}).get("bot_id") or ""
+                ) == bot_id and bot_id
+            ),
+            None
+        )
+        verified_source, event = matched or valid_sources[0]
 
     event_id = str(event.get("eventId") or "")
 
@@ -12705,9 +12743,15 @@ async def webhook(request: Request, source: str):
         seen_events.append(event_id)
         seen_event_set.add(event_id)
 
-    # Responder rápido a Anarchy; el procesamiento continúa en segundo plano
-    # dentro del mismo proceso de la aplicación.
-    task = asyncio.create_task(safe_dispatch(event, source))
+    logging.info(
+        "[WEBHOOK] Evento %s recibido por %s desde %s",
+        event.get("type"),
+        verified_source,
+        request.url.path
+    )
+
+    # Responder rápido a Anarchy; el procesamiento continúa en segundo plano.
+    task = asyncio.create_task(safe_dispatch(event, verified_source))
     background_tasks.add(task)
     task.add_done_callback(background_tasks.discard)
 
@@ -12719,12 +12763,12 @@ async def webhook(request: Request, source: str):
 # ---------------------------------------------------------------------------
 @app.post("/")
 async def main_webhook(request: Request):
-    return await webhook(request, "developer")
+    return await webhook(request, None)
 
 
 @app.post("/webhook")
 async def main_webhook_alias(request: Request):
-    return await webhook(request, "developer")
+    return await webhook(request, None)
 
 
 @app.post("/community")
@@ -12790,6 +12834,11 @@ async def startup():
         "Katherine Python iniciando en puerto %s",
         PORT
     )
+    logging.info(
+        "[WEBHOOK] Secretos configurados | developer=%s | community=%s",
+        bool(WEBHOOK_SECRET),
+        bool(COMMUNITY_SECRET)
+    )
 
     for source in ("developer", "community"):
         if token_for(source):
@@ -12799,6 +12848,7 @@ async def startup():
                 bot = me["data"].get("bot", {})
                 if isinstance(bot, dict):
                     BOT_IDENTITIES[source] = {
+                        "bot_id": str(bot.get("botId") or ""),
                         "uid": str(bot.get("uid") or bot.get("id") or bot.get("userId") or ""),
                         "name": str(bot.get("name") or "")
                     }
