@@ -15966,9 +15966,13 @@ async def dispatch(event: dict, source: str):
         message_data = event.get("message") or {}
         author_data = message_data.get("author") or {}
         incoming_text = str(message_data.get("content") or "").strip()
-        author_is_bot = any(
-            str(author_data.get(flag, "")).casefold() in ("true", "1", "yes")
-            for flag in ("bot", "isBot", "is_bot")
+        author_is_bot = (
+            any(
+                str(author_data.get(flag, "")).casefold() in ("true", "1", "yes")
+                for flag in ("bot", "isBot", "is_bot")
+            )
+            or str(author_data.get("uid") or author_data.get("userId") or "")
+            == str((BOT_IDENTITIES.get(source) or {}).get("uid") or "")
         )
         AI_CORE.record_chat_message(
             str(event.get("threadId") or ""),
