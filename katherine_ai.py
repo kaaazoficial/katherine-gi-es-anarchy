@@ -471,7 +471,7 @@ class KatherineAI:
             request_func,
             rate_key=rate_key,
             cooldown=0,
-            max_output_tokens=120,
+            max_output_tokens=250,
         )
         if result["kind"] != "answer" or not result["answer"].strip():
             raise RuntimeError("La prueba no recibió una respuesta válida del proveedor.")
