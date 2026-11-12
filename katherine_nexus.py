@@ -113,7 +113,7 @@ def extract_message_id(payload: Any) -> str | None:
                         return str(value)
     # Una invocación explícita siempre obtiene respuesta. Si no existe una
     # intención segura conocida, el núcleo devuelve sus capacidades disponibles.
-    return f"asistente {raw[:300]}"
+    return None
 
 def cleanup_community_events(events: dict, now: float | None = None) -> int:
     now = time.time() if now is None else float(now)
