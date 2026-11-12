@@ -234,20 +234,6 @@ def init_db():
             FOREIGN KEY(playlist_id) REFERENCES dj_playlists(id) ON DELETE CASCADE
         )""")
         db.execute("CREATE INDEX IF NOT EXISTS idx_playlist_tracks ON dj_playlist_tracks(playlist_id,id)")
-        db.execute("""CREATE TABLE IF NOT EXISTS dj_favorites (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            thread_id TEXT NOT NULL,
-            uid TEXT NOT NULL,
-            title TEXT NOT NULL,
-            url TEXT NOT NULL,
-            creator TEXT NOT NULL DEFAULT '',
-            license TEXT NOT NULL DEFAULT '',
-            source TEXT NOT NULL DEFAULT '',
-            extension TEXT NOT NULL DEFAULT '.mp3',
-            created_at REAL NOT NULL,
-            UNIQUE(thread_id, uid, url)
-        )""")
-        db.execute("CREATE INDEX IF NOT EXISTS idx_dj_favorites_owner ON dj_favorites(thread_id,uid,id)")
 
         db.execute("""CREATE TABLE IF NOT EXISTS chat_activity_daily (
             thread_id TEXT NOT NULL,
@@ -408,9 +394,7 @@ def create_dj_playlist(thread_id: str, name: str, creator_uid: str) -> bool:
         return False
 
 
-def add_dj_playlist_track(
-    thread_id: str, playlist_name: str, track_name: str, source: str | None = None
-) -> bool:
+def add_dj_playlist_track(thread_id: str, playlist_name: str, track_name: str) -> bool:
     key = re.sub(r"\s+", " ", str(playlist_name or "")).strip().casefold()
     with db_session() as db:
         row = db.execute(
@@ -421,7 +405,7 @@ def add_dj_playlist_track(
             return False
         db.execute(
             "INSERT INTO dj_playlist_tracks(playlist_id,title,source,created_at) VALUES(?,?,?,?)",
-            (int(row["id"]), str(track_name)[:160], str(source or track_name), time.time())
+            (int(row["id"]), str(track_name)[:160], str(track_name), time.time())
         )
         return True
 
@@ -441,7 +425,7 @@ def get_dj_playlist(thread_id: str, playlist_name: str):
     key = re.sub(r"\s+", " ", str(playlist_name or "")).strip().casefold()
     with db_session() as db:
         playlist = db.execute(
-            "SELECT id,name,created_by FROM dj_playlists WHERE thread_id=? AND name_key=?",
+            "SELECT id,name FROM dj_playlists WHERE thread_id=? AND name_key=?",
             (str(thread_id), key)
         ).fetchone()
         if not playlist:
@@ -470,46 +454,53 @@ def delete_dj_playlist(thread_id: str, playlist_name: str) -> bool:
 
 
 def save_dj_favorite(thread_id: str, uid: str, track: dict) -> bool:
+    """Keep favorites in memory only; they expire after 24 hours or a restart."""
     url = str(track.get("url") or "").strip()
     if not url or not dj_audio_url_allowed(url):
         return False
-    try:
-        with db_session() as db:
-            db.execute(
-                """INSERT INTO dj_favorites
-                   (thread_id,uid,title,url,creator,license,source,extension,created_at)
-                   VALUES(?,?,?,?,?,?,?,?,?)""",
-                (
-                    str(thread_id), str(uid), str(track.get("title") or "Pista")[:160],
-                    url, str(track.get("creator") or "")[:120],
-                    str(track.get("license") or "")[:100],
-                    str(track.get("source") or "")[:80],
-                    str(track.get("extension") or ".mp3")[:8], time.time()
-                )
-            )
-        return True
-    except sqlite3.IntegrityError:
+    key = (str(thread_id), str(uid))
+    now = time.time()
+    favorites = [
+        item for item in DJ_FAVORITES.get(key, [])
+        if float(item.get("expires", 0)) > now
+    ]
+    if any(item.get("url") == url for item in favorites):
+        DJ_FAVORITES[key] = favorites
         return False
+    next_id = max((int(item.get("id", 0)) for item in favorites), default=0) + 1
+    favorite = {
+        "id": next_id,
+        "title": str(track.get("title") or "Pista")[:160],
+        "url": url,
+        "creator": str(track.get("creator") or "")[:120],
+        "license": str(track.get("license") or "")[:100],
+        "source": str(track.get("source") or "")[:80],
+        "extension": str(track.get("extension") or ".mp3")[:8],
+        "expires": now + DJ_FAVORITES_TTL,
+    }
+    favorites.append(favorite)
+    DJ_FAVORITES[key] = favorites[-50:]
+    return True
 
 
 def list_dj_favorites(thread_id: str, uid: str, limit: int = 20) -> list[dict]:
-    with db_session() as db:
-        rows = db.execute(
-            """SELECT id,title,url,creator,license,source,extension
-               FROM dj_favorites WHERE thread_id=? AND uid=?
-               ORDER BY id DESC LIMIT ?""",
-            (str(thread_id), str(uid), max(1, min(50, int(limit))))
-        ).fetchall()
-        return [dict(row) for row in rows]
+    key = (str(thread_id), str(uid))
+    now = time.time()
+    favorites = [
+        item for item in DJ_FAVORITES.get(key, [])
+        if float(item.get("expires", 0)) > now
+    ]
+    DJ_FAVORITES[key] = favorites
+    return [dict(item) for item in reversed(favorites[-max(1, min(50, int(limit))):])]
 
 
 def delete_dj_favorite(thread_id: str, uid: str, favorite_id: int) -> bool:
-    with db_session() as db:
-        cursor = db.execute(
-            "DELETE FROM dj_favorites WHERE thread_id=? AND uid=? AND id=?",
-            (str(thread_id), str(uid), int(favorite_id))
-        )
-        return cursor.rowcount > 0
+    key = (str(thread_id), str(uid))
+    favorites = DJ_FAVORITES.get(key, [])
+    updated = [item for item in favorites if int(item.get("id", -1)) != int(favorite_id)]
+    DJ_FAVORITES[key] = updated
+    return len(updated) != len(favorites)
+
 
 def anti_spam_configuration(thread_id: str) -> dict:
     def bounded(key, default, minimum, maximum):
@@ -825,6 +816,9 @@ USER_SPAM_WARNED_UNTIL = {}
 DJ_MUSIC_DIR = Path(os.getenv("DJ_MUSIC_DIR", "music")).resolve()
 DJ_AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".oga", ".flac", ".m4a", ".aac", ".opus"}
 DJ_SEARCH_RESULTS: dict[str, dict] = {}
+DJ_FAVORITES: dict[tuple[str, str], list[dict]] = {}
+DJ_FAVORITES_TTL = 86400
+
 DJ_ARCHIVE_CACHE: dict[str, dict] = {}
 DJ_SOURCE_CACHE: dict[str, dict] = {}
 JAMENDO_CLIENT_ID = os.getenv("JAMENDO_CLIENT_ID", "").strip()
@@ -15056,33 +15050,11 @@ Uso: !enciclopedia <nombre>""",
         elif sub in ("agregar", "añadir"):
             playlist_name, sep, track_name = rest.partition("|")
             track_name = track_name.strip()
-            if not sep:
-                await send_message(thread, "Uso: !playlist agregar <nombre> | <archivo local o favorito:<id>>.", source, reply)
-                return
-            favorite_match = re.fullmatch(r"favorito:(\d+)", track_name, flags=re.I)
-            if favorite_match:
-                favorite_id = int(favorite_match.group(1))
-                favorite = next(
-                    (item for item in list_dj_favorites(thread, raw_uid, 50)
-                     if item["id"] == favorite_id),
-                    None
-                )
-                if not favorite:
-                    await send_message(thread, "No encontré ese favorito.", source, reply)
-                    return
-                added = add_dj_playlist_track(
-                    thread, playlist_name, favorite["title"], source=f"favorite:{favorite_id}"
-                )
-                display_track = favorite["title"]
-            else:
-                path = resolve_dj_track(track_name)
-                if not path:
-                    await send_message(thread, "No encuentro ese archivo en music/ ni ese favorito.", source, reply)
-                    return
-                added = add_dj_playlist_track(thread, playlist_name, track_name, source=str(path))
-                display_track = track_name
-            if added:
-                await send_message(thread, f"«{display_track}» añadida a «{playlist_name.strip()}».", source, reply)
+            path = resolve_dj_track(track_name)
+            if not sep or not path:
+                await send_message(thread, "Uso: !playlist agregar <nombre> | <archivo existente en music/>.", source, reply)
+            elif add_dj_playlist_track(thread, playlist_name, track_name):
+                await send_message(thread, f"«{track_name}» añadida a «{playlist_name.strip()}».", source, reply)
             else:
                 await send_message(thread, "No existe esa playlist. Créala primero.", source, reply)
         elif sub == "ver":
@@ -15100,40 +15072,18 @@ Uso: !enciclopedia <nombre>""",
                 await send_message(thread, "La playlist no existe o no contiene canciones.", source, reply)
                 return
             valid_tracks = []
-            favorite_owner = str(playlist.get("created_by") or raw_uid)
-            owner_favorites = {
-                item["id"]: item for item in list_dj_favorites(thread, favorite_owner, 50)
-            }
             for item in tracks:
-                source_value = str(item.get("source") or "")
-                favorite_match = re.fullmatch(r"favorite:(\d+)", source_value)
-                if favorite_match:
-                    favorite = owner_favorites.get(int(favorite_match.group(1)))
-                    if not favorite:
-                        continue
-                    metadata = {
-                        "title": favorite["title"], "creator": favorite["creator"],
-                        "license": favorite["license"], "source": favorite["source"],
-                        "extension": favorite["extension"], "url": favorite["url"]
-                    }
-                    valid_tracks.append((favorite["url"], metadata))
-                    continue
-                path = resolve_dj_track(source_value) or resolve_dj_track(item["title"])
+                path = resolve_dj_track(item["source"])
                 if path:
-                    valid_tracks.append((path, None))
+                    valid_tracks.append(path)
             if not valid_tracks:
-                await send_message(thread, "No quedan pistas válidas en esa playlist.", source, reply)
+                await send_message(thread, "No quedan archivos válidos de esa playlist en music/.", source, reply)
                 return
-            first_path, first_metadata = valid_tracks[0]
-            ok, message = await start_dj_room(
-                thread, first_path, False, track_metadata=first_metadata
-            )
+            ok, message = await start_dj_room(thread, valid_tracks[0], False)
             added = 0
             if ok:
-                for path, metadata in valid_tracks[1:]:
-                    queued_ok, _ = await start_dj_room(
-                        thread, path, False, track_metadata=metadata, enqueue=True
-                    )
+                for path in valid_tracks[1:]:
+                    queued_ok, _ = await start_dj_room(thread, path, False, enqueue=True)
                     if queued_ok:
                         added += 1
             await send_message(
