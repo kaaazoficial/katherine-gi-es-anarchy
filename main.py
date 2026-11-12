@@ -136,6 +136,57 @@ def init_db():
             amount INTEGER NOT NULL DEFAULT 0,
             updated_at REAL NOT NULL
         )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS saved_builds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT NOT NULL,
+            build_name TEXT NOT NULL,
+            character_name TEXT NOT NULL,
+            weapon_name TEXT NOT NULL DEFAULT '',
+            artifact_set TEXT NOT NULL DEFAULT '',
+            main_stats TEXT NOT NULL DEFAULT '',
+            notes TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL
+        )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS saved_teams (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT NOT NULL,
+            team_name TEXT NOT NULL,
+            members_json TEXT NOT NULL,
+            notes TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL,
+            UNIQUE(uid, team_name)
+        )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS farm_materials (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT NOT NULL,
+            item_name TEXT NOT NULL,
+            current_amount INTEGER NOT NULL DEFAULT 0,
+            target_amount INTEGER NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL,
+            UNIQUE(uid, item_name)
+        )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS exploration_progress (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT NOT NULL,
+            region_name TEXT NOT NULL,
+            percentage REAL NOT NULL DEFAULT 0,
+            chest_count INTEGER NOT NULL DEFAULT 0,
+            note TEXT NOT NULL DEFAULT '',
+            updated_at REAL NOT NULL,
+            UNIQUE(uid, region_name)
+        )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS genshin_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT NOT NULL,
+            note_title TEXT NOT NULL,
+            note_body TEXT NOT NULL,
+            updated_at REAL NOT NULL
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_saved_builds_uid ON saved_builds(uid,id DESC)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_saved_teams_uid ON saved_teams(uid,team_name)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_farm_materials_uid ON farm_materials(uid,item_name)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_exploration_uid ON exploration_progress(uid,region_name)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_genshin_notes_uid ON genshin_notes(uid,id DESC)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_gifts_target ON gifts(target_uid, id DESC)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_users_points ON users(points DESC)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_users_activity ON users(message_count DESC)")
@@ -1403,6 +1454,229 @@ def parse_percent(value: str) -> float:
     return float(str(value).replace("%", "").replace(",", "."))
 
 
+# ---------------------------------------------------------------------------
+# SISTEMAS PERSONALES PERSISTENTES DE GENSHIN
+# ---------------------------------------------------------------------------
+def save_build_record(uid, build_name, character_name, weapon_name="", artifact_set="", main_stats="", notes=""):
+    with db_session() as db:
+        cursor = db.execute(
+            """INSERT INTO saved_builds(
+                uid,build_name,character_name,weapon_name,artifact_set,
+                main_stats,notes,created_at
+            ) VALUES(?,?,?,?,?,?,?,?)""",
+            (uid, build_name[:50], character_name[:80], weapon_name[:100],
+             artifact_set[:120], main_stats[:180], notes[:500], time.time())
+        )
+        return int(cursor.lastrowid)
+
+
+def list_build_records(uid, character_name=None, limit=20):
+    query = "SELECT * FROM saved_builds WHERE uid=?"
+    params = [uid]
+    if character_name:
+        query += " AND lower(character_name)=lower(?)"
+        params.append(character_name)
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(max(1, min(50, int(limit))))
+    with db_session() as db:
+        return [dict(row) for row in db.execute(query, tuple(params)).fetchall()]
+
+
+def get_build_record(uid, record_id):
+    with db_session() as db:
+        row = db.execute(
+            "SELECT * FROM saved_builds WHERE uid=? AND id=?",
+            (uid, int(record_id))
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def delete_build_record(uid, record_id):
+    with db_session() as db:
+        cursor = db.execute(
+            "DELETE FROM saved_builds WHERE uid=? AND id=?",
+            (uid, int(record_id))
+        )
+        return cursor.rowcount > 0
+
+
+def save_team_record(uid, name, members, notes=""):
+    safe_members = [str(value).strip()[:80] for value in members if str(value).strip()]
+    if not 1 <= len(safe_members) <= 4:
+        raise ValueError("Un equipo debe tener entre 1 y 4 personajes.")
+    with db_session() as db:
+        db.execute(
+            """INSERT INTO saved_teams(uid,team_name,members_json,notes,created_at)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(uid,team_name) DO UPDATE SET
+               members_json=excluded.members_json,
+               notes=excluded.notes,
+               created_at=excluded.created_at""",
+            (uid, name.strip()[:50], json.dumps(safe_members, ensure_ascii=False),
+             notes[:300], time.time())
+        )
+    return safe_members
+
+
+def list_team_records(uid):
+    with db_session() as db:
+        return [dict(row) for row in db.execute(
+            "SELECT * FROM saved_teams WHERE uid=? ORDER BY team_name COLLATE NOCASE",
+            (uid,)
+        ).fetchall()]
+
+
+def get_team_record(uid, name):
+    with db_session() as db:
+        row = db.execute(
+            "SELECT * FROM saved_teams WHERE uid=? AND lower(team_name)=lower(?)",
+            (uid, name)
+        ).fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        try:
+            data["members"] = json.loads(data.pop("members_json"))
+        except (ValueError, TypeError):
+            data["members"] = []
+        return data
+
+
+def delete_team_record(uid, name):
+    with db_session() as db:
+        cursor = db.execute(
+            "DELETE FROM saved_teams WHERE uid=? AND lower(team_name)=lower(?)",
+            (uid, name)
+        )
+        return cursor.rowcount > 0
+
+
+def upsert_farm_material(uid, item_name, current, target):
+    if not item_name.strip():
+        raise ValueError("El material necesita un nombre.")
+    if not 0 <= current <= 10_000_000 or not 1 <= target <= 10_000_000:
+        raise ValueError("Las cantidades deben ser positivas y razonables.")
+    with db_session() as db:
+        db.execute(
+            """INSERT INTO farm_materials(uid,item_name,current_amount,target_amount,updated_at)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(uid,item_name) DO UPDATE SET
+               current_amount=excluded.current_amount,
+               target_amount=excluded.target_amount,
+               updated_at=excluded.updated_at""",
+            (uid, item_name.strip()[:100], current, target, time.time())
+        )
+
+
+def adjust_farm_material(uid, item_name, delta):
+    with db_session() as db:
+        row = db.execute(
+            """SELECT current_amount,target_amount FROM farm_materials
+               WHERE uid=? AND lower(item_name)=lower(?)""",
+            (uid, item_name)
+        ).fetchone()
+        if not row:
+            return None
+        current = max(0, int(row["current_amount"]) + int(delta))
+        db.execute(
+            """UPDATE farm_materials SET current_amount=?,updated_at=?
+               WHERE uid=? AND lower(item_name)=lower(?)""",
+            (current, time.time(), uid, item_name)
+        )
+        return current, int(row["target_amount"])
+
+
+def list_farm_materials(uid):
+    with db_session() as db:
+        return [dict(row) for row in db.execute(
+            """SELECT item_name,current_amount,target_amount,updated_at
+               FROM farm_materials WHERE uid=?
+               ORDER BY (target_amount-current_amount) DESC,item_name COLLATE NOCASE""",
+            (uid,)
+        ).fetchall()]
+
+
+def delete_farm_material(uid, item_name):
+    with db_session() as db:
+        cursor = db.execute(
+            "DELETE FROM farm_materials WHERE uid=? AND lower(item_name)=lower(?)",
+            (uid, item_name)
+        )
+        return cursor.rowcount > 0
+
+
+def upsert_exploration(uid, region, percentage, chests=0, note=""):
+    if not 0 <= percentage <= 100:
+        raise ValueError("La exploración debe estar entre 0 y 100.")
+    if not 0 <= chests <= 100_000:
+        raise ValueError("La cantidad de cofres no es válida.")
+    with db_session() as db:
+        db.execute(
+            """INSERT INTO exploration_progress(
+                uid,region_name,percentage,chest_count,note,updated_at
+            ) VALUES(?,?,?,?,?,?)
+            ON CONFLICT(uid,region_name) DO UPDATE SET
+            percentage=excluded.percentage,
+            chest_count=excluded.chest_count,
+            note=excluded.note,
+            updated_at=excluded.updated_at""",
+            (uid, region[:80], percentage, chests, note[:300], time.time())
+        )
+
+
+def list_exploration(uid):
+    with db_session() as db:
+        return [dict(row) for row in db.execute(
+            """SELECT region_name,percentage,chest_count,note,updated_at
+               FROM exploration_progress WHERE uid=?
+               ORDER BY percentage ASC,region_name COLLATE NOCASE""",
+            (uid,)
+        ).fetchall()]
+
+
+def save_genshin_note(uid, title, body):
+    with db_session() as db:
+        cursor = db.execute(
+            """INSERT INTO genshin_notes(uid,note_title,note_body,updated_at)
+               VALUES(?,?,?,?)""",
+            (uid, title[:80], body[:1500], time.time())
+        )
+        return int(cursor.lastrowid)
+
+
+def list_genshin_notes(uid, limit=20):
+    with db_session() as db:
+        return [dict(row) for row in db.execute(
+            """SELECT id,note_title,note_body,updated_at
+               FROM genshin_notes WHERE uid=? ORDER BY id DESC LIMIT ?""",
+            (uid, max(1, min(50, int(limit))))
+        ).fetchall()]
+
+
+def delete_genshin_note(uid, note_id):
+    with db_session() as db:
+        cursor = db.execute(
+            "DELETE FROM genshin_notes WHERE uid=? AND id=?",
+            (uid, int(note_id))
+        )
+        return cursor.rowcount > 0
+
+
+def build_database_summary(uid):
+    return {
+        "builds": len(list_build_records(uid, limit=50)),
+        "teams": len(list_team_records(uid)),
+        "farm_items": len(list_farm_materials(uid)),
+        "exploration_regions": len(list_exploration(uid)),
+        "notes": len(list_genshin_notes(uid, limit=50))
+    }
+
+
+# ---------------------------------------------------------------------------
+# FIN DE LOS SISTEMAS PERSONALES DE GENSHIN
+# ---------------------------------------------------------------------------
+
+
 def target_from_message(msg, args, scope_key: str | None = None):
     mentions = msg.get("mentions") or []
 
@@ -1746,6 +2020,24 @@ async def handle_command(event: dict, source: str):
             f"{PREFIX}reacciones <elemento> — muestra reacciones relacionadas con un elemento.",
             f"{PREFIX}tcgdescifrar <código> — convierte un código compartido del TCG en IDs de cartas.",
             f"{PREFIX}tcgcodificar <IDs separados por coma> — genera un código compartible del TCG.",
+            f"{PREFIX}buildguardar nombre | personaje | arma | set | nota — guarda una build personal.",
+            f"{PREFIX}misbuilds [personaje] — lista tus builds guardadas.",
+            f"{PREFIX}buildlocal <id> — muestra una build guardada.",
+            f"{PREFIX}buildborrar <id> — elimina una build tuya.",
+            f"{PREFIX}equipo guardar/ver/borrar — administra equipos personales.",
+            f"{PREFIX}equiposguardados — lista tus equipos guardados.",
+            f"{PREFIX}farmmeta material | actual | objetivo — registra materiales por conseguir.",
+            f"{PREFIX}farmlista — muestra tu lista de materiales pendientes.",
+            f"{PREFIX}farmprogreso material cantidad — actualiza tu inventario.",
+            f"{PREFIX}farmquitar material — elimina un material de tu lista.",
+            f"{PREFIX}exploracion región | porcentaje | cofres — guarda progreso de exploración.",
+            f"{PREFIX}mapaprogreso — muestra el progreso de tus regiones.",
+            f"{PREFIX}notagenshin título | texto — guarda una nota personal.",
+            f"{PREFIX}misnotas / {PREFIX}borrarnota id — consulta o elimina notas.",
+            f"{PREFIX}resumengen — resume tus datos guardados de Genshin.",
+            f"{PREFIX}carpetasdb — consulta las carpetas de Genshin-DB.",
+            f"{PREFIX}categoriasdb [carpeta] — consulta categorías de la API.",
+            f"{PREFIX}consulta carpeta nombre — consulta cualquier carpeta válida de Genshin-DB.",
             f"{PREFIX}buscargenshin <texto> — busca a la vez en varias categorías del juego.",
             f"{PREFIX}lista <categoría> [página] — lista nombres de personajes, armas, enemigos y más.",
             f"{PREFIX}statsarma <arma> — estadísticas del arma al nivel 90.",
@@ -3534,6 +3826,323 @@ async def handle_command(event: dict, source: str):
                 source,
                 reply
             )
+        return
+
+    # -----------------------------------------------------------------------
+    # BUILDS PERSONALES
+    # -----------------------------------------------------------------------
+    if command == "!buildguardar":
+        parts = [value.strip() for value in query.split("|")]
+        if len(parts) < 2 or not parts[0] or not parts[1]:
+            await send_message(thread, f"Uso: {PREFIX}buildguardar nombre | personaje | arma | set | nota", source, reply)
+            return
+        parts = (parts + ["", "", ""])[:5]
+        try:
+            record_id = save_build_record(uid, parts[0], parts[1], parts[2], parts[3], "", parts[4])
+            await send_message(
+                thread,
+                f"BUILD GUARDADA · #{record_id}\nNombre: {parts[0]}\nPersonaje: {parts[1]}\n"
+                f"Arma: {parts[2] or 'No registrada'}\nSet: {parts[3] or 'No registrado'}\n"
+                f"Notas: {parts[4] or 'Sin notas'}",
+                source,
+                reply
+            )
+        except Exception as exc:
+            logging.exception("Error guardando build")
+            await send_message(thread, f"No pude guardar la build: {clean_text(exc)}", source, reply)
+        return
+
+    if command == "!misbuilds":
+        records = list_build_records(uid, query or None)
+        if not records:
+            await send_message(thread, "No tienes builds guardadas. Usa !buildguardar nombre | personaje | arma | set | nota.", source, reply)
+            return
+        lines = ["TUS BUILDS GUARDADAS"]
+        for row in records:
+            lines.append(f"#{row['id']} · {row['build_name']} — {row['character_name']} · {row['weapon_name'] or 'Sin arma'}")
+        await send_message(thread, "\n".join(lines), source, reply)
+        return
+
+    if command == "!buildlocal":
+        try:
+            record_id = int(args[0]) if args else 0
+        except ValueError:
+            record_id = 0
+        row = get_build_record(uid, record_id)
+        if not row:
+            await send_message(thread, "No encontré esa build en tus registros.", source, reply)
+            return
+        await send_message(
+            thread,
+            f"BUILD PERSONAL #{row['id']} — {row['build_name']}\n"
+            f"Personaje: {row['character_name']}\nArma: {row['weapon_name'] or 'No registrada'}\n"
+            f"Set: {row['artifact_set'] or 'No registrado'}\nNotas: {row['notes'] or 'Sin notas'}",
+            source,
+            reply
+        )
+        return
+
+    if command == "!buildborrar":
+        try:
+            record_id = int(args[0]) if args else 0
+        except ValueError:
+            record_id = 0
+        deleted = delete_build_record(uid, record_id)
+        await send_message(thread, "Build eliminada." if deleted else "No encontré una build tuya con ese ID.", source, reply)
+        return
+
+    # -----------------------------------------------------------------------
+    # EQUIPOS PERSONALES
+    # -----------------------------------------------------------------------
+    if command == "!equipo":
+        parts = [part.strip() for part in query.split("|")]
+        if not parts:
+            await send_message(thread, f"Uso: {PREFIX}equipo guardar/ver/borrar ...", source, reply)
+            return
+        action = parts[0].casefold()
+        if action == "guardar":
+            if len(parts) < 3 or not parts[1] or not parts[2]:
+                await send_message(thread, f"Uso: {PREFIX}equipo guardar nombre | Cyno, Nahida, Baizhu, Fischl | nota", source, reply)
+                return
+            members = [value.strip() for value in re.split(r"[,;/]", parts[2]) if value.strip()]
+            note = parts[3] if len(parts) > 3 else ""
+            try:
+                saved = save_team_record(uid, parts[1], members, note)
+                await send_message(
+                    thread,
+                    f"EQUIPO GUARDADO — {parts[1]}\n"
+                    + "\n".join(f"{i}. {name}" for i, name in enumerate(saved, 1))
+                    + (f"\nNota: {note}" if note else ""),
+                    source,
+                    reply
+                )
+            except ValueError as exc:
+                await send_message(thread, str(exc), source, reply)
+            return
+        if action == "ver":
+            name = "|".join(parts[1:]).strip()
+            team = get_team_record(uid, name)
+            if not team:
+                await send_message(thread, "No encontré ese equipo guardado.", source, reply)
+                return
+            await send_message(
+                thread,
+                f"EQUIPO — {team['team_name']}\n"
+                + "\n".join(f"{i}. {name}" for i, name in enumerate(team["members"], 1))
+                + (f"\nNotas: {team['notes']}" if team["notes"] else ""),
+                source,
+                reply
+            )
+            return
+        if action == "borrar":
+            name = "|".join(parts[1:]).strip()
+            deleted = delete_team_record(uid, name) if name else False
+            await send_message(thread, "Equipo eliminado." if deleted else "No encontré ese equipo.", source, reply)
+            return
+        await send_message(thread, f"Acciones: {PREFIX}equipo guardar, ver o borrar.", source, reply)
+        return
+
+    if command == "!equiposguardados":
+        teams = list_team_records(uid)
+        if not teams:
+            await send_message(thread, "No tienes equipos guardados. Usa !equipo guardar.", source, reply)
+            return
+        await send_message(thread, "TUS EQUIPOS\n" + "\n".join(f"• {row['team_name']}" for row in teams), source, reply)
+        return
+
+    # -----------------------------------------------------------------------
+    # PLANIFICACIÓN DE MATERIALES
+    # -----------------------------------------------------------------------
+    if command == "!farmmeta":
+        parts = [part.strip() for part in query.split("|")]
+        if len(parts) != 3:
+            await send_message(thread, f"Uso: {PREFIX}farmmeta Material | cantidad actual | objetivo", source, reply)
+            return
+        try:
+            current, target = int(parts[1]), int(parts[2])
+            upsert_farm_material(uid, parts[0], current, target)
+            await send_message(
+                thread,
+                f"MATERIAL REGISTRADO — {parts[0]}\nActual: {current}\nObjetivo: {target}\nPendiente: {max(0, target-current)}",
+                source,
+                reply
+            )
+        except ValueError as exc:
+            await send_message(thread, f"Datos no válidos: {exc}", source, reply)
+        return
+
+    if command == "!farmlista":
+        records = list_farm_materials(uid)
+        if not records:
+            await send_message(thread, "Tu lista de farmeo está vacía.", source, reply)
+            return
+        lines = ["MATERIALES POR CONSEGUIR"]
+        for row in records:
+            remaining = max(0, row["target_amount"] - row["current_amount"])
+            progress = min(100, row["current_amount"] / max(1, row["target_amount"]) * 100)
+            lines.append(f"{row['item_name']}: {row['current_amount']}/{row['target_amount']} ({progress:.1f}%) · faltan {remaining}")
+        await send_message(thread, "\n".join(lines), source, reply)
+        return
+
+    if command == "!farmprogreso":
+        if len(args) < 2:
+            await send_message(thread, f"Uso: {PREFIX}farmprogreso nombre del material cantidad (+/-)", source, reply)
+            return
+        item_name = " ".join(args[:-1])
+        try:
+            amount = int(args[-1])
+        except ValueError:
+            await send_message(thread, "La cantidad debe ser un número entero.", source, reply)
+            return
+        result = adjust_farm_material(uid, item_name, amount)
+        if result is None:
+            await send_message(thread, "Ese material no está en tu lista.", source, reply)
+            return
+        current, target = result
+        await send_message(thread, f"{item_name}: {current}/{target}. Pendiente: {max(0, target-current)}.", source, reply)
+        return
+
+    if command == "!farmquitar":
+        deleted = delete_farm_material(uid, query)
+        await send_message(thread, "Material eliminado." if deleted else "No encontré ese material.", source, reply)
+        return
+
+    # -----------------------------------------------------------------------
+    # PROGRESO DE EXPLORACIÓN
+    # -----------------------------------------------------------------------
+    if command == "!exploracion":
+        parts = [part.strip() for part in query.split("|")]
+        if len(parts) < 2:
+            await send_message(thread, f"Uso: {PREFIX}exploracion Fontaine | 83.5 | 120 | nota", source, reply)
+            return
+        try:
+            percentage = float(parts[1].replace(",", ".").replace("%", ""))
+            chests = int(parts[2]) if len(parts) > 2 and parts[2] else 0
+            note = parts[3] if len(parts) > 3 else ""
+            upsert_exploration(uid, parts[0], percentage, chests, note)
+            await send_message(thread, f"EXPLORACIÓN ACTUALIZADA — {parts[0]}\nProgreso: {percentage:.1f}%\nCofres registrados: {chests}", source, reply)
+        except ValueError as exc:
+            await send_message(thread, f"Datos no válidos: {exc}", source, reply)
+        return
+
+    if command == "!mapaprogreso":
+        regions = list_exploration(uid)
+        if not regions:
+            await send_message(thread, "Todavía no registras regiones. Usa !exploracion Región | porcentaje | cofres.", source, reply)
+            return
+        average = sum(row["percentage"] for row in regions) / len(regions)
+        lines = ["PROGRESO DE EXPLORACIÓN"]
+        for row in regions:
+            filled = round(row["percentage"] / 10)
+            bar = "■" * filled + "□" * (10 - filled)
+            lines.append(f"{row['region_name']}: {bar} {row['percentage']:.1f}% · {row['chest_count']} cofres")
+            if row["note"]:
+                lines.append("  Nota: " + row["note"])
+        lines.append(f"\nPromedio de las regiones registradas: {average:.1f}%")
+        await send_message(thread, "\n".join(lines), source, reply)
+        return
+
+    # -----------------------------------------------------------------------
+    # NOTAS PERSONALES DE GENSHIN
+    # -----------------------------------------------------------------------
+    if command == "!notagenshin":
+        parts = [part.strip() for part in query.split("|", 1)]
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            await send_message(thread, f"Uso: {PREFIX}notagenshin título | texto", source, reply)
+            return
+        note_id = save_genshin_note(uid, parts[0], parts[1])
+        await send_message(thread, f"Nota guardada con ID #{note_id}.", source, reply)
+        return
+
+    if command == "!misnotas":
+        notes = list_genshin_notes(uid)
+        if not notes:
+            await send_message(thread, "No tienes notas guardadas.", source, reply)
+            return
+        lines = ["TUS NOTAS DE GENSHIN"]
+        for note in notes:
+            lines.append(f"#{note['id']} · {note['note_title']}: {game_excerpt(note['note_body'], 180)}")
+        await send_message(thread, "\n".join(lines), source, reply)
+        return
+
+    if command == "!borrarnota":
+        try:
+            note_id = int(args[0]) if args else 0
+        except ValueError:
+            note_id = 0
+        deleted = delete_genshin_note(uid, note_id)
+        await send_message(thread, "Nota eliminada." if deleted else "No encontré una nota tuya con ese ID.", source, reply)
+        return
+
+    if command == "!resumengen":
+        summary = build_database_summary(uid)
+        await send_message(
+            thread,
+            "RESUMEN DE TUS DATOS DE GENSHIN\n"
+            f"Builds: {summary['builds']}\nEquipos: {summary['teams']}\n"
+            f"Materiales en seguimiento: {summary['farm_items']}\n"
+            f"Regiones: {summary['exploration_regions']}\nNotas: {summary['notes']}\n"
+            "Los registros son privados y se guardan en este chat.",
+            source,
+            reply
+        )
+        return
+
+    # -----------------------------------------------------------------------
+    # EXPLORADOR DINÁMICO DE GENSHIN-DB
+    # -----------------------------------------------------------------------
+    if command == "!carpetasdb":
+        try:
+            response = await external_request("GET", f"{GAME_API}/folders", timeout=15)
+            response.raise_for_status()
+            payload = response.json()
+            folders = payload.get("result", payload) if isinstance(payload, dict) else payload
+            if isinstance(folders, dict):
+                folders = list(folders.keys())
+            if not isinstance(folders, list):
+                folders = []
+            answer = "CARPETAS DE GENSHIN-DB\n" + ("\n".join(f"• {value}" for value in folders[:120]) if folders else "La API no devolvió carpetas.")
+        except Exception as exc:
+            logging.warning("Genshin DB folders: %s", exc)
+            answer = "No pude consultar las carpetas de Genshin-DB."
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!categoriasdb":
+        folder = args[0].strip() if args else ""
+        params = {"resultLanguage": "spanish"}
+        if folder:
+            params["folder"] = folder
+        try:
+            response = await external_request("GET", f"{GAME_API}/categories", params=params, timeout=15)
+            response.raise_for_status()
+            payload = response.json()
+            data = payload.get(folder, payload.get("result", payload)) if isinstance(payload, dict) and folder else payload
+            if isinstance(data, dict):
+                lines = [f"CATEGORÍAS — {folder or 'GENSHIN-DB'}"]
+                for name, values in list(data.items())[:50]:
+                    if isinstance(values, list):
+                        lines.append(f"{name}: " + ", ".join(clean_game_text(value) for value in values[:12]))
+                answer = "\n".join(lines)
+            else:
+                answer = clean_game_text(data) or "No hay categorías disponibles."
+        except Exception as exc:
+            logging.warning("Genshin DB categories: %s", exc)
+            answer = "No pude consultar las categorías de la API."
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!consulta":
+        if len(args) < 2:
+            await send_message(thread, f"Uso: {PREFIX}consulta carpeta nombre", source, reply)
+            return
+        folder = args[0].casefold()
+        search_query = " ".join(args[1:]).strip()
+        if not re.fullmatch(r"[a-z0-9_]{2,40}", folder):
+            await send_message(thread, "El nombre de carpeta no es válido.", source, reply)
+            return
+        data = await game_data(folder, search_query)
+        await send_message(thread, describe_game(data, search_query, folder), source, reply)
         return
 
     if command == "!buscargenshin":
