@@ -1418,17 +1418,17 @@ def sanitize_chat_text(content: Any) -> str:
 
     # Keep the human-readable label of Markdown links and images.
     text = re.sub(
-        r"(?is)!?\\[([^\\]\\n]*)\\]\\(\\s*(?:<[^>]*>|[^)]*)\\s*\\)",
-        r"\\1",
+        r"(?is)!?\[([^\]\n]*)\]\(\s*(?:<[^>]*>|[^)]*)\s*\)",
+        r"\1",
         text,
     )
 
     # Keep anchor text, but discard the HTML link wrapper and destination.
-    text = re.sub(r"(?is)<a\\b[^>]*>(.*?)</a>", r"\\1", text)
+    text = re.sub(r"(?is)<a\b[^>]*>(.*?)</a>", r"\\1", text)
 
     # Remove Markdown reference definitions that would otherwise leave links.
     text = re.sub(
-        r"(?im)^\\s*\\[[^]\\n]+\\]:\\s*(?:https?://|www\\.)\\S+.*$",
+        r"(?im)^\s*\[[^]\n]+\]:\s*(?:https?://|www\.)\S+.*$",
         "",
         text,
     )
@@ -1463,10 +1463,10 @@ def sanitize_chat_text(content: Any) -> str:
     text = CHAT_BARE_DOMAIN_RE.sub(strip_bare_domain, text)
 
     # Remove link-only wrappers left after a URL was stripped.
-    text = re.sub(r"\\(\\s*\\)|\\[\\s*\\]", "", text)
-    text = re.sub(r"[ \\t]{2,}", " ", text)
-    text = re.sub(r" *([,.;:!?])", r"\\1", text)
-    text = re.sub(r"\\n[ \\t]*\\n(?:[ \\t]*\\n)+", "\\n\\n", text)
+    text = re.sub(r"\(\s*\)|\[\s*\]", "", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r" *([,.;:!?])", r"\1", text)
+    text = re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", text)
     return text.strip()
 
 
