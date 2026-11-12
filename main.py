@@ -42,6 +42,7 @@ except Exception as exc:
     TTS_IMPORT_ERROR = str(exc)
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from collections import defaultdict, deque
 from typing import Any
@@ -63,9 +64,14 @@ from katherine_astra import (
     is_recoverable_dj_failure,
     resolve_music_mood,
 )
-from katherine_ai import KatherineAI, is_bot_author, validate_ai_tool_call
+from katherine_ai import (
+    KatherineAI, build_ai_session_key, is_bot_author, validate_ai_tool_call
+)
 
 AI_CORE = KatherineAI()
+AI_TOOL_OUTPUT_CAPTURE: ContextVar[list[str] | None] = ContextVar(
+    "katherine_ai_tool_output_capture", default=None
+)
 
 # ---------------------------------------------------------------------------
 # CONFIGURACION
@@ -1602,6 +1608,17 @@ async def send_message(
         return None
 
     content = sanitize_chat_text(content)
+    capture = AI_TOOL_OUTPUT_CAPTURE.get()
+    if capture is not None and content:
+        normalized_capture = content.strip()
+        is_progress = (
+            normalized_capture.endswith("…")
+            or normalized_capture.lower().startswith(
+                ("preparando ", "buscando ", "procesando ")
+            )
+        )
+        if normalized_capture and not is_progress and len(capture) < 8:
+            capture.append(normalized_capture[:2000])
     parts = split_message_content(content, 2000)
     if not parts:
         return None
@@ -12453,6 +12470,28 @@ async def send_admin_panel(
         await send_message(thread_id, "\n".join(lines), source, reply_id)
 
 
+async def execute_ai_tool(
+    event: dict, source: str, session_key: str, invocation: str
+) -> None:
+    """Run an approved existing command and save its visible result to AI context."""
+    message = event.get("message") or {}
+    routed_event = dict(event)
+    routed_message = dict(message)
+    routed_message["content"] = f"{PREFIX}{invocation}"
+    routed_event["message"] = routed_message
+
+    captured: list[str] = []
+    token = AI_TOOL_OUTPUT_CAPTURE.set(captured)
+    try:
+        await handle_command(routed_event, source)
+    finally:
+        AI_TOOL_OUTPUT_CAPTURE.reset(token)
+
+    AI_CORE.remember_tool_result(
+        session_key, invocation, "\n".join(captured)[:1500]
+    )
+
+
 async def handle_command(event: dict, source: str):
     global LAST_EVENT_AT, LAST_COMMAND_AT, LAST_COMMAND_NAME, LAST_COMMAND_USER
     LAST_EVENT_AT = time.time()
@@ -12541,31 +12580,31 @@ async def handle_command(event: dict, source: str):
         request_text = query.strip()
         if request_text and await maybe_send_auto_reply(thread, raw_uid, nickname, request_text):
             return
-        session_key = f"{source}:{thread}:{raw_uid}"
+        session_key = build_ai_session_key(source, thread, author, message_id)
         ai_result = await AI_CORE.assist(request_text, session_key, external_request)
         fallback_command = str(event.get("_nexus_fallback_command") or "").strip()
-        fallback_error = str(ai_result.get("answer") or "").startswith((
-            "No pude conectar con el servicio de IA.",
-            "No pude completar la consulta de IA.",
-        ))
-        if fallback_command and not fallback_command.startswith("asistente ") and fallback_error:
-            routed_event = dict(event)
-            routed_message = dict(msg)
-            routed_message["content"] = f"{PREFIX}{fallback_command}"
-            routed_event["message"] = routed_message
-            logging.warning("[NEXUS] IA no disponible; se usa la ruta determinista.")
-            await handle_command(routed_event, source)
+        has_deterministic_fallback = bool(
+            fallback_command and not fallback_command.startswith("asistente ")
+        )
+        if has_deterministic_fallback and ai_result.get("kind") != "command":
+            logging.warning(
+                "[NEXUS] IA sin herramienta válida; se ejecuta la ruta determinista."
+            )
+            await execute_ai_tool(event, source, session_key, fallback_command)
             return
         if ai_result.get("kind") == "command":
-            invocation = validate_ai_tool_call(ai_result.get("command", ""), ai_result.get("args", ""))
+            invocation = validate_ai_tool_call(
+                ai_result.get("command", ""), ai_result.get("args", "")
+            )
             if invocation:
-                AI_CORE.remember_tool_action(session_key, invocation)
-                routed_event = dict(event)
-                routed_message = dict(msg)
-                routed_message["content"] = f"{PREFIX}{invocation}"
-                routed_event["message"] = routed_message
                 logging.info("[AI] Herramienta permitida: %s", invocation.split()[0])
-                await handle_command(routed_event, source)
+                await execute_ai_tool(event, source, session_key, invocation)
+                return
+            if has_deterministic_fallback:
+                logging.warning(
+                    "[NEXUS] Herramienta propuesta no válida; se usa la ruta determinista."
+                )
+                await execute_ai_tool(event, source, session_key, fallback_command)
                 return
         await send_message(thread, ai_result.get("answer") or "No pude completar tu solicitud.", source, reply)
         return
@@ -12573,7 +12612,7 @@ async def handle_command(event: dict, source: str):
     if command == "!ia":
         sub = args[0].casefold() if args else "ayuda"
         rest = " ".join(args[1:]).strip()
-        session_key = f"{source}:{thread}:{raw_uid}"
+        session_key = build_ai_session_key(source, thread, author, message_id)
         if sub in ("ayuda", "help"):
             await send_message(thread,
                 "ASTRA INTELLIGENCE\n!ia estado / probar / olvidar / preguntar <consulta> / genshin <consulta>\n"
@@ -12620,12 +12659,7 @@ async def handle_command(event: dict, source: str):
             if result.get("kind") == "command":
                 invocation = validate_ai_tool_call(result.get("command", ""), result.get("args", ""))
                 if invocation:
-                    AI_CORE.remember_tool_action(session_key, invocation)
-                    routed_event = dict(event)
-                    routed_message = dict(msg)
-                    routed_message["content"] = f"{PREFIX}{invocation}"
-                    routed_event["message"] = routed_message
-                    await handle_command(routed_event, source)
+                    await execute_ai_tool(event, source, session_key, invocation)
                     return
             await send_message(thread, result.get("answer") or "No pude responder.", source, reply)
             return
@@ -12638,12 +12672,7 @@ async def handle_command(event: dict, source: str):
                 invocation = validate_ai_tool_call("dj", f"buscar {optimized}")
                 if not invocation:
                     raise ValueError("Búsqueda no válida")
-                AI_CORE.remember_tool_action(session_key, invocation)
-                routed_event = dict(event)
-                routed_message = dict(msg)
-                routed_message["content"] = f"{PREFIX}{invocation}"
-                routed_event["message"] = routed_message
-                await handle_command(routed_event, source)
+                await execute_ai_tool(event, source, session_key, invocation)
             except Exception:
                 logging.exception("[AI] Error optimizando consulta musical")
                 await send_message(thread, "No pude optimizar la búsqueda. Prueba !dj buscar <tema>.", source, reply)
@@ -12689,9 +12718,11 @@ async def handle_command(event: dict, source: str):
                     "AVISO · AI CHAT ANALYST ACTIVADO\n"
                     "Desde este momento, Katherine recopilará temporalmente los mensajes nuevos "
                     "de esta sala para generar resúmenes solicitados por un administrador. "
-                    "El contenido se mantiene solo en memoria del proceso, hasta una hora "
-                    "y máximo 200 mensajes; no se consulta el historial anterior. "
-                    "Un administrador puede detenerlo con !ia analista desactivar.",
+                    "El buffer se mantiene en memoria del proceso hasta una hora y máximo 200 "
+                    "mensajes; no se consulta el historial anterior. Al pedir un resumen, los "
+                    "mensajes seleccionados se envían al proveedor IA configurado (Groq/OpenAI) "
+                    "para procesarlos. Activa esta función solo si la sala está informada y de "
+                    "acuerdo. Un administrador puede detenerlo con !ia analista desactivar.",
                     source, reply
                 )
                 return
