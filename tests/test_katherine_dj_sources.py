@@ -72,3 +72,30 @@ def test_music_catalog_raises_only_when_every_source_fails(monkeypatch):
         assert "Todos los catálogos" in str(exc)
     else:
         raise AssertionError("Se esperaba un error si todos los catálogos fallan")
+
+def test_archive_download_uses_direct_storage_server_when_available():
+    url = katherine.archive_audio_download_url(
+        "sample_item",
+        "track name.mp3",
+        {"d1": "ia601500.us.archive.org", "dir": "/14/items/sample_item"},
+    )
+    assert url == (
+        "https://ia601500.us.archive.org/14/items/sample_item/track%20name.mp3"
+    )
+
+
+def test_archive_download_falls_back_to_canonical_download_url():
+    url = katherine.archive_audio_download_url(
+        "sample_item", "track.mp3", {}
+    )
+    assert url == "https://archive.org/download/sample_item/track.mp3"
+
+
+def test_archive_download_rejects_untrusted_storage_host():
+    url = katherine.archive_audio_download_url(
+        "sample_item",
+        "track.mp3",
+        {"d1": "evil.example", "dir": "/14/items/sample_item"},
+    )
+    assert url == "https://archive.org/download/sample_item/track.mp3"
+
