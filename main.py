@@ -8240,7 +8240,17 @@ async def handle_command(event: dict, source: str):
             sections.append(f"PRIORIDAD DE TALENTOS\n{priority[0]}\nMotivo: {priority[1]}")
 
         talent_lines = ["HABILIDADES Y PASIVAS"]
-        for index, entry in enumerate(character.get("skillTalents") or character.get("talents") or [], 1):
+        skill_entries = character.get("skillTalents") or character.get("talents") or []
+        passive_entries = character.get("passiveTalents") or []
+        if isinstance(skill_entries, dict):
+            skill_entries = list(skill_entries.values())
+        if isinstance(passive_entries, dict):
+            passive_entries = list(passive_entries.values())
+        if not isinstance(skill_entries, list):
+            skill_entries = []
+        if not isinstance(passive_entries, list):
+            passive_entries = []
+        for index, entry in enumerate(skill_entries, 1):
             if not isinstance(entry, dict):
                 continue
             title = clean_game_text(entry.get("name") or entry.get("unlock") or f"Habilidad {index}")
@@ -8248,7 +8258,7 @@ async def handle_command(event: dict, source: str):
             talent_lines.append(f"{index}. {title}")
             if desc:
                 talent_lines.append(game_excerpt(desc, 300))
-        for index, entry in enumerate(character.get("passiveTalents") or [], 1):
+        for index, entry in enumerate(passive_entries, 1):
             if not isinstance(entry, dict):
                 continue
             title = clean_game_text(entry.get("name") or f"Pasiva {index}")
@@ -8260,13 +8270,24 @@ async def handle_command(event: dict, source: str):
             sections.append("\n".join(talent_lines))
 
         constellation = CONSTELLATION_GUIDES.get(key)
+        constellation_lines = ["CONSTELACIONES Y PRIORIDAD"]
         if constellation:
-            sections.append(
-                f"CONSTELACIONES RECOMENDADAS\n{constellation[0]}\n{constellation[1]}\n"
-                "C0 es un punto de partida válido; las constelaciones son opcionales."
-            )
+            constellation_lines.extend([f"Recomendación: {constellation[0]}", constellation[1]])
         else:
-            sections.append("CONSTELACIONES\nC0 es un punto de partida válido. No son obligatorias para completar contenido.")
+            constellation_lines.append("C0 es un punto de partida válido; no necesitas constelaciones para usar al personaje.")
+        constellation_data = character.get("constellations") or character.get("Constellations") or []
+        if isinstance(constellation_data, dict):
+            constellation_data = list(constellation_data.values())
+        if isinstance(constellation_data, list):
+            for index, entry in enumerate(constellation_data[:6], 1):
+                if not isinstance(entry, dict):
+                    continue
+                title = clean_game_text(entry.get("name") or f"C{index}")
+                description = clean_game_text(entry.get("description") or "")
+                constellation_lines.append(f"C{index} · {title}")
+                if description:
+                    constellation_lines.append(game_excerpt(description, 180))
+        sections.append("\\n".join(constellation_lines))
 
         totals = aggregate_material_costs(character.get("costs"))
         if totals:
