@@ -8260,6 +8260,18 @@ async def fetch_community_character_guide(
     if needs_build:
         tasks.extend([
             (
+                "kqm",
+                fetch_first_community_guide(
+                    [
+                        "https://keqingmains.com/es/q/{slug}/",
+                        "https://keqingmains.com/q/{slug}/"
+                    ],
+                    candidates,
+                    "kqm-full-guide",
+                    target_slugs
+                )
+            ),
+            (
                 "genshin_gg",
                 fetch_first_community_guide(
                     [GENSHIN_GG_CHARACTER_BASE + "{slug}/"],
@@ -8317,7 +8329,7 @@ async def fetch_community_character_guide(
     for field, source_field in field_sources:
         if not needs.get(field):
             continue
-        for source_name in ("genshin_gg", "icy_veins"):
+        for source_name in ("kqm", "genshin_gg", "icy_veins"):
             data = sources.get(source_name) or {}
             value = data.get(source_field)
             if value:
@@ -8343,6 +8355,7 @@ async def fetch_community_character_guide(
             merged["sources"].append("icy_veins_teams")
 
     source_labels = {
+        "kqm": "KeqingMains",
         "genshin_gg": "Genshin.gg",
         "icy_veins": "Icy Veins",
         "icy_veins_teams": "Icy Veins · equipos"
