@@ -12734,7 +12734,7 @@ async def handle_command(event: dict, source: str):
         has_deterministic_fallback = bool(
             fallback_command and not fallback_command.startswith("asistente ")
         )
-        if has_deterministic_fallback and ai_result.get("kind") != "command":
+        if has_deterministic_fallback and ai_result.get("kind") not in {"command", "plan"}:
             logging.warning(
                 "[NEXUS] IA sin herramienta válida; se ejecuta la ruta determinista."
             )
