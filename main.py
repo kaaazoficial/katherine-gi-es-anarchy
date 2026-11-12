@@ -63,7 +63,7 @@ from katherine_astra import (
     is_recoverable_dj_failure,
     resolve_music_mood,
 )
-from katherine_ai import KatherineAI, validate_ai_tool_call
+from katherine_ai import KatherineAI, is_bot_author, validate_ai_tool_call
 
 AI_CORE = KatherineAI()
 
@@ -16013,13 +16013,8 @@ async def dispatch(event: dict, source: str):
         message_data = event.get("message") or {}
         author_data = message_data.get("author") or {}
         incoming_text = str(message_data.get("content") or "").strip()
-        author_is_bot = (
-            any(
-                str(author_data.get(flag, "")).casefold() in ("true", "1", "yes")
-                for flag in ("bot", "isBot", "is_bot")
-            )
-            or str(author_data.get("uid") or author_data.get("userId") or "")
-            == str((BOT_IDENTITIES.get(source) or {}).get("uid") or "")
+        author_is_bot = is_bot_author(
+            author_data, (BOT_IDENTITIES.get(source) or {}).get("uid")
         )
         AI_CORE.record_chat_message(
             str(event.get("threadId") or ""),
