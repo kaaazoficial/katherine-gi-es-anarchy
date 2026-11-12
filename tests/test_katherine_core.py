@@ -415,3 +415,37 @@ def test_genshin_helper_tree_negative_cache_suppresses_repeated_403(monkeypatch)
     assert first is None
     assert second is None
     assert calls == 1
+
+
+
+def test_not_in_chat_403_is_classified_as_membership_not_api_failure():
+    assert katherine.is_not_in_chat_response(
+        403,
+        {"anarchy:error": "not_in_chat", "anarchy:message": "The bot is not in this chat"},
+    )
+    assert not katherine.is_not_in_chat_response(
+        403,
+        {"anarchy:error": "forbidden", "anarchy:message": "Permission denied"},
+    )
+    assert not katherine.is_not_in_chat_response(
+        401,
+        {"anarchy:error": "not_in_chat"},
+    )
+
+
+def test_persistent_storage_requires_a_non_root_mount(monkeypatch, tmp_path):
+    mount = tmp_path / "volume"
+    nested = mount / "katherine"
+    monkeypatch.setattr(
+        katherine.os.path,
+        "ismount",
+        lambda path: katherine.Path(path) == mount,
+    )
+    assert katherine.has_persistent_storage(nested)
+    assert not katherine.has_persistent_storage(tmp_path / "ephemeral")
+
+
+def test_fastapi_lifecycle_uses_lifespan_instead_of_deprecated_events():
+    assert callable(katherine.app.router.lifespan_context)
+    assert not katherine.app.router.on_startup
+    assert not katherine.app.router.on_shutdown
