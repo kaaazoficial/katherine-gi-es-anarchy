@@ -11826,19 +11826,12 @@ async def handle_command(event: dict, source: str):
         return
 
     if command in ("!dj", "!reproducir"):
-        if source != "community":
-            await send_message(
-                thread,
-                "Katherine DJ solo está disponible para el bot de comunidad.",
-                source,
-                reply
-            )
-            return
+        dj_source = "community"
         if not COMMUNITY_TOKEN:
             await send_message(
                 thread,
                 "El DJ necesita COMMUNITY_BOT_TOKEN configurado en las variables de Render.",
-                source,
+                dj_source,
                 reply
             )
             return
@@ -11846,7 +11839,7 @@ async def handle_command(event: dict, source: str):
             await send_message(
                 thread,
                 "El reproductor DJ no está instalado correctamente en Render.",
-                source,
+                dj_source,
                 reply
             )
             return
@@ -11861,7 +11854,7 @@ async def handle_command(event: dict, source: str):
                 + "\n\nPara buscar música pública: !dj buscar <tema>\n"
                 "Ejemplos: !dj buscar jazz, !dj buscar piano, !dj buscar ambient.\n"
                 "También puedes reproducir archivos locales con !dj archivo.mp3.",
-                source,
+                dj_source,
                 reply
             )
             return
@@ -11872,7 +11865,7 @@ async def handle_command(event: dict, source: str):
                 await send_message(
                     thread,
                     "Uso: !dj buscar <tema o género>. Ejemplos: jazz, piano, ambient, clásica.",
-                    source,
+                    dj_source,
                     reply
                 )
                 return
@@ -11883,7 +11876,7 @@ async def handle_command(event: dict, source: str):
                 await send_message(
                     thread,
                     f"No pude consultar el catálogo musical ahora mismo ({type(exc).__name__}).",
-                    source,
+                    dj_source,
                     reply
                 )
                 return
@@ -11893,7 +11886,7 @@ async def handle_command(event: dict, source: str):
                     thread,
                     "No encontré pistas reproducibles con licencias permitidas para esa búsqueda. "
                     "Prueba con otro género o palabra.",
-                    source,
+                    dj_source,
                     reply
                 )
                 return
@@ -11907,7 +11900,7 @@ async def handle_command(event: dict, source: str):
                     DJ_SEARCH_RESULTS.pop(old_thread, None)
 
             buttons = register_buttons(
-                source,
+                dj_source,
                 thread,
                 "dj_select",
                 [
@@ -11928,7 +11921,7 @@ async def handle_command(event: dict, source: str):
                 thread,
                 f"CATÁLOGO MUSICAL · INTERNET ARCHIVE\nBúsqueda: {search_term}\n\n"
                 f"{listing}\n\nSelecciona una pista para reproducirla en la sala:",
-                source,
+                dj_source,
                 reply,
                 buttons
             )
@@ -11939,7 +11932,7 @@ async def handle_command(event: dict, source: str):
                 await send_message(
                     thread,
                     "Katherine no está reproduciendo audio en esta sala.",
-                    source,
+                    dj_source,
                     reply
                 )
                 return
@@ -11947,7 +11940,7 @@ async def handle_command(event: dict, source: str):
             await send_message(
                 thread,
                 "⏹️ Reproducción detenida. Katherine salió de la sala.",
-                source,
+                dj_source,
                 reply
             )
             return
@@ -11958,7 +11951,7 @@ async def handle_command(event: dict, source: str):
                 thread,
                 "No encuentro ese archivo en music/. También puedes buscar audio público "
                 "con !dj buscar <tema>.",
-                source,
+                dj_source,
                 reply
             )
             return
@@ -11975,20 +11968,17 @@ async def handle_command(event: dict, source: str):
         await send_message(
             thread,
             f"🎧 {message}" if ok else f"DJ: {message}",
-            source,
+            dj_source,
             reply
         )
         return
 
     if command in ("!djdetener", "!djstop", "!salirsala"):
-        if source != "community":
-            await send_message(thread, "Este control requiere el bot de comunidad.", source, reply)
-            return
         if thread not in DJ_ROOMS:
-            await send_message(thread, "Katherine no está reproduciendo audio en esta sala.", source, reply)
+            await send_message(thread, "Katherine no está reproduciendo audio en esta sala.", "community", reply)
             return
         await stop_dj_room(thread, request_leave=True)
-        await send_message(thread, "⏹️ Katherine salió de la sala y detuvo la reproducción.", source, reply)
+        await send_message(thread, "⏹️ Katherine salió de la sala y detuvo la reproducción.", "community", reply)
         return
 
     if command == "!salas":
@@ -12190,14 +12180,8 @@ async def handle_interaction(event: dict, source: str):
 
     if action_type == "dj_select":
         BUTTON_ACTIONS.pop(button_id, None)
-        await remove_pressed_buttons(event, source, remove=True)
-        if source != "community":
-            await send_message(
-                thread_id,
-                "La reproducción de audio solo está disponible en el bot de comunidad.",
-                source
-            )
-            return
+        dj_source = "community"
+        await remove_pressed_buttons(event, dj_source, remove=True)
 
         saved = DJ_SEARCH_RESULTS.get(thread_id) or {}
         if saved.get("expires", 0) <= time.time():
@@ -12212,7 +12196,7 @@ async def handle_interaction(event: dict, source: str):
             selected_index = int(choice)
             track = saved.get("tracks", [])[selected_index]
         except (TypeError, ValueError, IndexError):
-            await send_message(thread_id, "Esa selección ya no está disponible.", source)
+            await send_message(thread_id, "Esa selección ya no está disponible.", dj_source)
             return
 
         ok, message = await start_dj_room(
@@ -12227,9 +12211,9 @@ async def handle_interaction(event: dict, source: str):
                 f"Licencia: {track['license']}\n"
                 "Fuente: Internet Archive."
             )
-            await send_message(thread_id, credit, source)
+            await send_message(thread_id, credit, dj_source)
         else:
-            await send_message(thread_id, f"DJ: {message}", source)
+            await send_message(thread_id, f"DJ: {message}", dj_source)
         return
 
     if action_type == "choose_option":
