@@ -7563,6 +7563,219 @@ def helper_format_talents(data: Any, translations: dict, build_label: str) -> st
     return f"{build_label}\nPrioridad: " + " > ".join(priorities)
 
 
+
+# ---------------------------------------------------------------------------
+# TRADUCCIÓN AUTOMÁTICA DE GUÍAS EXTERNAS AL ESPAÑOL
+# ---------------------------------------------------------------------------
+GUIDE_TRANSLATION_CACHE_TTL = 7 * 24 * 60 * 60
+GUIDE_TRANSLATION_MAX_CHUNK = 2800
+DEEPL_API_KEY = os.getenv("DEEPL_API_KEY", "").strip()
+
+
+def split_guide_translation_text(value: str, max_chars: int = GUIDE_TRANSLATION_MAX_CHUNK):
+    """Divide texto largo sin cortar palabras ni perder saltos de línea."""
+    chunks = []
+    current = ""
+
+    for line in str(value or "").splitlines():
+        remaining = line
+        while len(remaining) > max_chars:
+            cut = remaining.rfind(" ", 0, max_chars)
+            if cut < max_chars // 2:
+                cut = max_chars
+            piece = remaining[:cut].strip()
+            if piece:
+                if current:
+                    chunks.append(current)
+                    current = ""
+                chunks.append(piece)
+            remaining = remaining[cut:].strip()
+
+        if len(current) + len(remaining) + 1 > max_chars:
+            if current:
+                chunks.append(current)
+            current = remaining
+        else:
+            current = (current + "\n" + remaining).strip() if current else remaining
+
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def extract_google_translation(payload: Any):
+    """Acepta las distintas respuestas JSON usadas por el endpoint de traducción."""
+    if isinstance(payload, dict):
+        sentences = payload.get("sentences")
+        if isinstance(sentences, list):
+            translated = [
+                str(item.get("trans") or "")
+                for item in sentences
+                if isinstance(item, dict)
+            ]
+            translated = [item for item in translated if item]
+            if translated:
+                return "".join(translated)
+
+        ld_result = payload.get("ld_result")
+        if isinstance(ld_result, dict):
+            translations = ld_result.get("translations") or []
+            translated = [
+                str(item.get("translatedText") or "")
+                for item in translations
+                if isinstance(item, dict)
+            ]
+            translated = [item for item in translated if item]
+            if translated:
+                return "".join(translated)
+
+        translated = payload.get("translatedText")
+        if isinstance(translated, str) and translated.strip():
+            return translated.strip()
+
+    if isinstance(payload, list):
+        translated = []
+        for item in payload:
+            if isinstance(item, list) and item and isinstance(item[0], str):
+                translated.append(item[0])
+        if translated:
+            return "".join(translated)
+
+    return None
+
+
+async def translate_guide_chunk(text: str):
+    """Traduce un bloque al español; usa proveedores alternativos si falla uno."""
+    if not text or not text.strip():
+        return text
+
+    # DeepL es opcional. Solo se utiliza cuando el administrador configura su clave.
+    if DEEPL_API_KEY:
+        try:
+            response = await external_request(
+                "POST",
+                "https://api-free.deepl.com/v2/translate",
+                data={"text": text, "target_lang": "ES"},
+                timeout=18,
+                headers={"Authorization": f"DeepL-Auth-Key {DEEPL_API_KEY}"}
+            )
+            if response.status_code == 200:
+                payload = response.json()
+                translations = payload.get("translations") or []
+                if translations and translations[0].get("text"):
+                    return str(translations[0]["text"])
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            logging.debug("DeepL no disponible para guías: %s", exc)
+
+    # Endpoint GET del traductor de Chrome. No requiere clave, pero no tiene SLA.
+    try:
+        response = await external_request(
+            "GET",
+            "https://clients5.google.com/translate_a/t",
+            params={
+                "client": "dict-chrome-ex",
+                "sl": "auto",
+                "tl": "es",
+                "q": text
+            },
+            timeout=16,
+            headers={
+                "User-Agent": "Mozilla/5.0 Katherine-AnarchyBot/4.0",
+                "Accept": "application/json"
+            }
+        )
+        if response.status_code == 200:
+            translated = extract_google_translation(response.json())
+            if translated:
+                return translated
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        logging.debug("Traductor principal no disponible: %s", exc)
+
+    # Alternativa abierta de Apertium para no dejar la guía en inglés.
+    try:
+        response = await external_request(
+            "GET",
+            "https://apertium.org/apy/translate",
+            params={"q": text, "langpair": "eng|spa"},
+            timeout=16,
+            headers={"User-Agent": "Katherine-AnarchyBot/4.0"}
+        )
+        if response.status_code == 200:
+            payload = response.json()
+            translated = (
+                (payload.get("responseData") or {}).get("translatedText")
+                if isinstance(payload, dict) else None
+            )
+            if translated:
+                return html.unescape(str(translated))
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        logging.debug("Apertium no disponible para guías: %s", exc)
+
+    return None
+
+
+async def translate_guide_text(value: Any):
+    """Traduce texto de fuentes comunitarias y reutiliza traducciones en caché."""
+    if not isinstance(value, str) or not value.strip():
+        return value
+
+    original = value.strip()
+    cache_key = "guide-translation-es:" + hashlib.sha1(
+        original.encode("utf-8", errors="ignore")
+    ).hexdigest()
+    cached = cache.get(cache_key)
+    if cached and cached[0] > time.time():
+        return cached[1]
+
+    chunks = split_guide_translation_text(original)
+    translated_chunks = await asyncio.gather(
+        *(translate_guide_chunk(chunk) for chunk in chunks),
+        return_exceptions=True
+    )
+
+    output = []
+    translated_any = False
+    for original_chunk, translated in zip(chunks, translated_chunks):
+        if isinstance(translated, str) and translated.strip():
+            output.append(translated.strip())
+            translated_any = True
+        else:
+            output.append(original_chunk)
+
+    result = "\n".join(output).strip()
+    # Cachea tanto éxitos como fallos breves para no martillar servicios externos.
+    ttl = GUIDE_TRANSLATION_CACHE_TTL if translated_any else 900
+    cache[cache_key] = (time.time() + ttl, result)
+    if not translated_any:
+        logging.warning(
+            "No se pudo traducir una sección externa; se conserva el texto original."
+        )
+    return result
+
+
+async def translate_guide_fields(data: dict, fields):
+    """Traduce únicamente los campos textuales solicitados."""
+    if not isinstance(data, dict):
+        return data
+
+    selected = [
+        field for field in fields
+        if isinstance(data.get(field), str) and data[field].strip()
+    ]
+    if not selected:
+        return data
+
+    values = await asyncio.gather(
+        *(translate_guide_text(data[field]) for field in selected),
+        return_exceptions=True
+    )
+    result = dict(data)
+    for field, translated in zip(selected, values):
+        if isinstance(translated, str) and translated.strip():
+            result[field] = translated
+    return result
+
+
 async def fetch_helper_character_guide(
     character: dict | None,
     query: str,
@@ -7745,6 +7958,9 @@ async def fetch_helper_character_guide(
     for field in ("artifacts", "weapons", "talents"):
         result[field] = "\n\n".join(result[field])
     result["build_count"] = len(bundles)
+    result = await translate_guide_fields(
+        result, ("artifacts", "weapons", "talents")
+    )
     return result
 
 
@@ -8364,6 +8580,9 @@ async def fetch_community_character_guide(
         source_labels[source] for source in merged["sources"]
     ))
     merged["sources"] = list(dict.fromkeys(merged["sources"]))
+    merged = await translate_guide_fields(
+        merged, ("weapons", "artifacts", "stats", "talents", "teams")
+    )
     return merged
 
 
