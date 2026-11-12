@@ -707,7 +707,7 @@ def split_message_content(content: str, limit: int = 2000) -> list[str]:
         sentence_ends = [
             match.end()
             for match in re.finditer(r"[.!?…](?:[\"')\]]?)(?:\s+|$)", text[:limit + 1])
-            if match.end() >= limit * 0.65
+            if limit * 0.65 <= match.end() <= limit
         ]
         sentence_at = sentence_ends[-1] if sentence_ends else -1
         space_at = text.rfind(" ", 0, limit + 1)
