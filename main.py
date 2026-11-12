@@ -607,8 +607,12 @@ async def build_status_message(source: str, nickname: str) -> str:
         f"• Último evento: {last_event}",
         f"• Interacciones: {metrics['interactions_received']}",
         f"• Respuestas enviadas: {metrics['messages_sent']}",
-        f"• Tareas activas: {len(background_tasks)}",
-        f"• Partidas activas: {len(trivia) + len(number_games)}",
+        f"• Tareas activas: {sum(1 for task in background_tasks if not task.done())}",
+        f"• Limpieza automática: {'activa' if CLEANUP_TASK is not None and not CLEANUP_TASK.done() else 'inactiva'}",
+        f"• Trivias / juegos: {len(trivia)} / {len(number_games)}",
+        f"• Encuestas activas: {len(polls)}",
+        f"• Caché: {len(cache)} entradas",
+        f"• Eventos recientes: {len(seen_events)}",
         "",
         "🌐 API Y RENDIMIENTO",
         f"• Solicitudes API: {metrics['api_requests']}",
@@ -621,8 +625,10 @@ async def build_status_message(source: str, nickname: str) -> str:
         f"• SQLite: {db_line}",
         f"• Caché Genshin: {len(cache)} entradas",
         "",
-        "🔐 CONFIGURACIÓN",
+        "🔐 CONFIGURACIÓN Y PROCESO",
         f"• Python: {sys.version.split()[0]} | PID: {os.getpid()}",
+        f"• Cliente HTTP: {'activo' if HTTP_CLIENT is not None and not HTTP_CLIENT.is_closed else 'inactivo'}",
+        f"• Directorio de datos: {'escribible' if DATA_DIR.exists() and os.access(DATA_DIR, os.W_OK) else 'no disponible'}",
         f"• Token desarrollador: {'Configurado' if BOT_TOKEN else 'No configurado'}",
         f"• Token comunidad: {'Configurado' if COMMUNITY_TOKEN else 'No configurado'}",
         f"• Chats vinculados al token: {len(thread_ids)}",
@@ -8783,21 +8789,7 @@ async def handle_command(event: dict, source: str):
             ],
             [
                 "SISTEMA Y KATHERINE",
-                f"{PREFIX}estado — panel general de Katherine.",
-                f"{PREFIX}statsbot — alias de estado.",
-                f"{PREFIX}diagnostico — comprueba API, SQLite y tareas internas.",
-                f"{PREFIX}estadisticas — métricas del proceso y solicitudes.",
-                f"{PREFIX}tareas — tareas, juegos y encuestas activas.",
-                f"{PREFIX}cache — estado de la caché de Genshin.",
-                f"{PREFIX}cache limpiar — vacía la caché temporal.",
-                f"{PREFIX}limpiarcache — alias para vaciar la caché.",
-                f"{PREFIX}conexiones — prueba los tokens y conexiones configurados.",
-                f"{PREFIX}configbot — muestra configuración segura del bot.",
-                f"{PREFIX}version — versión de código y despliegue.",
-                f"{PREFIX}ping — comprueba la conexión.",
-                f"{PREFIX}latencia — mide la respuesta de Anarchy.",
-                f"{PREFIX}memoria — uso de RAM y CPU.",
-                f"{PREFIX}uptime — tiempo activa.",
+                f"{PREFIX}estado — panel unificado: API, latencia, RAM, CPU, actividad, procesos, tareas, caché, SQLite, conexiones y configuración.",
                 f"{PREFIX}fecha — fecha y hora de Chile.",
                 f"{PREFIX}zona <Area/Ciudad> — hora de una zona.",
                 f"{PREFIX}salas — consulta salas en vivo.",
@@ -10115,246 +10107,13 @@ async def handle_command(event: dict, source: str):
         await send_message(thread, answer, source, reply)
         return
 
-    if command == "!diagnostico":
-        started_check = time.perf_counter()
-        api_result = await api("GET", "/me", source)
-        api_elapsed = (time.perf_counter() - started_check) * 1000
-
-        checks = []
-        checks.append((
-            "Token del bot",
-            "OK" if token_for(source) else "FALTA"
-        ))
-        checks.append((
-            "Cliente HTTP",
-            "OK" if HTTP_CLIENT is not None and not HTTP_CLIENT.is_closed else "NO DISPONIBLE"
-        ))
-        checks.append((
-            "API Anarchy",
-            f"OK · HTTP {api_result.get('status')} · {api_elapsed:.0f} ms"
-            if api_result.get("ok") else f"ERROR · HTTP {api_result.get('status')}"
-        ))
-
-        try:
-            with db_session() as db:
-                db.execute("SELECT 1").fetchone()
-                profile_count = int(
-                    db.execute("SELECT COUNT(*) AS total FROM users").fetchone()["total"]
-                )
-            checks.append(("Base SQLite", f"OK · {profile_count} perfiles"))
-        except (sqlite3.Error, OSError) as exc:
-            logging.exception("Diagnóstico SQLite fallido")
-            checks.append(("Base SQLite", f"ERROR · {type(exc).__name__}"))
-
-        cleanup_ok = CLEANUP_TASK is not None and not CLEANUP_TASK.done()
-        checks.append((
-            "Limpieza automática",
-            "OK · activa" if cleanup_ok else "REVISAR · tarea no activa"
-        ))
-        checks.append((
-            "Directorio de datos",
-            "OK · accesible" if DATA_DIR.exists() and os.access(DATA_DIR, os.W_OK)
-            else "REVISAR · no escribible"
-        ))
-
-        failed = sum(
-            1 for _, result in checks
-            if result.startswith(("ERROR", "FALTA", "NO DISPONIBLE", "REVISAR"))
-        )
-        overall = "OPERATIVO" if failed == 0 else f"ATENCIÓN · {failed} revisión(es)"
-        answer = (
-            f"DIAGNÓSTICO DE KATHERINE · {overall}\n"
-            + "\n".join(
-                f"{'🟢' if not result.startswith(('ERROR', 'FALTA', 'NO DISPONIBLE', 'REVISAR')) else '🟠'} "
-                f"{label}: {result}"
-                for label, result in checks
-            )
-            + f"\n\nTareas de eventos activas: {len(background_tasks)}"
-        )
+    if command in (
+        "!diagnostico", "!version", "!estadisticas", "!tareas",
+        "!cache", "!limpiarcache", "!conexiones", "!configbot",
+        "!ping", "!latencia", "!memoria", "!uptime"
+    ):
+        answer = await build_status_message(source, nickname)
         await send_message(thread, answer, source, reply)
-        return
-
-    if command == "!version":
-        commit = (
-            os.getenv("RENDER_GIT_COMMIT")
-            or os.getenv("GIT_COMMIT")
-            or os.getenv("SOURCE_VERSION")
-            or ""
-        )
-        branch = os.getenv("RENDER_GIT_BRANCH") or "No informada"
-        commit_label = commit[:8] if commit else "No informado por el entorno"
-        await send_message(
-            thread,
-            "KATHERINE · INFORMACIÓN DE VERSIÓN\n"
-            "Implementación: Python + FastAPI\n"
-            f"Python: {sys.version.split()[0]}\n"
-            f"Rama: {branch}\n"
-            f"Commit: {commit_label}\n"
-            f"PID: {os.getpid()}",
-            source,
-            reply
-        )
-        return
-
-    if command == "!estadisticas":
-        requests = int(metrics["api_requests"])
-        average = (
-            metrics["api_latency_total_ms"] / requests
-            if requests else 0
-        )
-        errors = int(metrics["api_errors"])
-        error_rate = (errors / requests * 100) if requests else 0
-        answer = (
-            "ESTADÍSTICAS DE KATHERINE · PROCESO ACTUAL\n"
-            f"Webhooks aceptados: {metrics['webhook_events']}\n"
-            f"Mensajes recibidos: {metrics['text_messages_received']}\n"
-            f"Comandos recibidos: {metrics['commands_received']}\n"
-            f"Respuestas enviadas: {metrics['messages_sent']}\n"
-            f"Interacciones recibidas: {metrics['interactions_received']}\n"
-            f"Solicitudes a Anarchy: {requests}\n"
-            f"Errores de API: {errors} ({error_rate:.1f}%)\n"
-            f"Latencia media: {average:.1f} ms\n"
-            f"Última latencia: {metrics['api_latency_last_ms']:.1f} ms\n"
-            f"Latencia máxima: {metrics['api_latency_max_ms']:.1f} ms\n"
-            f"Último comando: {LAST_COMMAND_NAME or 'Ninguno'}"
-        )
-        await send_message(thread, answer, source, reply)
-        return
-
-    if command == "!tareas":
-        cleanup_state = (
-            "activa" if CLEANUP_TASK is not None and not CLEANUP_TASK.done()
-            else "inactiva"
-        )
-        active_background = sum(1 for task in background_tasks if not task.done())
-        answer = (
-            "KATHERINE · TAREAS Y ESTADOS TEMPORALES\n"
-            f"Procesamientos en segundo plano: {active_background}\n"
-            f"Tarea de limpieza: {cleanup_state}\n"
-            f"Trivias activas: {len(trivia)}\n"
-            f"Juegos de números activos: {len(number_games)}\n"
-            f"Encuestas activas: {len(polls)}\n"
-            f"Mapeos de botones: {len(poll_button_map)}\n"
-            f"Colas de envío por chat: {len(send_history_chat)}\n"
-            f"Eventos recientes deduplicados: {len(seen_events)}"
-        )
-        await send_message(thread, answer, source, reply)
-        return
-
-    if command in ("!cache", "!limpiarcache"):
-        if query.casefold() in ("limpiar", "borrar", "clear", "vaciar") or command == "!limpiarcache":
-            removed = len(cache)
-            cache.clear()
-            answer = f"Caché temporal de Genshin vaciada. Entradas eliminadas: {removed}."
-        else:
-            now = time.time()
-            valid = sum(
-                1 for value in cache.values()
-                if isinstance(value, tuple) and len(value) >= 2 and value[0] > now
-            )
-            expired = max(0, len(cache) - valid)
-            answer = (
-                "KATHERINE · CACHÉ TEMPORAL\n"
-                f"Entradas totales: {len(cache)}\n"
-                f"Vigentes: {valid}\n"
-                f"Caducadas pendientes de limpieza: {expired}\n"
-                "Duración habitual de las consultas: hasta 6 horas.\n"
-                f"Para vaciarla: {PREFIX}cache limpiar"
-            )
-        await send_message(thread, answer, source, reply)
-        return
-
-    if command == "!conexiones":
-        connection_lines = ["KATHERINE · ESTADO DE CONEXIONES"]
-        configured = 0
-        for source_name, label in (("developer", "Bot principal"), ("community", "Bot de comunidad")):
-            if not token_for(source_name):
-                connection_lines.append(f"⚪ {label}: token no configurado")
-                continue
-            configured += 1
-            result = await api("GET", "/me", source_name)
-            state = "🟢 Conectado" if result.get("ok") else "🔴 Error"
-            connection_lines.append(
-                f"{state} · {label}: HTTP {result.get('status', '?')}"
-            )
-        if configured == 0:
-            connection_lines.append("No hay tokens configurados.")
-        await send_message(thread, "\n".join(connection_lines), source, reply)
-        return
-
-    if command == "!configbot":
-        data_dir_env = os.getenv("DATA_DIR")
-        config_lines = [
-            "KATHERINE · CONFIGURACIÓN SEGURA",
-            f"Prefijo configurado: {PREFIX}",
-            f"Origen de este mensaje: {'Comunidad' if source == 'community' else 'Desarrollador'}",
-            f"Token principal: {'configurado' if BOT_TOKEN else 'ausente'}",
-            f"Webhook principal: {'configurado' if WEBHOOK_SECRET else 'ausente'}",
-            f"Token comunidad: {'configurado' if COMMUNITY_TOKEN else 'ausente'}",
-            f"Webhook comunidad: {'configurado' if COMMUNITY_SECRET else 'ausente'}",
-            f"DATA_DIR: {'configurado' if data_dir_env else 'ruta local por defecto'}",
-            f"Carpeta de datos accesible: {'sí' if DATA_DIR.exists() and os.access(DATA_DIR, os.W_OK) else 'no'}",
-            f"Cliente HTTP: {'activo' if HTTP_CLIENT is not None and not HTTP_CLIENT.is_closed else 'inactivo'}",
-            "Los valores secretos nunca se muestran."
-        ]
-        await send_message(thread, "\n".join(config_lines), source, reply)
-        return
-
-    if command == "!ping":
-        started = time.monotonic()
-        result = await api("GET", "/me", source)
-
-        if result["ok"]:
-            answer = (
-                f"PONG, {nickname}.\n"
-                "Katherine está en línea.\n"
-                f"Latencia API: {int((time.monotonic()-started)*1000)} ms."
-            )
-        else:
-            answer = f"Anarchy respondió HTTP {result['status']}."
-
-        await send_message(thread, answer, source, reply)
-        return
-
-    if command == "!latencia":
-        started = time.perf_counter()
-        result = await api("GET", "/me", source)
-        elapsed = (time.perf_counter() - started) * 1000
-        state = "🟢 API disponible" if result["ok"] else "🔴 API no disponible"
-        await send_message(
-            thread,
-            f"{state}\nLatencia de Anarchy: {elapsed:.0f} ms\nHTTP: {result['status']}",
-            source, reply
-        )
-        return
-
-    if command == "!memoria":
-        current, peak = get_process_memory()
-        if current is None:
-            answer = "No pude leer la memoria RSS del proceso en este entorno."
-        else:
-            answer = f"RAM del proceso: {current:.1f} MB RSS"
-            answer += f"\nRAM del contenedor: {get_container_memory_usage()}"
-            if peak is not None:
-                answer += f"\nMáximo registrado: {peak:.1f} MB"
-            if psutil and PROCESS:
-                try:
-                    answer += f"\nCPU del proceso: {PROCESS.cpu_percent(interval=None):.1f}%"
-                except psutil.Error:
-                    pass
-        await send_message(thread, answer, source, reply)
-        return
-
-    if command == "!uptime":
-        seconds = int(time.time() - STARTED)
-
-        await send_message(
-            thread,
-            f"Katherine lleva activa {seconds//3600} h "
-            f"{(seconds%3600)//60} min.",
-            source,
-            reply
-        )
         return
 
     if command == "!fecha":
