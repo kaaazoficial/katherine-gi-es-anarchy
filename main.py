@@ -12693,7 +12693,7 @@ async def handle_command(event: dict, source: str):
         else:
             await send_message(
                 thread,
-                f"Tu UID de Anarchy Apps es: {admin_uid}\\n"
+                f"Tu UID de Anarchy Apps es: {admin_uid}\n"
                 "Copia este identificador y configúralo en Render en ADMIN_UIDS.",
                 source,
                 reply
@@ -12760,7 +12760,7 @@ async def handle_command(event: dict, source: str):
                     excerpt = item.get("excerpt") or item.get("snippet") or ""
                     if excerpt:
                         refs.append("   " + excerpt[:420])
-                answer = "INVESTIGACIÓN · " + research_query + "\\n\\n" + summary + "\\n\\n" + "\\n".join(refs) + "\\n\\nLa búsqueda puede omitir páginas bloqueadas o no indexadas; verifica los datos importantes en las fuentes originales."
+                answer = "INVESTIGACIÓN · " + research_query + "\n\n" + summary + "\n\n" + "\n".join(refs) + "\n\nLa búsqueda puede omitir páginas bloqueadas o no indexadas; verifica los datos importantes en las fuentes originales."
         except Exception as exc:
             logging.warning("[RESEARCH] Falló investigación pública: %s", type(exc).__name__)
             answer = "No pude completar la investigación web en este momento. Los comandos clásicos siguen disponibles."
@@ -12788,8 +12788,8 @@ async def handle_command(event: dict, source: str):
                 logging.exception("[RESEARCH] Falló análisis IA del enlace")
                 summary = page.get("excerpt", "")[:2500]
             answer = (
-                f"ANÁLISIS DE ENLACE\\n{page['title']}\\nDominio: {page['domain']}\\n\\n"
-                f"{summary}\\n\\nFuente: {page['domain']}\\n"
+                f"ANÁLISIS DE ENLACE\n{page['title']}\nDominio: {page['domain']}\n\n"
+                f"{summary}\n\nFuente: {page['domain']}\n"
                 "El contenido de la página se trató como material externo no confiable."
             )
         except ValueError as exc:
