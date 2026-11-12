@@ -429,3 +429,56 @@ async def test_katherine_identity_questions_with_name_prefix(monkeypatch, questi
         assert expected in result["answer"]
     else:
         assert result["answer"] == expected
+
+
+def test_research_tools_are_allowed_and_validated():
+    assert validate_ai_tool_call("investigar", "cambios recientes de Python") == (
+        "investigar cambios recientes de Python"
+    )
+    assert validate_ai_tool_call("enlace", "https://example.com/articulo") == (
+        "enlace https://example.com/articulo"
+    )
+    assert validate_ai_tool_call("enlace", "http://example.com") is None
+    assert validate_ai_tool_call("enlace", "https://127.0.0.1/admin") is None
+    assert validate_ai_tool_call("investigar", "https://example.com") is None
+
+
+def test_research_sanitizer_extracts_page_text_and_rejects_unsafe_urls():
+    from katherine_research import extract_page_content, is_safe_public_url, normalize_public_url
+    title, text = extract_page_content(
+        "<html><head><title>Artículo útil</title></head><body>"
+        "<nav>Menú ignorado</nav><h1>Información</h1>"
+        "<p>Contenido de prueba suficientemente extenso para evaluar una página.</p>"
+        "<script>no ejecutar esto</script></body></html>"
+    )
+    assert title == "Artículo útil"
+    assert "Información" in text
+    assert "Menú ignorado" not in text
+    assert "no ejecutar esto" not in text
+    assert is_safe_public_url("https://example.com/noticia")
+    assert not is_safe_public_url("http://example.com")
+    assert not is_safe_public_url("https://localhost/admin")
+    assert not is_safe_public_url("https://127.0.0.1/admin")
+    assert not is_safe_public_url("https://example.com:8443/")
+    assert normalize_public_url("https://EXAMPLE.com/noticia#section") == (
+        "https://example.com/noticia"
+    )
+
+
+def test_research_search_parser_deduplicates_domains_and_unwraps_results():
+    from urllib.parse import quote
+    from katherine_research import parse_search_results
+    one = quote("https://example.com/a", safe="")
+    two = quote("https://example.com/b", safe="")
+    three = quote("https://another.example.org/b", safe="")
+    markup = (
+        '<a class="result__a" href="https://duckduckgo.com/l/?uddg=' + one + '">Primera fuente</a>'
+        '<div class="result__snippet">Extracto uno con datos</div>'
+        '<a class="result__a" href="https://duckduckgo.com/l/?uddg=' + two + '">Duplicada</a>'
+        '<div class="result__snippet">Extracto duplicado</div>'
+        '<a class="result__a" href="https://duckduckgo.com/l/?uddg=' + three + '">Segunda fuente</a>'
+    )
+    results = parse_search_results(markup, limit=5)
+    assert len(results) == 2
+    assert results[0]["url"] == "https://example.com/a"
+    assert results[1]["domain"] == "another.example.org"
