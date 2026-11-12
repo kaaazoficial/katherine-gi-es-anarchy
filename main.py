@@ -131,6 +131,11 @@ def init_db():
             guaranteed INTEGER NOT NULL DEFAULT 0,
             updated_at REAL NOT NULL
         )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS resin_state (
+            uid TEXT PRIMARY KEY,
+            amount INTEGER NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL
+        )""")
         db.execute("CREATE INDEX IF NOT EXISTS idx_gifts_target ON gifts(target_uid, id DESC)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_users_points ON users(points DESC)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_users_activity ON users(message_count DESC)")
@@ -1213,6 +1218,191 @@ def get_level90(stats):
     return stats.get("90") or stats.get("90+") or stats.get("89")
 
 
+def get_level_stats(stats: Any, level: str):
+    """Obtiene un nivel concreto del endpoint de estadísticas de Genshin-DB."""
+    if not isinstance(stats, dict):
+        return None
+    level = str(level).strip()
+    if not re.fullmatch(r"(?:1|20\+?|40\+?|50\+?|60\+?|70\+?|80\+?|90)", level):
+        return None
+    value = stats.get(level)
+    return value if isinstance(value, dict) else None
+
+
+def aggregate_material_costs(costs: Any) -> dict[str, int]:
+    """Suma materiales incluso cuando la API cambia la profundidad de los datos."""
+    totals: dict[str, int] = {}
+
+    def walk(value):
+        if isinstance(value, list):
+            for entry in value:
+                walk(entry)
+            return
+        if not isinstance(value, dict):
+            return
+
+        name = value.get("name") or value.get("nameText")
+        count = value.get("count")
+        if name is not None and count is not None:
+            try:
+                amount = int(count)
+                if amount > 0:
+                    key = clean_game_text(name)
+                    totals[key] = totals.get(key, 0) + amount
+            except (TypeError, ValueError):
+                pass
+            return
+
+        for child in value.values():
+            if isinstance(child, (dict, list)):
+                walk(child)
+
+    walk(costs)
+    return totals
+
+
+def describe_cost_stages(costs: Any, title: str) -> str:
+    """Expone las fases de ascensión y añade el total agregado."""
+    if not isinstance(costs, dict):
+        return f"{title}\nLa base de datos no publicó un desglose de materiales."
+
+    lines = [title]
+    for stage, entries in costs.items():
+        if not isinstance(entries, list):
+            continue
+        rendered = game_items_text(entries, limit=30)
+        if rendered:
+            label = re.sub(r"([A-Z])", r" \1", str(stage))
+            label = label.replace("_", " ").strip().capitalize()
+            lines.append(f"\n{label}")
+            lines.extend(f"• {item}" for item in rendered)
+
+    totals = aggregate_material_costs(costs)
+    if totals:
+        lines.append("\nTOTALES")
+        lines.extend(f"• {name}: {amount}" for name, amount in sorted(totals.items()))
+    return "\n".join(lines)
+
+
+def get_talent_entries(character: dict, field: str):
+    entries = character.get(field) or []
+    if isinstance(entries, dict):
+        entries = list(entries.values())
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def describe_talent_guide(character: dict, fallback: str) -> str:
+    name = clean_game_text(character.get("name") or fallback)
+    lines = [f"GUÍA DE TALENTOS — {name}"]
+
+    sections = (
+        ("skillTalents", "TALENTOS DE COMBATE"),
+        ("passiveTalents", "TALENTOS PASIVOS")
+    )
+    for field, heading in sections:
+        entries = get_talent_entries(character, field)
+        if not entries:
+            continue
+        lines.append(f"\n{heading}")
+        for index, entry in enumerate(entries[:8], 1):
+            title = clean_game_text(
+                entry.get("name") or entry.get("unlock") or f"Talento {index}"
+            )
+            desc = clean_game_text(entry.get("description") or "")
+            lines.append(f"\n{index}. {title}")
+            if desc:
+                lines.append(game_excerpt(desc, 650))
+            if entry.get("cooldown") is not None:
+                lines.append(f"Tiempo de reutilización: {entry.get('cooldown')}")
+            if entry.get("cost") is not None:
+                lines.append(f"Costo: {clean_game_text(entry.get('cost'))}")
+
+    constellations = character.get("constellations") or character.get("Constellations")
+    if isinstance(constellations, dict):
+        lines.append("\nCONSTELACIONES")
+        for index, entry in enumerate(list(constellations.values())[:6], 1):
+            if not isinstance(entry, dict):
+                continue
+            title = clean_game_text(entry.get("name") or f"C{index}")
+            desc = clean_game_text(entry.get("description") or "")
+            lines.append(f"\nC{index} · {title}")
+            if desc:
+                lines.append(game_excerpt(desc, 420))
+
+    return "\n".join(lines)
+
+
+def get_resin_snapshot(uid: str, cap: int = 200) -> dict:
+    """Calcula la regeneración desde la última resin guardada (8 min por punto)."""
+    now = time.time()
+    with db_session() as db:
+        row = db.execute(
+            "SELECT amount,updated_at FROM resin_state WHERE uid=?",
+            (uid,)
+        ).fetchone()
+        if not row:
+            return {"configured": False, "amount": 0, "cap": cap}
+
+        amount = max(0, min(cap, int(row["amount"])))
+        updated = float(row["updated_at"])
+        elapsed = max(0, now - updated)
+        recovered = int(elapsed // 480)
+        current = min(cap, amount + recovered)
+        next_update = now if current >= cap else updated + recovered * 480
+
+        if current != amount or next_update != updated:
+            db.execute(
+                "UPDATE resin_state SET amount=?,updated_at=? WHERE uid=?",
+                (current, next_update, uid)
+            )
+
+        elapsed_after_update = max(0, int(now - next_update))
+        remainder = max(0, 480 - elapsed_after_update)
+        full_seconds = max(
+            0,
+            (cap - current) * 480 - elapsed_after_update
+        )
+        return {
+            "configured": True,
+            "amount": current,
+            "cap": cap,
+            "next_seconds": remainder if current < cap else 0,
+            "full_seconds": full_seconds
+        }
+
+
+def save_resin(uid: str, amount: int):
+    amount = max(0, min(200, int(amount)))
+    with db_session() as db:
+        db.execute(
+            """INSERT INTO resin_state(uid,amount,updated_at) VALUES(?,?,?)
+               ON CONFLICT(uid) DO UPDATE SET
+               amount=excluded.amount,updated_at=excluded.updated_at""",
+            (uid, amount, time.time())
+        )
+    return amount
+
+
+def resin_time(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours} h")
+    if minutes:
+        parts.append(f"{minutes} min")
+    if secs and not hours:
+        parts.append(f"{secs} s")
+    return " ".join(parts) or "0 min"
+
+
+def parse_percent(value: str) -> float:
+    return float(str(value).replace("%", "").replace(",", "."))
+
+
 def target_from_message(msg, args, scope_key: str | None = None):
     mentions = msg.get("mentions") or []
 
@@ -1291,8 +1481,196 @@ BUILD_TEAMS = {
         "Arlecchino · Bennett · Kazuha · Zhongli",
         "Zhongli protege; Bennett potencia; Kazuha agrupa y reduce resistencias; "
         "Arlecchino ejecuta su ventana de daño."
+    ),
+    "alhaitham": (
+        "Alhacén · Nahida · Kuki Shinobu · Xingqiu",
+        "Doble Dendro aporta energía; Kuki activa Sobreflorecimiento; Xingqiu mantiene Hydro."
+    ),
+    "furina": (
+        "Furina · Neuvillette · Kazuha · Baizhu",
+        "Furina potencia al equipo; Kazuha agrupa y dispersa Hydro; Baizhu cura y protege."
+    ),
+    "navia": (
+        "Navia · Zhongli · Bennett · Xiangling",
+        "Doble Geo facilita energía; Pyro permite Cristalización; Navia consume fragmentos."
+    ),
+    "nilou": (
+        "Nilou · Nahida · Kokomi · Collei",
+        "Equipo Hydro/Dendro para Núcleos Abundantes, con aplicación constante y curación."
+    ),
+    "ayaka": (
+        "Ayaka · Shenhe · Kokomi · Kazuha",
+        "Congelación, reducción de resistencia Cryo, agrupación y aplicación Hydro."
+    ),
+    "ganyu": (
+        "Ganyu · Mona · Diona · Venti",
+        "Equipo de Congelación con agrupación; adapta la composición a enemigos inmunes al control."
+    ),
+    "xiao": (
+        "Xiao · Faruzan · Xianyun · Furina",
+        "Faruzan potencia Anemo; Xianyun mejora ataques descendentes y cura; Furina aporta daño."
+    ),
+    "wanderer": (
+        "Errante · Faruzan · Bennett · Zhongli",
+        "Faruzan mejora el daño Anemo; Bennett potencia; Zhongli protege durante los ataques."
+    ),
+    "childe": (
+        "Tartaglia · Xiangling · Bennett · Kazuha",
+        "Aplicación Hydro amplia para Vaporización; Xiangling concentra el daño fuera de campo."
+    ),
+    "itto": (
+        "Itto · Gorou · Albedo · Zhongli",
+        "Triple Geo aprovecha las bonificaciones de Gorou y la resonancia Geo."
+    ),
+    "wriothesley": (
+        "Wriothesley · Furina · Charlotte · Kazuha",
+        "Furina aporta daño e Hydro; Charlotte cura; Kazuha agrupa y potencia Cryo."
     )
 }
+
+ARTIFACT_GUIDES = {
+    "cyno": {
+        "name": "Cyno",
+        "sets": "4 piezas Sueños Áureos o 4 piezas Furia del Trueno",
+        "main": "Reloj: EM o ATQ% · Copa: Bono D Electro · Corona: CRIT",
+        "subs": "Prob. CRIT, Daño CRIT, EM, Recarga y ATQ%",
+        "note": "Ajusta la Maestría Elemental y la Recarga según el equipo y la duración de la rotación."
+    },
+    "nahida": {
+        "name": "Nahida",
+        "sets": "4 piezas Recuerdos del Bosque si nadie más lo lleva; 4 piezas Sueños Áureos como alternativa",
+        "main": "EM / EM / EM o EM / Dendro / CRIT según equipo y arma",
+        "subs": "EM, CRIT, Recarga y ATQ%",
+        "note": "No es obligatorio llegar a 1.000 EM en todas las composiciones; busca equilibrio."
+    },
+    "hu tao": {
+        "name": "Hu Tao",
+        "sets": "4 piezas Bruja Carmesí en Llamas o 4 piezas Reminiscencia de la Purificación",
+        "main": "EM o Vida% / Bono D Pyro / CRIT",
+        "subs": "CRIT, EM, Vida% y Recarga moderada",
+        "note": "La Maestría Elemental gana mucho valor en equipos de Vaporización."
+    },
+    "raiden": {
+        "name": "Shogun Raiden",
+        "sets": "4 piezas Emblema del Destino",
+        "main": "Recarga o ATQ% / Bono D Electro o ATQ% / CRIT",
+        "subs": "CRIT, Recarga, ATQ% y EM en equipos de reacción",
+        "note": "El arma y el equipo cambian la mejor combinación de reloj y copa."
+    },
+    "neuvillette": {
+        "name": "Neuvillette",
+        "sets": "4 piezas Cazador Fantasmal",
+        "main": "Vida% / Bono D Hydro / Daño CRIT o Prob. CRIT",
+        "subs": "Daño CRIT, Prob. CRIT, Vida% y Recarga",
+        "note": "Controla la Prob. CRIT efectiva cuando utilizas Cazador Fantasmal."
+    },
+    "arlecchino": {
+        "name": "Arlecchino",
+        "sets": "4 piezas Fragmento de la Armonía Fantasiosa; Bruja Carmesí como alternativa",
+        "main": "ATQ% / Bono D Pyro / CRIT",
+        "subs": "CRIT, ATQ%, EM para Vaporización y Recarga moderada",
+        "note": "Administra el pacto vital y adapta las estadísticas a su rotación."
+    },
+    "furina": {
+        "name": "Furina",
+        "sets": "4 piezas Compañía Dorada",
+        "main": "Vida% o Recarga / Bono D Hydro o Vida% / CRIT",
+        "subs": "Recarga, CRIT y Vida%",
+        "note": "Asegura la Recarga necesaria para mantener la definitiva."
+    },
+    "yelan": {
+        "name": "Yelan",
+        "sets": "4 piezas Emblema del Destino",
+        "main": "Vida% o Recarga / Bono D Hydro / CRIT",
+        "subs": "Recarga, CRIT y Vida%",
+        "note": "La Recarga requerida depende del arma y de las partículas del equipo."
+    },
+    "xingqiu": {
+        "name": "Xingqiu",
+        "sets": "4 piezas Emblema del Destino",
+        "main": "ATQ% o Recarga / Bono D Hydro / CRIT",
+        "subs": "Recarga hasta cubrir la rotación, después CRIT y ATQ%",
+        "note": "Con Espada de Sacrificio suele necesitar menos Recarga."
+    },
+    "xiangling": {
+        "name": "Xiangling",
+        "sets": "4 piezas Emblema del Destino",
+        "main": "Recarga o EM / Bono D Pyro / CRIT",
+        "subs": "Recarga, CRIT, EM y ATQ%",
+        "note": "La Recarga es importante porque su daño principal viene de la definitiva."
+    },
+    "kazuha": {
+        "name": "Kaedehara Kazuha",
+        "sets": "4 piezas Sombra Verde Esmeralda",
+        "main": "EM / EM / EM",
+        "subs": "Recarga, EM y Prob. CRIT si utiliza Favonius",
+        "note": "La reducción de resistencia requiere que Kazuha active Dispersión."
+    },
+    "baizhu": {
+        "name": "Baizhu",
+        "sets": "4 piezas Recuerdos del Bosque si nadie más lo lleva; 2+2 Vida% o 4 piezas Molusco",
+        "main": "Vida% o Recarga / Vida% / Vida% o Bono de Curación",
+        "subs": "Vida%, Recarga y Vida plana",
+        "note": "Cubre la Recarga necesaria y aprovecha sus pasivas de curación."
+    },
+    "fischl": {
+        "name": "Fischl",
+        "sets": "4 piezas Compañía Dorada",
+        "main": "ATQ% / Bono D Electro / CRIT",
+        "subs": "CRIT, ATQ% y EM en equipos de Aceleración",
+        "note": "Su daño fuera de campo aprovecha las bonificaciones de habilidad elemental."
+    },
+    "alhaitham": {
+        "name": "Alhacén",
+        "sets": "4 piezas Sueños Áureos o 4 piezas Recuerdos del Bosque si es quien lo activa",
+        "main": "EM o ATQ% / Bono D Dendro / CRIT",
+        "subs": "CRIT, EM, Recarga y ATQ%",
+        "note": "Busca EM y CRIT sin descuidar la disponibilidad de su definitiva."
+    },
+    "navia": {
+        "name": "Navia",
+        "sets": "4 piezas Murmullo Nocturno en el Bosque de los Ecos",
+        "main": "ATQ% / Bono D Geo / CRIT",
+        "subs": "CRIT, ATQ% y Recarga",
+        "note": "Mantén aplicación elemental para generar fragmentos de Cristalización."
+    },
+    "nilou": {
+        "name": "Nilou",
+        "sets": "2 piezas Vida% + 2 piezas Vida%; 4 piezas Flor Olvidada del Paraíso como alternativa",
+        "main": "Vida% / Vida% o EM / Vida%",
+        "subs": "Vida% hasta el objetivo de la pasiva, luego EM y Recarga",
+        "note": "Su pasiva especial requiere un equipo compuesto solo por Hydro y Dendro."
+    },
+    "ayaka": {
+        "name": "Kamisato Ayaka",
+        "sets": "4 piezas Nómada del Invierno",
+        "main": "ATQ% / Bono D Cryo / Daño CRIT",
+        "subs": "Daño CRIT, ATQ%, Recarga y Prob. CRIT moderada",
+        "note": "Congelación y el conjunto aportan Prob. CRIT adicional."
+    },
+    "ganyu": {
+        "name": "Ganyu",
+        "sets": "4 piezas Nómada del Invierno en Congelación o 4 piezas Orquesta del Errante en Derretido",
+        "main": "ATQ% / Bono D Cryo / CRIT",
+        "subs": "CRIT, ATQ%, EM en Derretido y Recarga",
+        "note": "Adapta las estadísticas al equipo y al tipo de rotación."
+    },
+    "xiao": {
+        "name": "Xiao",
+        "sets": "4 piezas Vermis del Ocaso o combinaciones de 2 piezas ATQ% / Anemo",
+        "main": "ATQ% / Bono D Anemo / CRIT",
+        "subs": "CRIT, ATQ% y Recarga",
+        "note": "Necesita batería y una rotación estable para recuperar su definitiva."
+    },
+    "wanderer": {
+        "name": "Errante",
+        "sets": "4 piezas Crónica del Pabellón del Desierto o 4 piezas Cazador Fantasmal con Furina",
+        "main": "ATQ% / Bono D Anemo / CRIT",
+        "subs": "CRIT, ATQ% y Recarga",
+        "note": "La presencia de Furina y el tipo de equipo pueden cambiar el conjunto óptimo."
+    }
+}
+
 
 
 # ---------------------------------------------------------------------------
@@ -1356,6 +1734,18 @@ async def handle_command(event: dict, source: str):
             "",
             "GENSHIN IMPACT",
             f"{PREFIX}guia <personaje> — ficha, estadísticas base y nombres de talentos.",
+            f"{PREFIX}talentoguia <personaje> — explica habilidades, pasivas y constelaciones.",
+            f"{PREFIX}statsnivel <personaje|arma> <nombre> <nivel> — estadísticas a nivel concreto, como 80+.",
+            f"{PREFIX}farm <personaje> — reúne ficha, estadísticas y materiales de ascensión.",
+            f"{PREFIX}materialesdetalle <personaje> — desglose por fase y totales de ascensión.",
+            f"{PREFIX}drops <enemigo> / {PREFIX}recompensas <enemigo> — muestra las recompensas registradas.",
+            f"{PREFIX}artefactos <personaje> — recomienda sets, estadísticas principales y subestadísticas.",
+            f"{PREFIX}resina [cantidad|gastar cantidad] — registra y calcula la regeneración de resina.",
+            f"{PREFIX}daño <ATQ> <multiplicador%> <bono%> <CR> <CD> — estima daño crítico y promedio.",
+            f"{PREFIX}cv <CR> <CD> — calcula el valor crítico de un artefacto.",
+            f"{PREFIX}reacciones <elemento> — muestra reacciones relacionadas con un elemento.",
+            f"{PREFIX}tcgdescifrar <código> — convierte un código compartido del TCG en IDs de cartas.",
+            f"{PREFIX}tcgcodificar <IDs separados por coma> — genera un código compartible del TCG.",
             f"{PREFIX}buscargenshin <texto> — busca a la vez en varias categorías del juego.",
             f"{PREFIX}lista <categoría> [página] — lista nombres de personajes, armas, enemigos y más.",
             f"{PREFIX}statsarma <arma> — estadísticas del arma al nivel 90.",
@@ -2677,6 +3067,475 @@ async def handle_command(event: dict, source: str):
         await send_message(thread, "\n\n".join(parts), source, reply)
         return
 
+    # -----------------------------------------------------------------------
+    # GENSHIN: HERRAMIENTAS AVANZADAS
+    # -----------------------------------------------------------------------
+    if command == "!statsnivel":
+        if len(args) < 3:
+            await send_message(
+                thread,
+                f"Uso: {PREFIX}statsnivel personaje Cyno 80+ o {PREFIX}statsnivel arma Staff of Homa 90",
+                source,
+                reply
+            )
+            return
+
+        kind = args[0].casefold()
+        level = args[-1].strip()
+        target_name = " ".join(args[1:-1]).strip()
+        folder = "characters" if kind in ("personaje", "personajes", "char") else (
+            "weapons" if kind in ("arma", "armas", "weapon") else None
+        )
+        if folder is None or not target_name:
+            await send_message(
+                thread,
+                "Indica personaje o arma, nombre y nivel. Ejemplo: !statsnivel personaje Cyno 80+",
+                source,
+                reply
+            )
+            return
+
+        stats = await game_stats(folder, target_name)
+        selected = get_level_stats(stats, level)
+        if not selected:
+            available = ", ".join(
+                key for key in stats.keys()
+                if re.fullmatch(r"\d{1,2}\+?", str(key))
+            ) if isinstance(stats, dict) else ""
+            await send_message(
+                thread,
+                f"No encontré el nivel {level} para {target_name}. "
+                + (f"Niveles disponibles: {available}" if available else "Comprueba el nombre y el nivel."),
+                source,
+                reply
+            )
+            return
+
+        details = [
+            f"ESTADÍSTICAS — {target_name} · NIVEL {level}",
+            f"Vida: {format_number(selected.get('hp'))}",
+            f"ATQ: {format_number(selected.get('attack'))}",
+            f"DEF: {format_number(selected.get('defense'))}"
+        ]
+        if selected.get("specialized") is not None:
+            details.append(f"Atributo de ascensión: {selected.get('specialized')}")
+        details.append("Valores base; no incluyen armas, artefactos, talentos ni bonificaciones.")
+        await send_message(thread, "\n".join(details), source, reply)
+        return
+
+    if command == "!talentoguia":
+        if not query:
+            await send_message(thread, f"Uso: {PREFIX}talentoguia nombre del personaje", source, reply)
+            return
+        character = await get_character(query)
+        if not isinstance(character, dict):
+            await send_message(thread, f"No encontré al personaje «{query}».", source, reply)
+            return
+        await send_message(
+            thread,
+            describe_talent_guide(character, query),
+            source,
+            reply
+        )
+        return
+
+    if command == "!materialesdetalle":
+        if not query:
+            await send_message(thread, f"Uso: {PREFIX}materialesdetalle nombre", source, reply)
+            return
+        character = await get_character(query)
+        costs = character.get("costs") if isinstance(character, dict) else None
+        if not isinstance(costs, dict):
+            await send_message(thread, f"No encontré los materiales de «{query}».", source, reply)
+            return
+        await send_message(
+            thread,
+            describe_cost_stages(
+                costs,
+                f"MATERIALES DETALLADOS — {character.get('name', query)}"
+            ),
+            source,
+            reply
+        )
+        return
+
+    if command == "!farm":
+        if not query:
+            await send_message(thread, f"Uso: {PREFIX}farm nombre del personaje", source, reply)
+            return
+        character, stats = await asyncio.gather(
+            get_character(query),
+            character_stats(query)
+        )
+        if not isinstance(character, dict):
+            await send_message(thread, f"No encontré al personaje «{query}».", source, reply)
+            return
+
+        sections = [
+            f"PLAN DE PROGRESIÓN — {character.get('name', query)}",
+            f"Rareza: {character.get('rarity', '?')}★ · "
+            f"{character.get('elementText', 'Elemento no informado')} · "
+            f"{character.get('weaponText', 'Arma no informada')}"
+        ]
+        level90 = get_level90(stats)
+        if isinstance(level90, dict):
+            sections.append(
+                "ESTADÍSTICAS BASE NIVEL 90\n"
+                f"Vida: {format_number(level90.get('hp'))} · "
+                f"ATQ: {format_number(level90.get('attack'))} · "
+                f"DEF: {format_number(level90.get('defense'))}"
+            )
+        costs = character.get("costs")
+        if isinstance(costs, dict):
+            totals = aggregate_material_costs(costs)
+            sections.append(
+                "MATERIALES DE ASCENSIÓN\n"
+                + ("\n".join(f"• {name}: {amount}" for name, amount in sorted(totals.items()))
+                   if totals else "La API no entregó totales de materiales.")
+            )
+        sections.append(
+            f"Usa {PREFIX}materialesdetalle {character.get('name', query)} "
+            "para revisar cada fase por separado."
+        )
+        await send_message(thread, "\n\n".join(sections), source, reply)
+        return
+
+    if command in ("!drops", "!recompensas"):
+        if not query:
+            await send_message(thread, f"Uso: {PREFIX}drops nombre del enemigo", source, reply)
+            return
+        enemy = await game_data("enemies", query)
+        if not isinstance(enemy, dict):
+            await send_message(thread, f"No encontré al enemigo «{query}».", source, reply)
+            return
+
+        drops = (
+            enemy.get("rewardPreview")
+            or enemy.get("drops")
+            or enemy.get("rewards")
+            or enemy.get("reward")
+        )
+        rendered = game_items_text(drops, limit=25)
+        if not rendered:
+            await send_message(
+                thread,
+                f"RECOMPENSAS — {enemy.get('name', query)}\n"
+                "La base consultada no publicó una lista de drops para este enemigo.",
+                source,
+                reply
+            )
+            return
+        await send_message(
+            thread,
+            f"RECOMPENSAS REGISTRADAS — {enemy.get('name', query)}\n"
+            + "\n".join(f"• {item}" for item in rendered)
+            + "\n\nLos drops pueden variar según nivel, mundo y dificultad.",
+            source,
+            reply
+        )
+        return
+
+    if command == "!artefactos":
+        if not query:
+            await send_message(thread, f"Uso: {PREFIX}artefactos nombre del personaje", source, reply)
+            return
+        key = query.casefold().strip()
+        guide = ARTIFACT_GUIDES.get(key)
+        if not guide:
+            guide = next(
+                (value for name, value in ARTIFACT_GUIDES.items()
+                 if name in key or key in name),
+                None
+            )
+        if not guide:
+            await send_message(
+                thread,
+                "Todavía no tengo una guía guardada para ese personaje. "
+                "Puedes consultar conjuntos con !artefacto nombre del set.",
+                source,
+                reply
+            )
+            return
+        answer = (
+            f"GUÍA DE ARTEFACTOS — {guide['name']}\n"
+            f"Conjuntos: {guide['sets']}\n"
+            f"Estadísticas principales: {guide['main']}\n"
+            f"Subestadísticas: {guide['subs']}\n"
+            f"Nota: {guide['note']}\n\n"
+            "Guía orientativa: ajusta Recarga, EM y estadísticas según arma, "
+            "constelaciones, equipo y rotación."
+        )
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!resina":
+        if not query:
+            snapshot = get_resin_snapshot(uid)
+            if not snapshot["configured"]:
+                answer = (
+                    "RESINA ORIGINAL\n"
+                    f"No has registrado tu cantidad todavía. Usa {PREFIX}resina 120.\n"
+                    f"También puedes usar {PREFIX}resina gastar 20 para registrar un gasto."
+                )
+            else:
+                amount = snapshot["amount"]
+                answer = (
+                    f"RESINA ORIGINAL — {amount}/{snapshot['cap']}\n"
+                    f"Siguiente punto: {resin_time(snapshot['next_seconds']) if amount < snapshot['cap'] else 'resina completa'}\n"
+                    f"Resina al máximo: {resin_time(snapshot['full_seconds']) if amount < snapshot['cap'] else 'ya está completa'}\n"
+                    "Regeneración estimada: 1 de resina cada 8 minutos."
+                )
+            await send_message(thread, answer, source, reply)
+            return
+
+        parts = query.casefold().split()
+        if parts[0] in ("ayuda", "help"):
+            await send_message(
+                thread,
+                "RESINA\n"
+                f"{PREFIX}resina 120 — registra tu resina actual.\n"
+                f"{PREFIX}resina gastar 40 — descuenta resina gastada.\n"
+                f"{PREFIX}resina establecer 160 — reemplaza el valor guardado.\n"
+                f"{PREFIX}resina — muestra cantidad y tiempo de regeneración.",
+                source,
+                reply
+            )
+            return
+
+        mode = "establecer"
+        amount_text = parts[-1]
+        if len(parts) == 2 and parts[0] in ("gastar", "restar", "usar"):
+            mode = "gastar"
+        elif len(parts) == 2 and parts[0] in ("establecer", "set", "poner"):
+            mode = "establecer"
+        elif len(parts) != 1:
+            await send_message(thread, f"Uso: {PREFIX}resina 120 o {PREFIX}resina gastar 40", source, reply)
+            return
+
+        try:
+            amount = int(amount_text)
+            if not 0 <= amount <= 200:
+                raise ValueError
+        except ValueError:
+            await send_message(thread, "La cantidad debe ser un número entre 0 y 200.", source, reply)
+            return
+
+        if mode == "gastar":
+            snapshot = get_resin_snapshot(uid)
+            if not snapshot["configured"]:
+                await send_message(thread, f"Primero registra tu resina con {PREFIX}resina 120.", source, reply)
+                return
+            amount = max(0, snapshot["amount"] - amount)
+
+        save_resin(uid, amount)
+        await send_message(
+            thread,
+            f"Resina actualizada: {amount}/200. Usa {PREFIX}resina para consultar su regeneración.",
+            source,
+            reply
+        )
+        return
+
+    if command in ("!cv", "!valorcritico"):
+        if len(args) != 2:
+            await send_message(thread, f"Uso: {PREFIX}cv 75 160", source, reply)
+            return
+        try:
+            cr, cd = parse_percent(args[0]), parse_percent(args[1])
+            if not 0 <= cr <= 100 or not 0 <= cd <= 500:
+                raise ValueError
+        except ValueError:
+            await send_message(thread, "Usa Prob. CRIT entre 0-100 y Daño CRIT entre 0-500.", source, reply)
+            return
+        await send_message(
+            thread,
+            f"VALOR CRÍTICO\nProb. CRIT: {cr:g}% · Daño CRIT: {cd:g}%\n"
+            f"CV = 2 × {cr:g} + {cd:g} = {2*cr+cd:.1f}",
+            source,
+            reply
+        )
+        return
+
+    if command == "!daño":
+        if len(args) != 5:
+            await send_message(
+                thread,
+                f"Uso: {PREFIX}daño ATQ multiplicador% bono% CR CD\n"
+                f"Ejemplo: {PREFIX}daño 1800 250 46 75 160",
+                source,
+                reply
+            )
+            return
+        try:
+            attack, multiplier, bonus, cr, cd = [parse_percent(x) for x in args]
+            if not (
+                attack > 0
+                and 0 <= multiplier <= 5000
+                and 0 <= bonus <= 1000
+                and 0 <= cr <= 100
+                and 0 <= cd <= 500
+            ):
+                raise ValueError
+        except ValueError:
+            await send_message(
+                thread,
+                "Valores inválidos. Revisa ATQ, multiplicador, bono, Prob. CRIT y Daño CRIT.",
+                source,
+                reply
+            )
+            return
+
+        raw_hit = attack * (multiplier / 100)
+        boosted_hit = raw_hit * (1 + bonus / 100)
+        critical_hit = boosted_hit * (1 + cd / 100)
+        average_hit = boosted_hit * (1 + (cr / 100) * (cd / 100))
+        await send_message(
+            thread,
+            "CALCULADORA DE DAÑO — ESTIMACIÓN\n"
+            f"Daño sin crítico: {format_number(boosted_hit)}\n"
+            f"Golpe crítico: {format_number(critical_hit)}\n"
+            f"Daño medio esperado: {format_number(average_hit)}\n"
+            "No aplica DEF, RES, reacción, reducción, buffs externos ni redondeos del juego.",
+            source,
+            reply
+        )
+        return
+
+    if command == "!reacciones":
+        if not query:
+            await send_message(
+                thread,
+                f"Uso: {PREFIX}reacciones pyro, hydro, dendro, electro, cryo, anemo o geo.",
+                source,
+                reply
+            )
+            return
+        element = query.casefold().strip()
+        matrix = {
+            "pyro": [
+                "Hydro: Vaporización",
+                "Cryo: Derretido",
+                "Electro: Sobrecarga",
+                "Dendro: Quemadura",
+                "Dendro + Hydro: Florecimiento"
+            ],
+            "hydro": [
+                "Pyro: Vaporización",
+                "Cryo: Congelado",
+                "Electro: Electrocargado",
+                "Dendro: Florecimiento"
+            ],
+            "cryo": [
+                "Pyro: Derretido",
+                "Hydro: Congelado",
+                "Electro: Superconductor"
+            ],
+            "electro": [
+                "Pyro: Sobrecarga",
+                "Hydro: Electrocargado",
+                "Cryo: Superconductor",
+                "Dendro: Aceleración (Agravado/Propagación)"
+            ],
+            "dendro": [
+                "Hydro: Florecimiento",
+                "Electro: Aceleración",
+                "Pyro: Quemadura"
+            ],
+            "anemo": [
+                "Pyro/Hydro/Electro/Cryo: Dispersión",
+                "No dispersa Dendro ni Geo"
+            ],
+            "geo": [
+                "Pyro/Hydro/Electro/Cryo: Cristalización",
+                "No cristaliza con Anemo ni Dendro"
+            ]
+        }
+        values = matrix.get(element)
+        if not values:
+            await send_message(
+                thread,
+                "Elemento no reconocido. Usa Pyro, Hydro, Cryo, Electro, Dendro, Anemo o Geo.",
+                source,
+                reply
+            )
+            return
+        await send_message(
+            thread,
+            f"REACCIONES DE {element.upper()}\n"
+            + "\n".join(f"• {value}" for value in values)
+            + "\n\nLa reacción concreta depende del orden de aplicación y de las auras.",
+            source,
+            reply
+        )
+        return
+
+    if command in ("!tcgdescifrar", "!tcgdecode"):
+        if not query or len(query) > 256:
+            await send_message(thread, f"Uso: {PREFIX}tcgdescifrar código_compartido", source, reply)
+            return
+        try:
+            response = await external_request(
+                "GET",
+                "https://genshin-db-api.vercel.app/api/tcgdeckshare/decode",
+                params={"code": query},
+                timeout=15
+            )
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, dict):
+                ids = data.get("deck") or data.get("cards") or data.get("result") or []
+            else:
+                ids = data
+            if not isinstance(ids, list):
+                ids = []
+            rendered = ", ".join(str(value) for value in ids)
+            answer = (
+                "CÓDIGO TCG DESCIFRADO\n"
+                + (f"IDs de cartas ({len(ids)}):\n{rendered}" if ids else "La API no devolvió IDs.")
+            )
+        except Exception as exc:
+            logging.warning("TCG decode: %s", exc)
+            answer = "No pude descifrar el código. Comprueba que esté completo y actualizado."
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command in ("!tcgcodificar", "!tcgencode"):
+        raw_ids = re.split(r"[,\s]+", query.strip()) if query else []
+        if (
+            not raw_ids
+            or len(raw_ids) > 40
+            or any(not value.isdigit() for value in raw_ids)
+        ):
+            await send_message(
+                thread,
+                f"Uso: {PREFIX}tcgcodificar 55,52,23,151,151,194,194",
+                source,
+                reply
+            )
+            return
+        try:
+            response = await external_request(
+                "GET",
+                "https://genshin-db-api.vercel.app/api/tcgdeckshare/encode",
+                params={"deck": ",".join(raw_ids)},
+                timeout=15
+            )
+            response.raise_for_status()
+            data = response.json()
+            code = data.get("deckcode") if isinstance(data, dict) else data
+            if not code:
+                raise ValueError("API sin código")
+            await send_message(thread, f"CÓDIGO DE MAZO TCG\n{code}", source, reply)
+        except Exception as exc:
+            logging.warning("TCG encode: %s", exc)
+            await send_message(
+                thread,
+                "No pude generar el código del mazo. Revisa los IDs de cartas.",
+                source,
+                reply
+            )
+        return
+
     if command == "!buscargenshin":
         if not query:
             await send_message(
@@ -2845,6 +3704,34 @@ async def handle_command(event: dict, source: str):
         await send_message(
             thread,
             describe_game(data, query, object_commands[command]),
+            source,
+            reply
+        )
+        return
+
+    if command == "!constelacion" and len(args) > 1:
+        character_query = " ".join(args[:-1]).strip()
+        selected = args[-1].upper()
+        match = re.fullmatch(r"C?([1-6])", selected)
+        if not match:
+            await send_message(thread, "Usa C1, C2, C3, C4, C5 o C6.", source, reply)
+            return
+        character = await get_character(character_query)
+        constellations = (
+            character.get("constellations") or character.get("Constellations")
+            if isinstance(character, dict) else None
+        )
+        entries = list(constellations.values()) if isinstance(constellations, dict) else []
+        index = int(match.group(1)) - 1
+        if index >= len(entries) or not isinstance(entries[index], dict):
+            await send_message(thread, f"No encontré C{index + 1} para {character_query}.", source, reply)
+            return
+        entry = entries[index]
+        await send_message(
+            thread,
+            f"CONSTELACIÓN C{index + 1} — {character.get('name', character_query)}\n"
+            f"{entry.get('name', 'Sin nombre')}\n"
+            f"{clean_game_text(entry.get('description') or 'Sin descripción disponible.')}",
             source,
             reply
         )
