@@ -7565,214 +7565,154 @@ def helper_format_talents(data: Any, translations: dict, build_label: str) -> st
 
 
 # ---------------------------------------------------------------------------
-# TRADUCCIÓN AUTOMÁTICA DE GUÍAS EXTERNAS AL ESPAÑOL
 # ---------------------------------------------------------------------------
-GUIDE_TRANSLATION_CACHE_TTL = 7 * 24 * 60 * 60
-GUIDE_TRANSLATION_MAX_CHUNK = 2800
-DEEPL_API_KEY = os.getenv("DEEPL_API_KEY", "").strip()
+# NORMALIZACIÓN DE TERMINOLOGÍA DE GUÍAS AL ESPAÑOL
+# Se evita traducir párrafos y nombres propios con traductores genéricos.
+# Las fuentes en español tienen prioridad; este glosario normaliza respaldos.
+# ---------------------------------------------------------------------------
+GUIDE_TERM_TRANSLATIONS = {
+    "energy recharge": "Recarga de Energía",
+    "elemental mastery": "Maestría Elemental",
+    "crit rate": "Prob. CRIT",
+    "critical rate": "Prob. CRIT",
+    "crit dmg": "Daño CRIT",
+    "crit damage": "Daño CRIT",
+    "attack percent": "ATQ%",
+    "atk%": "ATQ%",
+    "hp%": "Vida%",
+    "def%": "DEF%",
+    "physical dmg": "Daño Físico",
+    "physical damage": "Daño Físico",
+    "pyro dmg": "Daño Pyro",
+    "pyro damage": "Daño Pyro",
+    "hydro dmg": "Daño Hydro",
+    "hydro damage": "Daño Hydro",
+    "cryo dmg": "Daño Cryo",
+    "cryo damage": "Daño Cryo",
+    "electro dmg": "Daño Electro",
+    "electro damage": "Daño Electro",
+    "dendro dmg": "Daño Dendro",
+    "dendro damage": "Daño Dendro",
+    "anemo dmg": "Daño Anemo",
+    "anemo damage": "Daño Anemo",
+    "geo dmg": "Daño Geo",
+    "geo damage": "Daño Geo",
+    "sands": "Reloj",
+    "goblet": "Copa",
+    "circlet": "Corona",
+    "substats": "Subestadísticas",
+    "substat priority": "Prioridad de subestadísticas",
+    "main stats": "Estadísticas principales",
+    "recommended main stats": "Estadísticas principales recomendadas",
+    "normal attack": "Ataque Normal",
+    "charged attack": "Ataque Cargado",
+    "plunging attack": "Ataque Descendente",
+    "elemental skill": "Habilidad Elemental",
+    "elemental burst": "Habilidad Definitiva",
+    "talent priority": "Prioridad de talentos",
+    "main dps": "DPS en campo",
+    "sub dps": "DPS secundario",
+    "support": "Soporte",
+    "healer": "Sanador",
+    "shield": "Escudo",
+    "off-field": "fuera del campo",
+    "on-field": "en campo",
+    "freeze": "Congelación",
+    "melt": "Derretido",
+    "vaporize": "Vaporizado",
+    "hyperbloom": "Sobreflorecimiento",
+    "burgeon": "Crepitar",
+    "aggravate": "Aceleración",
+    "spread": "Propagación",
+    "best in slot": "mejor opción",
+    "free to play": "F2P",
+    "team composition": "Composición del equipo",
+    "rotation": "Rotación",
+    "weapons": "Armas",
+    "artifacts": "Artefactos",
+    "teams": "Equipos"
+}
+
+GUIDE_OFFICIAL_NAME_TRANSLATIONS = {
+    "emblem of severed fate": "Emblema del Destino",
+    "deepwood memories": "Recuerdos del Bosque",
+    "gilded dreams": "Sueños Áureos",
+    "golden troupe": "Compañía Dorada",
+    "marechaussee hunter": "Cazador Fantasmal",
+    "fragment of harmonic whimsy": "Fragmento de la Armonía Fantasiosa",
+    "scroll of the hero of cinder city": "Pergamino del Héroe de la Ciudad de las Cenizas",
+    "nighttime whispers in the echoing woods": "Murmullo Nocturno en el Bosque de los Ecos",
+    "obsidian codex": "Códice de Obsidiana",
+    "echoes of an offering": "Eco del Sacrificio",
+    "vermillion hereafter": "Reminiscencia de la Purificación",
+    "desert pavilion chronicle": "Épica del Pabellón del Desierto",
+    "blizzard strayer": "Nómada del Invierno",
+    "gladiator's finale": "Final del Gladiador",
+    "crimson witch of flames": "Bruja Carmesí en Llamas",
+    "heart of depth": "Corazón de las Profundidades",
+    "tenacity of the millelith": "Tenacidad de la Geoarmada",
+    "noblesse oblige": "Ritual Antiguo de la Nobleza",
+    "viridescent venerer": "Sombra Verde Esmeralda",
+    "wanderer's troupe": "Orquesta del Errante",
+    "staff of homa": "Báculo de Homa",
+    "staff of the scarlet sands": "Báculo de las Arenas Escarlatas",
+    "primordial jade winged-spear": "Lanza Primordial de Jade",
+    "the catch": "La Captura",
+    "engulfing lightning": "Luz del Segador",
+    "aqua simulacra": "Aqua Simulacra",
+    "splendor of tranquil waters": "Esplendor de las Aguas Quietas",
+    "crimson moon's semblance": "Semblante de la Luna Carmesí",
+    "the black sword": "Espada Negra",
+    "freedom-sworn": "Juramento por la Libertad",
+    "favonius sword": "Espada de Favonius",
+    "favonius lance": "Lanza de Favonius",
+    "prototype amber": "Prototipo Ámbar",
+    "sacrificial fragments": "Fragmentos de Sacrificio"
+}
 
 
-def split_guide_translation_text(value: str, max_chars: int = GUIDE_TRANSLATION_MAX_CHUNK):
-    """Divide texto largo sin cortar palabras ni perder saltos de línea."""
-    chunks = []
-    current = ""
-
-    for line in str(value or "").splitlines():
-        remaining = line
-        while len(remaining) > max_chars:
-            cut = remaining.rfind(" ", 0, max_chars)
-            if cut < max_chars // 2:
-                cut = max_chars
-            piece = remaining[:cut].strip()
-            if piece:
-                if current:
-                    chunks.append(current)
-                    current = ""
-                chunks.append(piece)
-            remaining = remaining[cut:].strip()
-
-        if len(current) + len(remaining) + 1 > max_chars:
-            if current:
-                chunks.append(current)
-            current = remaining
-        else:
-            current = (current + "\n" + remaining).strip() if current else remaining
-
-    if current:
-        chunks.append(current)
-    return chunks
-
-
-def extract_google_translation(payload: Any):
-    """Acepta las distintas respuestas JSON usadas por el endpoint de traducción."""
-    if isinstance(payload, dict):
-        sentences = payload.get("sentences")
-        if isinstance(sentences, list):
-            translated = [
-                str(item.get("trans") or "")
-                for item in sentences
-                if isinstance(item, dict)
-            ]
-            translated = [item for item in translated if item]
-            if translated:
-                return "".join(translated)
-
-        ld_result = payload.get("ld_result")
-        if isinstance(ld_result, dict):
-            translations = ld_result.get("translations") or []
-            translated = [
-                str(item.get("translatedText") or "")
-                for item in translations
-                if isinstance(item, dict)
-            ]
-            translated = [item for item in translated if item]
-            if translated:
-                return "".join(translated)
-
-        translated = payload.get("translatedText")
-        if isinstance(translated, str) and translated.strip():
-            return translated.strip()
-
-    if isinstance(payload, list):
-        translated = []
-        for item in payload:
-            if isinstance(item, list) and item and isinstance(item[0], str):
-                translated.append(item[0])
-        if translated:
-            return "".join(translated)
-
-    return None
-
-
-async def translate_guide_chunk(text: str):
-    """Traduce un bloque al español; usa proveedores alternativos si falla uno."""
-    if not text or not text.strip():
-        return text
-
-    # DeepL es opcional. Solo se utiliza cuando el administrador configura su clave.
-    if DEEPL_API_KEY:
-        try:
-            response = await external_request(
-                "POST",
-                "https://api-free.deepl.com/v2/translate",
-                data={"text": text, "target_lang": "ES"},
-                timeout=18,
-                headers={"Authorization": f"DeepL-Auth-Key {DEEPL_API_KEY}"}
-            )
-            if response.status_code == 200:
-                payload = response.json()
-                translations = payload.get("translations") or []
-                if translations and translations[0].get("text"):
-                    return str(translations[0]["text"])
-        except (httpx.HTTPError, ValueError, TypeError) as exc:
-            logging.debug("DeepL no disponible para guías: %s", exc)
-
-    # Endpoint GET del traductor de Chrome. No requiere clave, pero no tiene SLA.
-    try:
-        response = await external_request(
-            "GET",
-            "https://clients5.google.com/translate_a/t",
-            params={
-                "client": "dict-chrome-ex",
-                "sl": "auto",
-                "tl": "es",
-                "q": text
-            },
-            timeout=16,
-            headers={
-                "User-Agent": "Mozilla/5.0 Katherine-AnarchyBot/4.0",
-                "Accept": "application/json"
-            }
+def localize_guide_text(value: Any) -> str:
+    """Normaliza términos del juego; no altera frases ni nombres desconocidos."""
+    text = str(value or "")
+    for english, spanish in sorted(
+        GUIDE_OFFICIAL_NAME_TRANSLATIONS.items(),
+        key=lambda item: len(item[0]),
+        reverse=True
+    ):
+        text = re.sub(
+            re.escape(english),
+            spanish,
+            text,
+            flags=re.IGNORECASE
         )
-        if response.status_code == 200:
-            translated = extract_google_translation(response.json())
-            if translated:
-                return translated
-    except (httpx.HTTPError, ValueError, TypeError) as exc:
-        logging.debug("Traductor principal no disponible: %s", exc)
-
-    # Alternativa abierta de Apertium para no dejar la guía en inglés.
-    try:
-        response = await external_request(
-            "GET",
-            "https://apertium.org/apy/translate",
-            params={"q": text, "langpair": "eng|spa"},
-            timeout=16,
-            headers={"User-Agent": "Katherine-AnarchyBot/4.0"}
-        )
-        if response.status_code == 200:
-            payload = response.json()
-            translated = (
-                (payload.get("responseData") or {}).get("translatedText")
-                if isinstance(payload, dict) else None
-            )
-            if translated:
-                return html.unescape(str(translated))
-    except (httpx.HTTPError, ValueError, TypeError) as exc:
-        logging.debug("Apertium no disponible para guías: %s", exc)
-
-    return None
+    for english, spanish in sorted(
+        GUIDE_TERM_TRANSLATIONS.items(),
+        key=lambda item: len(item[0]),
+        reverse=True
+    ):
+        pattern = r"(?<![A-Za-z])" + re.escape(english) + r"(?![A-Za-z])"
+        text = re.sub(pattern, spanish, text, flags=re.IGNORECASE)
+    text = re.sub(r"\bATK\b", "ATQ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bHP\b", "Vida", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bER\b", "Recarga", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()
 
 
-async def translate_guide_text(value: Any):
-    """Traduce texto de fuentes comunitarias y reutiliza traducciones en caché."""
-    if not isinstance(value, str) or not value.strip():
-        return value
-
-    original = value.strip()
-    cache_key = "guide-translation-es:" + hashlib.sha1(
-        original.encode("utf-8", errors="ignore")
-    ).hexdigest()
-    cached = cache.get(cache_key)
-    if cached and cached[0] > time.time():
-        return cached[1]
-
-    chunks = split_guide_translation_text(original)
-    translated_chunks = await asyncio.gather(
-        *(translate_guide_chunk(chunk) for chunk in chunks),
-        return_exceptions=True
-    )
-
-    output = []
-    translated_any = False
-    for original_chunk, translated in zip(chunks, translated_chunks):
-        if isinstance(translated, str) and translated.strip():
-            output.append(translated.strip())
-            translated_any = True
-        else:
-            output.append(original_chunk)
-
-    result = "\n".join(output).strip()
-    # Cachea tanto éxitos como fallos breves para no martillar servicios externos.
-    ttl = GUIDE_TRANSLATION_CACHE_TTL if translated_any else 900
-    cache[cache_key] = (time.time() + ttl, result)
-    if not translated_any:
-        logging.warning(
-            "No se pudo traducir una sección externa; se conserva el texto original."
-        )
-    return result
-
-
-async def translate_guide_fields(data: dict, fields):
-    """Traduce únicamente los campos textuales solicitados."""
+def localize_guide_fields(data: dict, fields):
+    """Aplica glosario solo a campos del juego, nunca a URLs ni IDs."""
     if not isinstance(data, dict):
         return data
-
-    selected = [
-        field for field in fields
-        if isinstance(data.get(field), str) and data[field].strip()
-    ]
-    if not selected:
-        return data
-
-    values = await asyncio.gather(
-        *(translate_guide_text(data[field]) for field in selected),
-        return_exceptions=True
-    )
     result = dict(data)
-    for field, translated in zip(selected, values):
-        if isinstance(translated, str) and translated.strip():
-            result[field] = translated
+    for field in fields:
+        value = result.get(field)
+        if isinstance(value, str):
+            result[field] = localize_guide_text(value)
+        elif isinstance(value, list):
+            result[field] = [
+                localize_guide_text(item) if isinstance(item, str) else item
+                for item in value
+            ]
     return result
 
 
@@ -7958,10 +7898,9 @@ async def fetch_helper_character_guide(
     for field in ("artifacts", "weapons", "talents"):
         result[field] = "\n\n".join(result[field])
     result["build_count"] = len(bundles)
-    result = await translate_guide_fields(
+    return localize_guide_fields(
         result, ("artifacts", "weapons", "talents")
     )
-    return result
 
 
 class KQMTeamParser(HTMLParser):
@@ -8580,10 +8519,9 @@ async def fetch_community_character_guide(
         source_labels[source] for source in merged["sources"]
     ))
     merged["sources"] = list(dict.fromkeys(merged["sources"]))
-    merged = await translate_guide_fields(
+    return localize_guide_fields(
         merged, ("weapons", "artifacts", "stats", "talents", "teams")
     )
-    return merged
 
 
 def normalize_character_guide_key(name: str) -> str:
