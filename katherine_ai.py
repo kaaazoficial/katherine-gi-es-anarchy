@@ -24,7 +24,6 @@ GROQ_STRICT_JSON_MODELS = frozenset({
     "openai/gpt-oss-20b",
     "openai/gpt-oss-120b",
     "qwen/qwen3.8-27b",
-    "meta-models/muse-spark-open",
 })
 
 ACTION_SCHEMA = {
@@ -382,10 +381,14 @@ class KatherineAI:
                 for turn in messages[-(self.memory_turns * 2 + 1):]
                 if turn.get("role") in {"user", "assistant"}
             ],
-            "store": False,
             "max_output_tokens": max(100, min(1200, int(max_output_tokens))),
             "text": {"format": output_format},
         }
+        # Groq's Responses API currently rejects the "store" request parameter.
+        # Its API is stateless; omit it there. OpenAI receives store=False explicitly.
+        if not self.is_groq:
+            body["store"] = False
+
         async with self._semaphore:
             response = await request_func(
                 "POST",
