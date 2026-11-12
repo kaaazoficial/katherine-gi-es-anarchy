@@ -693,7 +693,7 @@ async def api(method: str, path: str, source="developer", body=None):
         }
 
 
-def split_message_content(content: str, limit: int = 500) -> list[str]:
+def split_message_content(content: str, limit: int = 2000) -> list[str]:
     """Divide mensajes en bloques de hasta 'limit' caracteres."""
     text = clean_text(content)
     if not text:
@@ -735,7 +735,7 @@ async def send_message(
     if not thread_id:
         return None
 
-    parts = split_message_content(content, 500)
+    parts = split_message_content(content, 2000)
     if not parts:
         return None
 
@@ -1260,7 +1260,7 @@ async def handle_command(event: dict, source: str):
             f"{PREFIX}salas — consulta las salas en vivo de comunidad.",
             f"{PREFIX}perfilbot <Nombre> | <Estado> — modifica el perfil del bot (solo administradores).",
             "",
-            "Los mensajes de Katherine se envían en bloques de máximo 500 caracteres."
+            "Los mensajes de Katherine se envían en bloques de máximo 2000 caracteres."
         ]
 
         await send_message(
