@@ -7367,11 +7367,13 @@ async def handle_command(event: dict, source: str):
             [
                 "SISTEMA Y KATHERINE",
                 f"{PREFIX}estado — panel general de Katherine.",
+                f"{PREFIX}statsbot — alias de estado.",
                 f"{PREFIX}diagnostico — comprueba API, SQLite y tareas internas.",
                 f"{PREFIX}estadisticas — métricas del proceso y solicitudes.",
                 f"{PREFIX}tareas — tareas, juegos y encuestas activas.",
                 f"{PREFIX}cache — estado de la caché de Genshin.",
                 f"{PREFIX}cache limpiar — vacía la caché temporal.",
+                f"{PREFIX}limpiarcache — alias para vaciar la caché.",
                 f"{PREFIX}conexiones — prueba los tokens y conexiones configurados.",
                 f"{PREFIX}configbot — muestra configuración segura del bot.",
                 f"{PREFIX}version — versión de código y despliegue.",
