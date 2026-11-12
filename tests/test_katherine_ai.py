@@ -258,31 +258,40 @@ def test_ai_session_key_never_uses_nickname_as_persistent_identity():
 
 
 @pytest.mark.asyncio
-async def test_chat_summary_sends_every_message_without_silent_truncation(monkeypatch):
+async def test_chat_summary_respects_short_retention_and_hard_message_cap(monkeypatch):
     monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
     ai = KatherineAI(analyst_limit=200)
+    assert ai.analyst_limit == 60
+    assert ai.analyst_ttl == 900
     ai.set_analyst("room", True)
     for index in range(100):
         ai.record_chat_message(
             "room", f"User{index:03d}", f"MARKER{index:03d} " + ("x" * 680)
         )
 
+    retained = ai.analyst_messages("room")
+    assert len(retained) == 60
+    assert retained[0]["author"].startswith("Participante-")
+    assert "User040" not in str(retained)
+    assert retained[0]["content"].startswith("MARKER040")
+
     captured = {}
 
     async def fake_request(method, url, **kwargs):
         captured.update(kwargs)
         return FakeResponse(response_payload({
-            "kind": "answer", "answer": "Resumen de los 100 mensajes.",
+            "kind": "answer", "answer": "Resumen de los mensajes recientes.",
             "command": "", "args": ""
         }))
 
     answer = await ai.summarize_chat("room", fake_request)
     inputs = captured["json"]["input"]
     all_input = "\n".join(item["content"] for item in inputs)
-    assert answer == "Resumen de los 100 mensajes."
+    assert answer == "Resumen de los mensajes recientes."
     assert len(inputs) > 1
     assert all(len(item["content"]) <= 4000 for item in inputs)
-    assert all(f"MARKER{index:03d}" in all_input for index in range(100))
+    assert all(f"MARKER{index:03d}" in all_input for index in range(40, 100))
+    assert all(f"MARKER{index:03d}" not in all_input for index in range(40))
 
 
 def test_groq_status_does_not_claim_store_disabled(monkeypatch):
