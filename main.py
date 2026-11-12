@@ -46,7 +46,7 @@ from pathlib import Path
 from collections import defaultdict, deque
 from typing import Any
 from html.parser import HTMLParser
-from urllib.parse import urljoin, quote
+from urllib.parse import urljoin, quote, urlparse
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
@@ -1522,6 +1522,9 @@ async def ensure_voice_room(thread_id: str):
                 "filename": None,
                 "track": None,
                 "looping": False,
+                "volume": 0.75,
+                "last_volume": 0.75,
+                "temporary_audio_path": None,
                 "started_at": time.time()
             }
             logging.info("[VOZ] Katherine conectada a la llamada %s", thread_id)
@@ -1587,6 +1590,13 @@ async def stop_dj_room(
                 await room.disconnect()
             except Exception:
                 logging.exception("[VOZ] Error cerrando LiveKit")
+
+        temporary_audio = state.get("temporary_audio_path")
+        if temporary_audio:
+            try:
+                Path(temporary_audio).unlink(missing_ok=True)
+            except OSError:
+                logging.warning("[DJ] No pude borrar el audio temporal de %s", thread_id)
 
     if request_leave:
         await api("POST", f"/live-rooms/{thread_id}/leave", "community")
@@ -1786,6 +1796,97 @@ async def enqueue_message_for_speech(event: dict, source: str):
         logging.warning("[TTS] Cola llena; se omitió un mensaje en %s", thread_id)
 
 
+async def download_dj_audio(url: str) -> Path:
+    """Descarga una pista pública de Internet Archive a un archivo temporal local."""
+    parsed = urlparse(str(url))
+    host = (parsed.hostname or "").lower()
+    if (
+        parsed.scheme != "https"
+        or not (host == "archive.org" or host.endswith(".archive.org"))
+    ):
+        raise ValueError("La fuente de música no pertenece a Internet Archive.")
+
+    suffix = Path(parsed.path).suffix.lower()
+    if suffix not in DJ_AUDIO_EXTENSIONS:
+        raise ValueError("El enlace no tiene un formato de audio compatible.")
+
+    fd, temp_name = tempfile.mkstemp(prefix="katherine-dj-", suffix=suffix)
+    temp_path = Path(temp_name)
+    total_bytes = 0
+    max_bytes = 150 * 1024 * 1024
+
+    try:
+        timeout = httpx.Timeout(60.0, connect=20.0)
+        headers = {
+            "User-Agent": "Katherine-AnarchyBot/3.1",
+            "Accept": "audio/*,application/octet-stream;q=0.9,*/*;q=0.5"
+        }
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+            headers=headers
+        ) as client:
+            async with client.stream("GET", str(url)) as response:
+                if not response.is_success:
+                    raise RuntimeError(
+                        f"Internet Archive respondió HTTP {response.status_code}."
+                    )
+                content_type = response.headers.get("content-type", "").lower()
+                if "text/html" in content_type or "application/json" in content_type:
+                    raise RuntimeError(
+                        "Internet Archive devolvió una página web en vez del audio."
+                    )
+                try:
+                    content_length = int(response.headers.get("content-length", "0"))
+                except (TypeError, ValueError):
+                    content_length = 0
+                if content_length > max_bytes:
+                    raise RuntimeError("La pista supera el límite de 150 MB.")
+
+                with os.fdopen(fd, "wb") as output:
+                    fd = -1
+                    async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                        if not chunk:
+                            continue
+                        total_bytes += len(chunk)
+                        if total_bytes > max_bytes:
+                            raise RuntimeError("La pista supera el límite de 150 MB.")
+                        output.write(chunk)
+
+        if total_bytes < 1024:
+            raise RuntimeError("El archivo descargado está vacío o incompleto.")
+
+        container = pyav.open(str(temp_path), mode="r")
+        try:
+            audio_stream = next(
+                (stream for stream in container.streams if stream.type == "audio"),
+                None
+            )
+            if audio_stream is None:
+                raise RuntimeError("El archivo descargado no contiene una pista de audio.")
+        finally:
+            container.close()
+
+        logging.info(
+            "[DJ] Audio descargado y validado | %.2f MB | %s",
+            total_bytes / (1024 * 1024),
+            suffix
+        )
+        return temp_path
+
+    except Exception:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 async def dj_playback_loop(
     thread_id: str,
     file_path: Path | str,
@@ -1805,12 +1906,9 @@ async def dj_playback_loop(
 
     try:
         while not playback_stop.is_set() and not session_stop.is_set():
-            container = pyav.open(audio_source_url, mode="r", options={
-                "rw_timeout": "15000000",
-                "reconnect": "1",
-                "reconnect_streamed": "1",
-                "user_agent": "Katherine-AnarchyBot/3.1 (GPT-6; https://github.com/kaaazoficial/katherine-gi-es-anarchy)"
-            })
+            # Las pistas remotas ya se descargan a disco antes de llegar aquí.
+            # PyAV abre archivos locales, no URLs HTTP directas.
+            container = pyav.open(audio_source_url, mode="r")
             try:
                 audio_stream = next(
                     (stream for stream in container.streams if stream.type == "audio"),
@@ -1829,6 +1927,15 @@ async def dj_playback_loop(
                         break
                     for frame in resampler.resample(decoded):
                         samples = np.asarray(frame.to_ndarray(), dtype=np.int16).reshape(-1)
+                        volume = max(0.0, min(1.0, float(state.get("volume", 0.75))))
+                        if volume <= 0.0:
+                            samples = np.zeros_like(samples)
+                        elif volume < 1.0:
+                            samples = np.clip(
+                                samples.astype(np.float32) * volume,
+                                -32768,
+                                32767
+                            ).astype(np.int16)
                         for offset in range(0, len(samples), 480):
                             if playback_stop.is_set() or session_stop.is_set():
                                 break
@@ -1862,6 +1969,12 @@ async def dj_playback_loop(
     finally:
         if DJ_ROOMS.get(str(thread_id)) is state and state.get("task") is asyncio.current_task():
             state["task"] = None
+            temporary_audio = state.pop("temporary_audio_path", None)
+            if temporary_audio:
+                try:
+                    Path(temporary_audio).unlink(missing_ok=True)
+                except OSError:
+                    logging.warning("[DJ] No pude borrar el audio temporal de %s", thread_id)
             if not state.get("reading_enabled") and not session_stop.is_set():
                 await stop_dj_room(
                     str(thread_id),
@@ -1878,8 +1991,24 @@ async def start_dj_room(
 ):
     if pyav is None or livekit_rtc is None or np is None:
         return False, "Faltan dependencias de LiveKit, PyAV o NumPy en Render."
+
+    temporary_audio = None
+    original_source = file_path
+    if isinstance(file_path, str) and file_path.lower().startswith("https://"):
+        try:
+            file_path = await download_dj_audio(file_path)
+            temporary_audio = file_path
+        except Exception as exc:
+            logging.exception("[DJ] No se pudo preparar la pista remota")
+            return False, (
+                "No pude descargar o validar la canción "
+                f"({type(exc).__name__}: {str(exc)[:140]})."
+            )
+
     ok, message = await ensure_voice_room(str(thread_id))
     if not ok:
+        if temporary_audio:
+            Path(temporary_audio).unlink(missing_ok=True)
         return False, message
 
     state = DJ_ROOMS[str(thread_id)]
@@ -1895,14 +2024,24 @@ async def start_dj_room(
         except Exception:
             logging.exception("[DJ] Error reemplazando la pista anterior")
 
+    old_temporary_audio = state.get("temporary_audio_path")
+    if old_temporary_audio:
+        try:
+            Path(old_temporary_audio).unlink(missing_ok=True)
+        except OSError:
+            logging.warning("[DJ] No pude borrar la pista temporal anterior.")
+
     state["playback_stop_event"] = asyncio.Event()
     display_name = (
         (track_metadata or {}).get("title")
-        or (file_path.name if isinstance(file_path, Path) else "Audio remoto")
+        or (file_path.name if isinstance(file_path, Path) else Path(str(original_source)).name)
     )
     state["filename"] = display_name
     state["track"] = track_metadata
     state["looping"] = looping
+    state["temporary_audio_path"] = str(temporary_audio) if temporary_audio else None
+    state.setdefault("volume", 0.75)
+    state.setdefault("last_volume", state["volume"])
     state["task"] = asyncio.create_task(
         dj_playback_loop(
             str(thread_id),
@@ -10487,6 +10626,10 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}buscar <tema> — alias rápido de {PREFIX}dj buscar.",
                 f"{PREFIX}dj archivo.mp3 [bucle] — reproduce audio local (comunidad).",
                 f"{PREFIX}djdetener — detiene la reproducción y sale de la sala.",
+                f"{PREFIX}volumen [0-100] — consulta o ajusta el volumen de música.",
+                f"{PREFIX}subirvolumen [cantidad] — aumenta el volumen (10% por defecto).",
+                f"{PREFIX}bajarvolumen [cantidad] — reduce el volumen (10% por defecto).",
+                f"{PREFIX}silencio — silencia la música; !volumen restaurar recupera el nivel anterior.",
                 f"{PREFIX}menu — abre el menú interactivo.",
                 f"{PREFIX}economia — muestra el sistema de puntos.",
                 f"{PREFIX}perfilbot <Nombre> | <Estado> — modifica el perfil (administradores).",
@@ -12138,6 +12281,81 @@ async def handle_command(event: dict, source: str):
         )
         return
 
+    if command in ("!volumen", "!volume", "!subirvolumen", "!bajarvolumen", "!silencio"):
+        state = DJ_ROOMS.get(thread)
+        if not state:
+            await send_message(
+                thread,
+                "No hay una llamada activa. Usa !join o !dj para conectar a Katherine primero.",
+                source,
+                reply
+            )
+            return
+
+        current = int(round(float(state.get("volume", 0.75)) * 100))
+        target = current
+        amount = 10
+        raw_value = (args[0].strip().lower() if args else "")
+
+        try:
+            if command == "!silencio":
+                target = 0
+            elif command == "!subirvolumen":
+                amount = abs(int(raw_value)) if raw_value else 10
+                target = min(100, current + amount)
+            elif command == "!bajarvolumen":
+                amount = abs(int(raw_value)) if raw_value else 10
+                target = max(0, current - amount)
+            elif not raw_value:
+                await send_message(
+                    thread,
+                    f"🔊 Volumen de música actual: {current}%\n"
+                    "Usa !volumen 0-100, !volumen +10, !volumen -10, "
+                    "!volumen subir, !volumen bajar, !volumen mute o !volumen max.",
+                    source,
+                    reply
+                )
+                return
+            elif raw_value in ("subir", "up", "+"):
+                amount = abs(int(args[1])) if len(args) > 1 else 10
+                target = min(100, current + amount)
+            elif raw_value in ("bajar", "down", "-"):
+                amount = abs(int(args[1])) if len(args) > 1 else 10
+                target = max(0, current - amount)
+            elif raw_value in ("mute", "silencio", "mudo", "0"):
+                target = 0
+            elif raw_value in ("max", "máximo", "maximo"):
+                target = 100
+            elif raw_value in ("restaurar", "normal", "unmute"):
+                target = int(round(float(state.get("last_volume", 0.75)) * 100))
+            elif raw_value.startswith(("+", "-")):
+                target = max(0, min(100, current + int(raw_value)))
+            else:
+                target = int(raw_value.replace("%", ""))
+                if not 0 <= target <= 100:
+                    raise ValueError("rango")
+        except (TypeError, ValueError):
+            await send_message(
+                thread,
+                "Volumen inválido. Usa un valor de 0 a 100 o un ajuste como +10 / -10.",
+                source,
+                reply
+            )
+            return
+
+        target = max(0, min(100, target))
+        if target > 0:
+            state["last_volume"] = target / 100.0
+        state["volume"] = target / 100.0
+        await send_message(
+            thread,
+            f"🔊 Volumen de música ajustado a {target}%."
+            + (" Silencio activado." if target == 0 else " El cambio se aplica en tiempo real."),
+            source,
+            reply
+        )
+        return
+
     if command in ("!dj", "!reproducir"):
         dj_source = source
         if not COMMUNITY_TOKEN:
@@ -12502,7 +12720,9 @@ async def handle_interaction(event: dict, source: str):
 
     if action_type == "dj_select":
         BUTTON_ACTIONS.pop(button_id, None)
-        dj_source = source
+        # La interacción llega por el bot comunitario, pero el mensaje con
+        # botones pertenece al bot developer. Usamos developer para editarlo y responder.
+        dj_source = "developer"
         await remove_pressed_buttons(event, dj_source, remove=True)
 
         saved = DJ_SEARCH_RESULTS.get(thread_id) or {}
