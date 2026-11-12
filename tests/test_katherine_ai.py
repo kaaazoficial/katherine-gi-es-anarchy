@@ -124,7 +124,7 @@ async def test_provider_connection_probe(monkeypatch):
         }))
     assert await ai.test_connection(fake_request) == "OK"
     assert captured["json"]["store"] is False
-    assert captured["json"]["max_output_tokens"] == 120
+    assert captured["json"]["max_output_tokens"] == 250
 
 @pytest.mark.asyncio
 async def test_model_cannot_request_unapproved_tool(monkeypatch):
