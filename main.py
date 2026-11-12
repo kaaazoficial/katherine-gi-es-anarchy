@@ -12643,7 +12643,17 @@ async def handle_command(event: dict, source: str):
             mode = rest.casefold()
             if mode in ("activar", "on"):
                 AI_CORE.set_analyst(thread, True)
-                answer = "AI Chat Analyst activado. Solo recopila mensajes recibidos desde ahora; el buffer temporal caduca en una hora y se elimina al desactivar o reiniciar."
+                await send_message(
+                    thread,
+                    "AVISO · AI CHAT ANALYST ACTIVADO\\n"
+                    "Desde este momento, Katherine recopilará temporalmente los mensajes nuevos "
+                    "de esta sala para generar resúmenes solicitados por un administrador. "
+                    "El contenido se mantiene solo en memoria del proceso, hasta una hora "
+                    "y máximo 200 mensajes; no se consulta el historial anterior. "
+                    "Un administrador puede detenerlo con !ia analista desactivar.",
+                    source, reply
+                )
+                return
             elif mode in ("desactivar", "off"):
                 AI_CORE.set_analyst(thread, False)
                 answer = "AI Chat Analyst desactivado y buffer temporal eliminado."
