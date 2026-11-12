@@ -73,6 +73,24 @@ def test_chat_analyst_is_disabled_by_default_and_records_only_when_enabled():
     ai.set_analyst("room", False)
     assert ai.analyst_messages("room") == []
 
+def test_ai_context_defaults_are_short_and_bounded():
+    ai = KatherineAI()
+    assert ai.memory_ttl == 600
+    assert ai.memory_turns == 6
+    assert ai.analyst_ttl == 900
+    assert ai.analyst_limit == 60
+
+
+def test_chat_analyst_activation_expires_automatically():
+    ai = KatherineAI()
+    ai.set_analyst("room", True)
+    ai.record_chat_message("room", "Ana", "mensaje temporal")
+    ai._analyst_enabled_at["room"] = time.time() - 901
+    ai.cleanup()
+    assert ai.analyst_messages("room") == []
+    assert "room" not in ai._analyst_enabled
+
+
 def test_chat_analyst_ignores_bot_and_commands_and_can_clear():
     ai = KatherineAI()
     ai.set_analyst("room", True)
