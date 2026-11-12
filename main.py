@@ -749,10 +749,14 @@ TTS_VOICE_OPTIONS = {
 USER_MESSAGE_ACTIVITY = defaultdict(deque)
 USER_SPAM_WARNED_UNTIL = {}
 DJ_MUSIC_DIR = Path(os.getenv("DJ_MUSIC_DIR", "music")).resolve()
-DJ_AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".opus"}
+DJ_AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".oga", ".flac", ".m4a", ".aac", ".opus"}
 DJ_SEARCH_RESULTS: dict[str, dict] = {}
 DJ_ARCHIVE_CACHE: dict[str, dict] = {}
+DJ_SOURCE_CACHE: dict[str, dict] = {}
+JAMENDO_CLIENT_ID = os.getenv("JAMENDO_CLIENT_ID", "").strip()
 IA_BASE = "https://archive.org"
+JAMENDO_API = "https://api.jamendo.com/v3.0/tracks/"
+WIKIMEDIA_API = "https://commons.wikimedia.org/w/api.php"
 IA_ALLOWED_LICENSES = {
     "creativecommons.org/publicdomain/zero/1.0": "CC0 · Dominio público",
     "creativecommons.org/publicdomain/mark/1.0": "Public Domain Mark",
@@ -1986,7 +1990,10 @@ async def archive_item_details(identifier: str) -> dict | None:
         "license_url": str(license_url),
         "item_url": item_url,
         "url": audio_url,
-        "filename": filename
+        "filename": filename,
+        "extension": Path(filename).suffix.lower(),
+        "source": "Internet Archive",
+        "source_key": "archive"
     }
     DJ_ARCHIVE_CACHE[identifier] = {
         "track": track,
@@ -2077,6 +2084,262 @@ async def search_archive_audio(query: str, limit: int = 5) -> list[dict]:
         )
         DJ_ARCHIVE_CACHE.pop(oldest, None)
     return tracks[:limit]
+
+
+def dj_audio_host_allowed(host: str) -> bool:
+    """Allow only the official hosts used by the validated music catalogs."""
+    normalized = str(host or "").lower().rstrip(".")
+    return (
+        normalized == "archive.org"
+        or normalized.endswith(".archive.org")
+        or normalized == "upload.wikimedia.org"
+        or normalized == "jamendo.com"
+        or normalized.endswith(".jamendo.com")
+    )
+
+
+def dj_audio_url_allowed(url: str) -> bool:
+    parsed = urlparse(str(url or ""))
+    return parsed.scheme == "https" and dj_audio_host_allowed(parsed.hostname or "")
+
+
+async def search_wikimedia_audio(query: str, limit: int = 5) -> list[dict]:
+    """Search Wikimedia Commons and accept only audio files with compatible licenses."""
+    query = clean_archive_value(query, 80)
+    if not query:
+        return []
+    cache_key = "commons:" + query.casefold()
+    cached = DJ_SOURCE_CACHE.get(cache_key)
+    if cached and cached.get("expires", 0) > time.time():
+        return cached.get("tracks", [])[:limit]
+
+    response = await external_request(
+        "GET",
+        WIKIMEDIA_API,
+        params={
+            "action": "query",
+            "format": "json",
+            "generator": "search",
+            "gsrsearch": f"{query} filetype:audio",
+            "gsrnamespace": 6,
+            "gsrlimit": max(10, min(30, limit * 4)),
+            "prop": "imageinfo",
+            "iiprop": "url|size|mime|mediatype|extmetadata",
+            "iiextmetadatafilter": "LicenseShortName|LicenseUrl|Artist|Credit|ObjectName",
+        },
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Katherine-AnarchyBot/3.2 (music catalog; https://github.com/kaaazoficial/katherine-gi-es-anarchy)",
+        },
+        timeout=25,
+    )
+    if not response.is_success:
+        raise RuntimeError(f"Wikimedia Commons respondió HTTP {response.status_code}.")
+
+    try:
+        pages = (response.json().get("query") or {}).get("pages") or {}
+    except Exception as exc:
+        raise RuntimeError("No pude interpretar los resultados de Wikimedia Commons.") from exc
+
+    tracks = []
+    seen_urls = set()
+    for page in pages.values():
+        if not isinstance(page, dict):
+            continue
+        title = str(page.get("title") or "")
+        info_list = page.get("imageinfo") or []
+        if not info_list or not isinstance(info_list[0], dict):
+            continue
+        info = info_list[0]
+        extension = Path(title).suffix.lower()
+        if extension not in DJ_AUDIO_EXTENSIONS:
+            continue
+        if str(info.get("mediatype") or "").upper() not in ("AUDIO", ""):
+            continue
+        if not str(info.get("mime") or "").lower().startswith("audio/"):
+            continue
+        try:
+            size = int(info.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size and size > 150 * 1024 * 1024:
+            continue
+
+        metadata = info.get("extmetadata") or {}
+        license_url = str((metadata.get("LicenseUrl") or {}).get("value") or "")
+        license_label = archive_license_label(license_url)
+        audio_url = str(info.get("url") or "")
+        if (
+            not license_label
+            or not dj_audio_url_allowed(audio_url)
+            or audio_url in seen_urls
+        ):
+            continue
+
+        artist = clean_archive_value(
+            (metadata.get("Artist") or {}).get("value") or
+            (metadata.get("Credit") or {}).get("value") or
+            "Autor no indicado"
+        )
+        object_name = clean_archive_value(
+            (metadata.get("ObjectName") or {}).get("value") or
+            title.removeprefix("File:")
+        )
+        tracks.append({
+            "identifier": str(page.get("pageid") or title),
+            "title": object_name or title.removeprefix("File:"),
+            "creator": artist,
+            "license": license_label,
+            "license_url": license_url,
+            "item_url": str(info.get("descriptionurl") or
+                            "https://commons.wikimedia.org/wiki/" + quote(title.replace(" ", "_"))),
+            "url": audio_url,
+            "extension": extension,
+            "source": "Wikimedia Commons",
+            "source_key": "commons",
+        })
+        seen_urls.add(audio_url)
+        if len(tracks) >= limit:
+            break
+
+    DJ_SOURCE_CACHE[cache_key] = {
+        "tracks": tracks,
+        "expires": time.time() + 900,
+    }
+    if len(DJ_SOURCE_CACHE) > 300:
+        oldest = min(DJ_SOURCE_CACHE, key=lambda key: DJ_SOURCE_CACHE[key].get("expires", 0))
+        DJ_SOURCE_CACHE.pop(oldest, None)
+    return tracks[:limit]
+
+
+async def search_jamendo_audio(query: str, limit: int = 5) -> list[dict]:
+    """Search Jamendo; download only tracks that artists explicitly allow to download."""
+    if not JAMENDO_CLIENT_ID:
+        return []
+    query = clean_archive_value(query, 80)
+    if not query:
+        return []
+    cache_key = "jamendo:" + query.casefold()
+    cached = DJ_SOURCE_CACHE.get(cache_key)
+    if cached and cached.get("expires", 0) > time.time():
+        return cached.get("tracks", [])[:limit]
+
+    response = await external_request(
+        "GET",
+        JAMENDO_API,
+        params={
+            "client_id": JAMENDO_CLIENT_ID,
+            "format": "json",
+            "limit": max(10, min(30, limit * 4)),
+            "search": query,
+            "include": "licenses",
+            "audioformat": "mp32",
+            "audiodlformat": "mp32",
+        },
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Katherine-AnarchyBot/3.2 (music catalog; https://github.com/kaaazoficial/katherine-gi-es-anarchy)",
+        },
+        timeout=25,
+    )
+    if not response.is_success:
+        raise RuntimeError(f"Jamendo respondió HTTP {response.status_code}.")
+
+    try:
+        payload = response.json()
+        tracks_data = payload.get("results") or []
+        api_status = (payload.get("headers") or {}).get("status")
+        if api_status and str(api_status).lower() != "success":
+            raise RuntimeError("Jamendo no aceptó la búsqueda.")
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError("No pude interpretar los resultados de Jamendo.") from exc
+
+    tracks = []
+    for item in tracks_data:
+        if not isinstance(item, dict):
+            continue
+        allowed = item.get("audiodownload_allowed")
+        if allowed is not True and str(allowed).lower() != "true":
+            continue
+        license_url = str(item.get("license_ccurl") or "")
+        license_label = archive_license_label(license_url)
+        download_url = str(item.get("audiodownload") or "")
+        if not license_label or not dj_audio_url_allowed(download_url):
+            continue
+        track_id = str(item.get("id") or "")
+        if not track_id:
+            continue
+        tracks.append({
+            "identifier": track_id,
+            "title": clean_archive_value(item.get("name") or "Pista de Jamendo", 160),
+            "creator": clean_archive_value(item.get("artist_name") or "Autor no indicado"),
+            "year": clean_archive_value(item.get("releasedate") or "", 12),
+            "license": license_label,
+            "license_url": license_url,
+            "item_url": f"https://www.jamendo.com/track/{quote(track_id, safe='')}",
+            "url": download_url,
+            "extension": ".mp3",
+            "source": "Jamendo",
+            "source_key": "jamendo",
+        })
+        if len(tracks) >= limit:
+            break
+
+    DJ_SOURCE_CACHE[cache_key] = {
+        "tracks": tracks,
+        "expires": time.time() + 900,
+    }
+    if len(DJ_SOURCE_CACHE) > 300:
+        oldest = min(DJ_SOURCE_CACHE, key=lambda key: DJ_SOURCE_CACHE[key].get("expires", 0))
+        DJ_SOURCE_CACHE.pop(oldest, None)
+    return tracks[:limit]
+
+
+async def search_music_catalog(query: str, limit: int = 5) -> list[dict]:
+    """Search every configured catalog concurrently and fairly mix their results."""
+    providers = [
+        ("archive", search_archive_audio),
+        ("commons", search_wikimedia_audio),
+    ]
+    if JAMENDO_CLIENT_ID:
+        providers.append(("jamendo", search_jamendo_audio))
+
+    results = await asyncio.gather(
+        *(searcher(query, max(limit, limit * 2)) for _, searcher in providers),
+        return_exceptions=True,
+    )
+    buckets = []
+    errors = []
+    for (provider_name, _), result in zip(providers, results):
+        if isinstance(result, Exception):
+            errors.append(provider_name)
+            metrics[f"dj_search_errors_{provider_name}"] += 1
+            logging.warning("[DJ] Falló el catálogo %s: %s", provider_name, type(result).__name__)
+            buckets.append([])
+        else:
+            buckets.append(result if isinstance(result, list) else [])
+
+    mixed = []
+    seen = set()
+    for index in range(max((len(bucket) for bucket in buckets), default=0)):
+        for bucket in buckets:
+            if index >= len(bucket):
+                continue
+            track = bucket[index]
+            identity = str(track.get("url") or track.get("identifier") or "")
+            if identity and identity not in seen:
+                mixed.append(track)
+                seen.add(identity)
+            if len(mixed) >= limit:
+                break
+        if len(mixed) >= limit:
+            break
+
+    if not mixed and errors and len(errors) == len(providers):
+        raise RuntimeError("Todos los catálogos musicales están temporalmente fuera de servicio.")
+    return mixed[:limit]
 
 
 async def ensure_voice_room(thread_id: str):
@@ -2497,17 +2760,15 @@ async def enqueue_message_for_speech(event: dict, source: str):
         logging.warning("[TTS] Cola llena; se omitió un mensaje en %s", thread_id)
 
 
-async def download_dj_audio(url: str) -> Path:
-    """Descarga una pista pública de Internet Archive a un archivo temporal local."""
+async def download_dj_audio(url: str, file_extension: str | None = None) -> Path:
+    """Download a validated catalog track to a temporary local file."""
     parsed = urlparse(str(url))
-    host = (parsed.hostname or "").lower()
-    if (
-        parsed.scheme != "https"
-        or not (host == "archive.org" or host.endswith(".archive.org"))
-    ):
-        raise ValueError("La fuente de música no pertenece a Internet Archive.")
+    if not dj_audio_url_allowed(url):
+        raise ValueError("El enlace no pertenece a una fuente musical autorizada.")
 
     suffix = Path(parsed.path).suffix.lower()
+    if suffix not in DJ_AUDIO_EXTENSIONS:
+        suffix = str(file_extension or ".mp3").lower()
     if suffix not in DJ_AUDIO_EXTENSIONS:
         raise ValueError("El enlace no tiene un formato de audio compatible.")
 
@@ -2530,8 +2791,10 @@ async def download_dj_audio(url: str) -> Path:
             async with client.stream("GET", str(url)) as response:
                 if not response.is_success:
                     raise RuntimeError(
-                        f"Internet Archive respondió HTTP {response.status_code}."
+                        f"La fuente musical respondió HTTP {response.status_code}."
                     )
+                if not dj_audio_url_allowed(str(response.url)):
+                    raise ValueError("La descarga redirigió a un dominio no autorizado.")
                 content_type = response.headers.get("content-type", "").lower()
                 if "text/html" in content_type or "application/json" in content_type:
                     raise RuntimeError(
@@ -2794,7 +3057,10 @@ async def start_dj_room(
     original_source = file_path
     if isinstance(file_path, str) and file_path.lower().startswith("https://"):
         try:
-            temporary_audio = await download_dj_audio(file_path)
+            temporary_audio = await download_dj_audio(
+                file_path,
+                file_extension=(track_metadata or {}).get("extension")
+            )
             file_path = temporary_audio
         except Exception as exc:
             logging.exception("[DJ] No se pudo preparar la pista remota")
@@ -12248,7 +12514,8 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}tts enlaces on/off — activa o desactiva lectura de enlaces.",
                 f"{PREFIX}tts menciones on/off — configura lectura de menciones.",
                 f"{PREFIX}volumenlectura / subirvolumenlectura / bajarvolumenlectura — controles rápidos TTS.",
-                f"{PREFIX}dj buscar <tema> — busca música pública y licenciada.",
+                f"{PREFIX}dj buscar <tema> — busca en Internet Archive, Commons y Jamendo.",
+                f"{PREFIX}dj fuentes — muestra catálogos disponibles y su configuración.",
                 f"{PREFIX}buscar <tema> — alias de búsqueda musical.",
                 f"{PREFIX}dj <archivo.mp3> [bucle] — reproduce un archivo local.",
                 f"{PREFIX}dj pausa / reanudar / saltar / cola — controles del reproductor.",
@@ -14619,6 +14886,23 @@ async def handle_command(event: dict, source: str):
             )
             return
 
+        if args and args[0].lower() in ("fuentes", "fuente", "sources"):
+            jamendo_status = (
+                "configurado" if JAMENDO_CLIENT_ID else
+                "pendiente: añade JAMENDO_CLIENT_ID en Render"
+            )
+            await send_message(
+                thread,
+                "FUENTES MUSICALES DE KATHERINE\n"
+                "• Internet Archive: búsqueda y validación de licencia automática.\n"
+                "• Wikimedia Commons: audio libre con licencia verificable.\n"
+                f"• Jamendo: {jamendo_status}; requiere Client ID gratuito.\n"
+                "Las búsquedas combinan los catálogos disponibles y mezclan sus resultados.",
+                dj_source,
+                reply
+            )
+            return
+
         if not args or args[0].lower() in ("lista", "list"):
             tracks = list_dj_tracks()
             await send_message(
@@ -14645,9 +14929,9 @@ async def handle_command(event: dict, source: str):
                 )
                 return
             try:
-                results = await search_archive_audio(search_term, limit=5)
+                results = await search_music_catalog(search_term, limit=5)
             except Exception as exc:
-                logging.exception("[DJ] Búsqueda en Internet Archive fallida")
+                logging.exception("[DJ] Búsqueda musical multifuente fallida")
                 await send_message(
                     thread,
                     f"No pude consultar el catálogo musical ahora mismo ({type(exc).__name__}).",
@@ -14689,12 +14973,12 @@ async def handle_command(event: dict, source: str):
             )
             listing = "\n".join(
                 f"{index + 1}. {track['title']} — {track['creator']} "
-                f"({track['license']})"
+                f"({track['license']} · {track.get('source', 'catálogo')})"
                 for index, track in enumerate(results)
             )
             await send_message(
                 thread,
-                f"CATÁLOGO MUSICAL · INTERNET ARCHIVE\nBúsqueda: {search_term}\n\n"
+                f"CATÁLOGO MUSICAL · BÚSQUEDA MULTIFUENTE\nBúsqueda: {search_term}\n\n"
                 f"{listing}\n\nSelecciona una pista para reproducirla en la sala:",
                 dj_source,
                 reply,
@@ -15055,8 +15339,10 @@ async def handle_interaction(event: dict, source: str):
         if ok:
             credit = (
                 f"🎧 Ahora suena: {track['title']} — {track['creator']}\n"
+                f"Fuente: {track.get('source', 'catálogo musical')}\n"
                 f"Licencia: {track['license']}\n"
-                "Fuente: Internet Archive."
+                f"Créditos: {track.get('item_url', 'sin ficha pública')}\n"
+                f"Licencia: {track.get('license_url', 'ver ficha de origen')}"
             )
             await send_message(thread_id, credit, dj_source)
         else:
