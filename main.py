@@ -41,7 +41,7 @@ except Exception as exc:
     edge_tts = None
     TTS_IMPORT_ERROR = str(exc)
 
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from collections import defaultdict, deque
@@ -121,8 +121,21 @@ if not BOT_TOKEN:
 if not WEBHOOK_SECRET:
     logging.warning("Falta WEBHOOK_SECRET. El webhook del bot principal rechazara eventos.")
 
+@asynccontextmanager
+async def application_lifespan(application: FastAPI):
+    """Manage process-scoped resources with FastAPI's supported lifespan API."""
+    try:
+        await startup()
+        yield
+    finally:
+        await shutdown()
+
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-app = FastAPI(title="Katherine Anarchy Bot")
+app = FastAPI(
+    title="Katherine Anarchy Bot",
+    lifespan=application_lifespan,
+)
 
 # ---------------------------------------------------------------------------
 # BASE DE DATOS LIGERA: SQLite (incluida en Python, sin PostgreSQL).
@@ -133,6 +146,16 @@ app = FastAPI(title="Katherine Anarchy Bot")
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "katherine.sqlite3"
+
+
+def has_persistent_storage(path: Path) -> bool:
+    """Return True only when the data path sits beneath a non-root mount point."""
+    candidate = Path(path).resolve()
+    while candidate != candidate.parent and candidate != Path("/"):
+        if os.path.ismount(candidate):
+            return True
+        candidate = candidate.parent
+    return False
 
 
 def db_connect():
@@ -1333,6 +1356,17 @@ async def external_request(method: str, url: str, **kwargs):
 
 
 
+def is_not_in_chat_response(status_code: int | None, data: Any) -> bool:
+    """Identify Anarchy's expected 403 when a bot no longer belongs to a chat."""
+    if status_code != 403 or not isinstance(data, dict):
+        return False
+    error_code = str(
+        data.get("anarchy:error") or data.get("error") or ""
+    ).strip().casefold().replace("-", "_").replace(" ", "_")
+    message = str(data.get("anarchy:message") or data.get("message") or "").strip().casefold()
+    return error_code in {"not_in_chat", "bot_not_in_chat"} or message == "the bot is not in this chat"
+
+
 async def api(method: str, path: str, source="developer", body=None):
     token = token_for(source)
     if not token:
@@ -1376,7 +1410,10 @@ async def api(method: str, path: str, source="developer", body=None):
             response.status_code
         )
         if not response.is_success:
-            metrics["api_errors"] += 1
+            if is_not_in_chat_response(response.status_code, data):
+                metrics["api_membership_denials"] += 1
+            else:
+                metrics["api_errors"] += 1
 
         return {
             "ok": response.is_success,
@@ -1445,7 +1482,10 @@ async def api_upload_bytes(path: str, source: str, content: bytes, content_type:
             response.status_code
         )
         if not response.is_success:
-            metrics["api_errors"] += 1
+            if is_not_in_chat_response(response.status_code, data):
+                metrics["api_membership_denials"] += 1
+            else:
+                metrics["api_errors"] += 1
 
         return {
             "ok": response.is_success,
@@ -1737,12 +1777,18 @@ async def send_message(
                 send_history_bot.append(now)
                 send_history_chat[f"{source}:{thread_id}"].append(now)
             else:
-                logging.error(
-                    "No se pudo enviar el bloque %s/%s: %s",
-                    index + 1,
-                    len(parts),
-                    result
-                )
+                if is_not_in_chat_response(result.get("status"), result.get("data")):
+                    logging.info(
+                        "[ANARCHY] Envío omitido en %s: Katherine ya no pertenece a ese chat.",
+                        thread_id,
+                    )
+                else:
+                    logging.error(
+                        "No se pudo enviar el bloque %s/%s: %s",
+                        index + 1,
+                        len(parts),
+                        result
+                    )
                 return result
 
     return last_result
@@ -16377,7 +16423,6 @@ async def health_head():
 # ---------------------------------------------------------------------------
 # INICIO
 # ---------------------------------------------------------------------------
-@app.on_event("startup")
 async def startup():
     global HTTP_CLIENT, CLEANUP_TASK
     HTTP_CLIENT = httpx.AsyncClient(
@@ -16397,10 +16442,12 @@ async def startup():
         DJ_MUSIC_DIR
     )
 
-    if not os.getenv("DATA_DIR"):
+    if not has_persistent_storage(DATA_DIR):
         logging.warning(
-            "DATA_DIR no está configurado. En Render los datos locales "
-            "no sobrevivirán a un redeploy/reinicio."
+            "SQLite no tiene un disco persistente montado en %s. "
+            "Los datos locales pueden perderse en reinicios, despliegues "
+            "o suspensión del plan Free.",
+            DATA_DIR,
         )
 
     logging.info(
@@ -16443,7 +16490,6 @@ async def startup():
                 )
 
 
-@app.on_event("shutdown")
 async def shutdown():
     global HTTP_CLIENT, CLEANUP_TASK
     for thread_id in list(DJ_ROOMS):
