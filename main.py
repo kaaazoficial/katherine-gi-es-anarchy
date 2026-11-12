@@ -719,7 +719,10 @@ def update_user_field(uid: str, field: str, value: str):
     if field not in allowed:
         return
     with db_session() as db:
-        db.execute(f"UPDATE users SET {field}=? WHERE uid=?", (value, uid))
+        db.execute(
+            f"UPDATE users SET {field}=?, profile_updated_at=? WHERE uid=?",
+            (str(value)[:240], time.time(), uid)
+        )
 
 
 def add_points(uid: str, amount: int):
@@ -1073,6 +1076,57 @@ def cleanup_expired_state():
             BUTTON_ACTIONS.pop(key, None)
     cleanup_community_events(COMMUNITY_EVENTS, now=now)
     AI_CORE.cleanup(now=now)
+
+    # Expire process-local catalogs, user favorites and transient identifiers.
+    for store in (DJ_ARCHIVE_CACHE, DJ_SOURCE_CACHE):
+        for key, item in list(store.items()):
+            if not isinstance(item, dict) or float(item.get("expires", 0) or 0) <= now:
+                store.pop(key, None)
+    for key, item in list(DJ_SEARCH_RESULTS.items()):
+        if not isinstance(item, dict) or float(item.get("expires", 0) or 0) <= now:
+            DJ_SEARCH_RESULTS.pop(key, None)
+    for key, favorites in list(DJ_FAVORITES.items()):
+        retained = [
+            item for item in favorites
+            if isinstance(item, dict) and float(item.get("expires", 0) or 0) > now
+        ]
+        if retained:
+            DJ_FAVORITES[key] = retained[-50:]
+        else:
+            DJ_FAVORITES.pop(key, None)
+
+    monotonic_now = time.monotonic()
+    for store in (AUTO_REPLY_CHAT_COOLDOWN, AUTO_REPLY_USER_COOLDOWN, USER_SPAM_WARNED_UNTIL):
+        for key, expiry in list(store.items()):
+            if float(expiry or 0) <= monotonic_now:
+                store.pop(key, None)
+    for key, activity in list(USER_MESSAGE_ACTIVITY.items()):
+        while activity and activity[0][0] < now - 60:
+            activity.popleft()
+        if not activity:
+            USER_MESSAGE_ACTIVITY.pop(key, None)
+
+    while send_history_bot and send_history_bot[0] < monotonic_now - 3600:
+        send_history_bot.popleft()
+    for key, state in list(SOURCE_HEALTH.items()):
+        last_seen = float(state.get("last_seen_at", 0) or 0)
+        if last_seen and last_seen < now - 21600:
+            SOURCE_HEALTH.pop(key, None)
+            EXTERNAL_HOST_LIMITS.pop(key, None)
+
+    # Durable data is operational/gameplay state only; conversation text is never stored here.
+    try:
+        with db_session() as db:
+            retention_counts = cleanup_database_retention(
+                db,
+                now=now,
+                today=datetime.now(ZoneInfo("America/Santiago")).date(),
+            )
+        expired_total = sum(retention_counts.values())
+        if expired_total:
+            logging.info("[PRIVACY] Retención aplicada: %s registros caducados/anónimos", expired_total)
+    except (sqlite3.Error, OSError, ValueError):
+        logging.exception("[PRIVACY] Falló la limpieza de retención; se reintentará.")
     active_poll_ids = set(polls)
     for button_key, poll_id in list(poll_button_map.items()):
         if poll_id not in active_poll_ids:
