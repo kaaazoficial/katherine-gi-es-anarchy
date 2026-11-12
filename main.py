@@ -8413,6 +8413,8 @@ async def fetch_community_character_guide(
         "weapons", "artifacts", "stats", "talents"
     ))
     if needs_build:
+        builds_data = await fetch_genshin_builds_guide(candidates)
+        sources = {"genshin_builds": builds_data} if builds_data else {}
         tasks.extend([
             (
                 "kqm",
@@ -8461,7 +8463,6 @@ async def fetch_community_character_guide(
         *(task for _, task in tasks),
         return_exceptions=True
     )
-    sources = {}
     for (source_name, _), result in zip(tasks, fetched):
         if isinstance(result, dict):
             sources[source_name] = result
@@ -8484,7 +8485,7 @@ async def fetch_community_character_guide(
     for field, source_field in field_sources:
         if not needs.get(field):
             continue
-        for source_name in ("kqm", "genshin_gg", "icy_veins"):
+        for source_name in ("genshin_builds", "kqm", "genshin_gg", "icy_veins"):
             data = sources.get(source_name) or {}
             value = data.get(source_field)
             if value:
@@ -8510,6 +8511,7 @@ async def fetch_community_character_guide(
             merged["sources"].append("icy_veins_teams")
 
     source_labels = {
+        "genshin_builds": "Genshin-Builds (español)",
         "kqm": "KeqingMains",
         "genshin_gg": "Genshin.gg",
         "icy_veins": "Icy Veins",
@@ -8522,6 +8524,112 @@ async def fetch_community_character_guide(
     return localize_guide_fields(
         merged, ("weapons", "artifacts", "stats", "talents", "teams")
     )
+
+
+
+# ---------------------------------------------------------------------------
+# GENSHIN-BUILDS.COM · CONTENIDO ESTRUCTURADO EN ESPAÑOL
+# ---------------------------------------------------------------------------
+GENSHIN_BUILDS_BASE = "https://genshin-builds.com/es"
+
+
+async def fetch_genshin_builds_guide(slugs):
+    """Prueba páginas Markdown y HTML públicas de Genshin-Builds en español."""
+    for slug in slugs[:5]:
+        for url in (
+            f"{GENSHIN_BUILDS_BASE}/character/{slug}.md",
+            f"{GENSHIN_BUILDS_BASE}/character/{slug}"
+        ):
+            cache_key = "genshin-builds-es:" + url
+            cached = cache.get(cache_key)
+            if cached and cached[0] > time.time():
+                if cached[1]:
+                    return cached[1]
+                continue
+            try:
+                response = await external_request(
+                    "GET", url, timeout=18, follow_redirects=True,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 Katherine-AnarchyBot/4.0",
+                        "Accept": "text/markdown,text/plain,text/html,*/*"
+                    }
+                )
+                if response.status_code != 200 or len(response.text or "") < 100:
+                    cache[cache_key] = (time.time() + 1800, None)
+                    continue
+                result = parse_genshin_builds_content(response.text, str(response.url))
+                if result and any(result.get(k) for k in (
+                    "weapons", "artifacts", "stats", "talents", "teams"
+                )):
+                    cache[cache_key] = (time.time() + COMMUNITY_GUIDE_CACHE_TTL, result)
+                    return result
+                cache[cache_key] = (time.time() + 1800, None)
+            except (httpx.HTTPError, ValueError, TypeError) as exc:
+                logging.debug("Genshin-Builds no disponible (%s): %s", url, exc)
+                cache[cache_key] = (time.time() + 900, None)
+    return None
+
+
+def parse_genshin_builds_content(content: str, url: str):
+    """Extrae texto por secciones; no mezcla títulos ni párrafos de otras áreas."""
+    text = html.unescape(str(content or ""))
+    text = re.sub(r"<script\b[^>]*>.*?</script>", " ", text, flags=re.I | re.S)
+    text = re.sub(r"<style\b[^>]*>.*?</style>", " ", text, flags=re.I | re.S)
+    text = re.sub(r"<[^>]+>", "\n", text)
+    text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    lines = [line.strip(" -*#\t\r") for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    sections = {"weapons": [], "artifacts": [], "stats": [], "talents": [], "teams": []}
+    current = None
+    headings = (
+        ("weapons", ("best weapons", "weapons", "armas recomendadas", "mejores armas")),
+        ("artifacts", ("best artifacts", "artifact sets", "artefactos recomendados", "mejores artefactos")),
+        ("stats", ("main stats", "substats", "recommended stats", "estadísticas principales", "estadisticas principales")),
+        ("talents", ("talent priority", "talents priority", "prioridad de talentos")),
+        ("teams", ("best teams", "team compositions", "equipos recomendados", "mejores equipos"))
+    )
+    for line in lines:
+        low = line.casefold()
+        matched = False
+        for field, phrases in headings:
+            if any(phrase in low for phrase in phrases):
+                current = field
+                matched = True
+                break
+        if matched:
+            continue
+        if current and len(line) <= 180:
+            sections[current].append(line)
+        if low in ("character overview", "character information", "overview", "resumen del personaje"):
+            current = None
+
+    def compact(field, limit):
+        result, seen = [], set()
+        ignored = {"weapons", "artifacts", "teams", "main stats", "substats", "best teams"}
+        for line in sections[field]:
+            clean = re.sub(r"\s+", " ", line).strip()
+            if len(clean) < 3 or clean.casefold() in ignored:
+                continue
+            if re.fullmatch(r"[\d.,%+\-/ ]+", clean):
+                continue
+            if clean.casefold() in seen:
+                continue
+            seen.add(clean.casefold())
+            result.append(clean)
+            if len(result) >= limit:
+                break
+        return result
+
+    return {
+        "weapons": compact("weapons", 7),
+        "artifacts": compact("artifacts", 6),
+        "stats": " · ".join(compact("stats", 10)) or None,
+        "talents": " · ".join(compact("talents", 6)) or None,
+        "teams": compact("teams", 6),
+        "url": url
+    }
 
 
 def normalize_character_guide_key(name: str) -> str:
