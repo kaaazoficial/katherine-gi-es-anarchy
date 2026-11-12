@@ -7626,7 +7626,8 @@ async def handle_command(event: dict, source: str):
             [
                 "KATHERINE · CENTRO DE COMANDOS",
                 f"Prefijo principal: {PREFIX} (también se reconocen ! y -).",
-                f"{PREFIX}ayuda — muestra todos los comandos."
+                f"{PREFIX}ayuda — muestra todos los comandos.",
+                f"{PREFIX}comandos — alias de ayuda."
             ],
             [
                 "GENSHIN IMPACT · GUÍA Y CONSULTAS",
@@ -7653,6 +7654,7 @@ async def handle_command(event: dict, source: str):
             [
                 "GENSHIN IMPACT · CÁLCULOS Y PLANIFICACIÓN",
                 f"{PREFIX}cv <CR> <CD> — calcula el valor crítico.",
+                f"{PREFIX}valorcritico <CR> <CD> — alias de cv.",
                 f"{PREFIX}daño <ATQ> <multiplicador%> <bono%> <CR> <CD> — estima daño normal, crítico y promedio.",
                 f"{PREFIX}reacciones <elemento> — muestra las reacciones de un elemento.",
                 f"{PREFIX}deseo — simulador de deseos con pity guardado.",
@@ -7701,7 +7703,9 @@ async def handle_command(event: dict, source: str):
             [
                 "INTERACCIONES",
                 f"{PREFIX}abrazo @usuario — abraza.",
+                f"{PREFIX}abrazar @usuario — alias de abrazo.",
                 f"{PREFIX}beso @usuario — da un beso.",
+                f"{PREFIX}besar @usuario — alias de beso.",
                 f"{PREFIX}patada @usuario — patada ficticia.",
                 f"{PREFIX}golpe @usuario — golpe ficticio.",
                 f"{PREFIX}cachetada @usuario — cachetada de broma.",
@@ -7715,6 +7719,7 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}bailar @usuario — baila.",
                 f"{PREFIX}cosquillas @usuario — hace cosquillas.",
                 f"{PREFIX}chocar @usuario — choca los cinco.",
+                f"{PREFIX}highfive @usuario — alias de chocar.",
                 f"{PREFIX}ayudar @usuario — ayuda.",
                 f"{PREFIX}acompañar @usuario — acompaña.",
                 f"{PREFIX}asustar @usuario — intenta asustar.",
@@ -7736,7 +7741,9 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}adivina — inicia el juego del número.",
                 f"{PREFIX}intento <número> — intenta adivinar.",
                 f"{PREFIX}puntos — consulta tus puntos.",
+                f"{PREFIX}reputacion — alias de puntos.",
                 f"{PREFIX}ranking — ranking de puntos.",
+                f"{PREFIX}top — alias de ranking.",
                 f"{PREFIX}encuesta pregunta | opción 1 | opción 2 — crea una encuesta.",
                 f"{PREFIX}elige opción 1 | opción 2 — elige aleatoriamente.",
                 f"{PREFIX}duelo @usuario — reta a otra persona.",
@@ -7753,6 +7760,8 @@ async def handle_command(event: dict, source: str):
             [
                 "SISTEMA Y KATHERINE",
                 f"{PREFIX}estado — estado, recursos y actividad.",
+                f"{PREFIX}diagnostico — alias de estado.",
+                f"{PREFIX}statsbot — alias de estado.",
                 f"{PREFIX}ping — comprueba la conexión.",
                 f"{PREFIX}memoria — uso de RAM y CPU.",
                 f"{PREFIX}uptime — tiempo activa.",
