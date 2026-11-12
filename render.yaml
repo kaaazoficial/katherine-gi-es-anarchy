@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: katherine-gi-es-anarchy
+    runtime: python
+    repo: https://github.com/kaaazoficial/katherine-gi-es-anarchy
+    branch: main
+    region: ohio
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    autoDeployTrigger: commit
+    healthCheckPath: /health
