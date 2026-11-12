@@ -609,7 +609,7 @@ async def build_status_message(source: str, nickname: str) -> str:
         f"• Chats vinculados al token: {len(thread_ids)}",
         "Los contadores corresponden a este proceso desde su último reinicio."
     ]
-    return "\n".join(lines)[:1950]
+    return "\n".join(lines)
 
 
 
@@ -1388,7 +1388,6 @@ async def handle_command(event: dict, source: str):
             f"{PREFIX}elemento <nombre> — consulta información de elementos.",
             f"{PREFIX}rangoaventura <rango> — consulta rangos de aventura.",
             f"{PREFIX}grupologros <nombre> — consulta grupos de logros.",
-            f"{PREFIX}materialtalento <nombre> — consulta tipos de materiales de talento.",
             f"{PREFIX}emoji <nombre> — consulta emojis del juego.",
             f"{PREFIX}voz <personaje> — consulta entradas de voz disponibles.",
             f"{PREFIX}cartatcg <nombre> — busca cartas de personaje del TCG.",
@@ -1398,6 +1397,9 @@ async def handle_command(event: dict, source: str):
             f"{PREFIX}efectotcg <nombre> — consulta efectos de estado del TCG.",
             f"{PREFIX}invocaciontcg <nombre> — consulta invocaciones del TCG.",
             f"{PREFIX}clavetcg <texto> — consulta palabras clave del TCG.",
+            f"{PREFIX}reversotcg <nombre> — consulta reversos de cartas del TCG.",
+            f"{PREFIX}cajetcg <nombre> — consulta cajas de cartas del TCG.",
+            f"{PREFIX}recompensatcg <nombre> — consulta recompensas de nivel del TCG.",
             f"{PREFIX}logro <nombre> — busca información de logros.",
             f"{PREFIX}talento <nombre> — busca materiales/libros de talento.",
             f"{PREFIX}constelacion <personaje> — muestra las constelaciones.",
@@ -1687,7 +1689,7 @@ async def handle_command(event: dict, source: str):
 
         await send_message(
             thread,
-            "\n".join(lines)[:1900],
+            "\n".join(lines),
             source,
             reply
         )
@@ -1803,7 +1805,7 @@ async def handle_command(event: dict, source: str):
 
         await send_message(
             thread,
-            "\n".join(lines)[:1900],
+            "\n".join(lines),
             source,
             reply
         )
@@ -2016,7 +2018,7 @@ async def handle_command(event: dict, source: str):
             + " para ver la ascensión."
         )
 
-        await send_message(thread, answer[:1950], source, reply)
+        await send_message(thread, answer, source, reply)
         return
 
     if command in ("!estadisticas", "!statspersonaje"):
@@ -2073,7 +2075,7 @@ async def handle_command(event: dict, source: str):
             name = item.get("name") or item.get("unlock") or "Talento"
             desc = re.sub(r"<[^>]+>", "", str(item.get("description") or ""))
             lines.append(f"\n{name}\n{desc[:350]}")
-        await send_message(thread, "\n".join(lines)[:1900], source, reply)
+        await send_message(thread, "\n".join(lines), source, reply)
         return
 
     # -----------------------------------------------------------------------
@@ -2135,7 +2137,7 @@ async def handle_command(event: dict, source: str):
 
         await send_message(
             thread,
-            "\n".join(lines)[:1900],
+            "\n".join(lines),
             source,
             reply
         )
@@ -2210,7 +2212,7 @@ async def handle_command(event: dict, source: str):
 
         await send_message(
             thread,
-            "\n".join(lines)[:1900],
+            "\n".join(lines),
             source,
             reply
         )
@@ -2562,7 +2564,7 @@ async def handle_command(event: dict, source: str):
 
         await send_message(
             thread,
-            "\n".join(lines)[:1900],
+            "\n".join(lines),
             source,
             reply
         )
@@ -2814,7 +2816,6 @@ async def handle_command(event: dict, source: str):
         "!elemento": "elements",
         "!rangoaventura": "adventureranks",
         "!grupologros": "achievementgroups",
-        "!materialtalento": "talentmaterialtypes",
         "!emoji": "emojis",
         "!voz": "voiceovers",
         "!cartatcg": "tcgcharactercards",
@@ -2823,7 +2824,10 @@ async def handle_command(event: dict, source: str):
         "!reglatcg": "tcgdetailedrules",
         "!efectotcg": "tcgstatuseffects",
         "!invocaciontcg": "tcgsummons",
-        "!clavetcg": "tcgkeywords"
+        "!clavetcg": "tcgkeywords",
+        "!reversotcg": "tcgcardbacks",
+        "!cajetcg": "tcgcardboxes",
+        "!recompensatcg": "tcglevelrewards"
     }
 
     if command in object_commands:
