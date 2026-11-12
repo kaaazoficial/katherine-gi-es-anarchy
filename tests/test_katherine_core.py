@@ -29,6 +29,7 @@ def test_database_initializes_expected_core_tables(database):
         "moderation_warnings",
         "dj_playlists",
         "dj_playlist_tracks",
+        "dj_favorites",
         "chat_activity_daily",
         "admin_audit_log",
         "auto_reply_rules",
@@ -223,3 +224,22 @@ def test_builtin_katherine_regression_suite_passes():
     assert result["checks"] > 0
     assert result["failed"] == 0, result["failures"]
     assert result["passed"] == result["checks"]
+
+def test_dj_favorites_are_scoped_to_user_and_room(database):
+    track = {
+        "url": "https://audio.jamendo.com/track.mp3",
+        "title": "Tema favorito",
+        "creator": "Artista",
+        "license": "CC BY",
+        "source": "Jamendo",
+        "extension": ".mp3",
+    }
+    assert database.save_dj_favorite("room-1", "user-1", track)
+    assert not database.save_dj_favorite("room-1", "user-1", track)
+    assert database.list_dj_favorites("room-1", "user-1")[0]["title"] == "Tema favorito"
+    assert database.list_dj_favorites("room-1", "user-2") == []
+    assert database.list_dj_favorites("room-2", "user-1") == []
+    favorite_id = database.list_dj_favorites("room-1", "user-1")[0]["id"]
+    assert database.delete_dj_favorite("room-1", "user-1", favorite_id)
+    assert database.list_dj_favorites("room-1", "user-1") == []
+
