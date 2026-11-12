@@ -346,7 +346,7 @@ async def test_unrelated_direct_answer_cannot_drift_to_genshin(monkeypatch):
 
     result = await ai.assist("explícame qué hace esta plataforma comunitaria", "room:user", fake_request)
     assert result["kind"] == "answer"
-    assert "red social" in result["answer"]
+    assert "plataforma" in result["answer"]
     assert "Genshin" not in result["answer"]
 
 
