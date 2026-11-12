@@ -12807,6 +12807,7 @@ async def handle_command(event: dict, source: str):
         if sub in ("ayuda", "help"):
             await send_message(thread,
                 "ASTRA INTELLIGENCE\n!ia estado / probar / olvidar / preguntar <consulta> / genshin <consulta>\n"
+                "!ia investigar <tema> / enlace <URL> — investigación web y análisis de páginas públicas.\n"
                 "!ia musica <descripción> / traducir idioma | texto\n"
                 "!ia guardian revisar <texto> (administradores)\n"
                 "!ia analista activar|resumen|limpiar|desactivar (administradores)\n"
@@ -12853,6 +12854,26 @@ async def handle_command(event: dict, source: str):
                     await execute_ai_tool(event, source, session_key, invocation)
                     return
             await send_message(thread, result.get("answer") or "No pude responder.", source, reply)
+            return
+        if sub in ("investigar", "investigacion", "investigación"):
+            if not rest:
+                await send_message(thread, "Uso: !ia investigar <tema o pregunta>.", source, reply)
+                return
+            routed_event = dict(event)
+            routed_message = dict(msg)
+            routed_message["content"] = f"{PREFIX}investigar {rest}"
+            routed_event["message"] = routed_message
+            await handle_command(routed_event, source)
+            return
+        if sub in ("enlace", "analizar", "analizarenlace"):
+            if not rest:
+                await send_message(thread, "Uso: !ia enlace https://sitio-publico.com/articulo", source, reply)
+                return
+            routed_event = dict(event)
+            routed_message = dict(msg)
+            routed_message["content"] = f"{PREFIX}enlace {rest}"
+            routed_event["message"] = routed_message
+            await handle_command(routed_event, source)
             return
         if sub == "musica":
             if not rest:
