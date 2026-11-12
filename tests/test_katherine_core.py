@@ -251,6 +251,7 @@ def test_dj_favorites_are_scoped_to_user_and_room(database, monkeypatch):
 
 def test_guardian_warns_for_link_bursts_and_records_reason(database, monkeypatch):
     monkeypatch.setattr(katherine, "ADMIN_UIDS", set())
+    database.set_chat_setting("room-guardian", "antispam_max_links", "2")
     katherine.USER_MESSAGE_ACTIVITY.clear()
     katherine.USER_SPAM_WARNED_UNTIL.clear()
     event = {
