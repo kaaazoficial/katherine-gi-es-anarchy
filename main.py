@@ -7793,6 +7793,7 @@ class KQMTeamParser(HTMLParser):
         if not line or len(line) > 150:
             return
         separators = line.count("—") + line.count("–")
+        separators += line.count(",") + line.count("/") + line.count("+")
         if separators >= 2 and line not in self.teams:
             self.teams.append(line)
 
