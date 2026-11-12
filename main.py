@@ -1489,6 +1489,7 @@ async def ensure_voice_room(thread_id: str):
             room_url = grant.get("url")
             room_token = grant.get("token")
             if not room_url or not room_token:
+                await api("POST", f"/live-rooms/{thread_id}/leave", "community")
                 return False, "Anarchy no devolvió las credenciales temporales de LiveKit."
 
             room = livekit_rtc.Room()
