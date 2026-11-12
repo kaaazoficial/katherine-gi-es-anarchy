@@ -83,7 +83,23 @@ PREFIX = os.getenv("COMMAND_PREFIX", "!").strip() or "!"
 if len(PREFIX) > 3 or any(ch.isspace() for ch in PREFIX):
     PREFIX = "!"
 COMMAND_PREFIXES = tuple(sorted({PREFIX, "!", "-"}, key=len, reverse=True))
-ADMIN_UIDS = {x.strip() for x in (os.getenv("ADMIN_UIDS") or os.getenv("ADMINUIDS") or "").split(",") if x.strip()}
+def parse_admin_uids(value: str | None) -> set[str]:
+    """Parse trusted administrator UIDs from comma/semicolon/newline-separated config."""
+    return {
+        item.strip()
+        for item in re.split(r"[,;\\r\\n]+", str(value or ""))
+        if item.strip()
+    }
+
+
+ADMIN_UIDS = parse_admin_uids(os.getenv("ADMIN_UIDS") or os.getenv("ADMINUIDS") or "")
+ADMIN_ONLY_COMMANDS = frozenset({
+    "!estado", "!fuentes", "!saludfuentes", "!autotest",
+    "!centro", "!nexus",
+    "!admin", "!paneladmin", "!guardian",
+    "!respuestas", "!respuesta", "!advertir", "!advertencias",
+    "!quitaradvertencia", "!antispam", "!perfilbot", "!avatarbot",
+})
 STARTED = time.time()
 STARTED_MONOTONIC = time.monotonic()
 HTTP_CLIENT: httpx.AsyncClient | None = None
@@ -337,7 +353,9 @@ def set_chat_setting(thread_id: str, key: str, value: str):
 
 
 def is_admin_uid(uid: str) -> bool:
-    return str(uid or "").strip() in ADMIN_UIDS
+    """Authorize only a non-empty, exact UID supplied by Anarchy Apps."""
+    candidate = str(uid or "").strip()
+    return bool(candidate) and candidate in ADMIN_UIDS
 
 
 def add_moderation_warning(
@@ -1783,7 +1801,7 @@ async def community_event_message(thread_id: str, event: dict) -> str:
 
 async def handle_community_event_command(
     thread_id: str, source: str, raw_uid: str, nickname: str,
-    args: list[str], reply_id=None
+    args: list[str], reply_id=None, admin_uid: str | None = None
 ):
     sub = args[0].casefold() if args else "estado"
     current = COMMUNITY_EVENTS.get(str(thread_id))
@@ -1841,7 +1859,7 @@ async def handle_community_event_command(
         if not current:
             await send_message(thread_id, "No hay un evento activo en esta sala.", source, reply_id)
             return
-        if str(raw_uid) != str(current.get("owner_uid")) and not is_admin_uid(raw_uid):
+        if str(raw_uid) != str(current.get("owner_uid")) and not is_admin_uid(admin_uid):
             await send_message(thread_id, "Solo quien creó el evento o un administrador puede cerrarlo.", source, reply_id)
             return
         current["closed"] = True
@@ -12448,7 +12466,8 @@ async def handle_command(event: dict, source: str):
         return
 
     metrics["text_messages_received"] += 1
-    raw_uid = str(author.get("uid") or author.get("nickname") or "unknown")
+    admin_uid = str(author.get("uid") or "").strip()
+    raw_uid = admin_uid or str(author.get("nickname") or "unknown")
     scope_key = f"{source}:{thread}"
     uid = scoped_uid(scope_key, raw_uid)
     game_key = uid
@@ -12479,6 +12498,16 @@ async def handle_command(event: dict, source: str):
     LAST_COMMAND_NAME = command
     LAST_COMMAND_USER = nickname
 
+    if command in ADMIN_ONLY_COMMANDS and not is_admin_uid(admin_uid):
+        await send_message(
+            thread,
+            "Acceso restringido. Este comando requiere un UID incluido en ADMIN_UIDS. "
+            "Usa !miuid para consultar tu UID y solicita a un administrador que lo configure en Render.",
+            source,
+            reply
+        )
+        return
+
     logging.info(
         "[COMANDO] %s | %s | %s",
         command,
@@ -12489,13 +12518,21 @@ async def handle_command(event: dict, source: str):
     # Identificador de la cuenta que envió el comando. Solo se devuelve al
     # propio usuario para que pueda configurarse como administrador en Render.
     if command in ("!miuid", "!mi-id", "!mi_uid"):
-        await send_message(
-            thread,
-            f"Tu UID de Anarchy Apps es: {raw_uid}\n"
-            "Copia este identificador y configúralo en Render en ADMIN_UIDS.",
-            source,
-            reply
-        )
+        if not admin_uid:
+            await send_message(
+                thread,
+                "Anarchy Apps no incluyó un UID en este mensaje. No puedo mostrar un identificador verificable.",
+                source,
+                reply
+            )
+        else:
+            await send_message(
+                thread,
+                f"Tu UID de Anarchy Apps es: {admin_uid}\\n"
+                "Copia este identificador y configúralo en Render en ADMIN_UIDS.",
+                source,
+                reply
+            )
         return
 
 
@@ -12543,13 +12580,14 @@ async def handle_command(event: dict, source: str):
                 "!ia musica <descripción> / traducir idioma | texto\n"
                 "!ia guardian revisar <texto> (administradores)\n"
                 "!ia analista activar|resumen|limpiar|desactivar (administradores)\n"
-                "!ia diagnostico (administradores)", source, reply)
+                "!ia diagnostico (UID de administrador).\n"
+                "Los subcomandos administrativos requieren un UID configurado en ADMIN_UIDS.", source, reply)
             return
         if sub in ("estado", "status"):
             await send_message(thread, AI_CORE.status(thread), source, reply)
             return
         if sub in ("probar", "test", "ping"):
-            if not is_admin_uid(raw_uid):
+            if not is_admin_uid(admin_uid):
                 await send_message(thread, "Solo un administrador puede probar la conexión de IA.", source, reply)
                 return
             try:
@@ -12622,7 +12660,7 @@ async def handle_command(event: dict, source: str):
             await send_message(thread, answer, source, reply)
             return
         if sub == "guardian":
-            if not is_admin_uid(raw_uid):
+            if not is_admin_uid(admin_uid):
                 await send_message(thread, "Solo un administrador puede usar Guardian AI.", source, reply)
                 return
             parts = rest.split(maxsplit=1)
@@ -12637,7 +12675,7 @@ async def handle_command(event: dict, source: str):
             await send_message(thread, "GUARDIAN AI · REVISIÓN PREVENTIVA\n" + answer, source, reply)
             return
         if sub == "analista":
-            if not is_admin_uid(raw_uid):
+            if not is_admin_uid(admin_uid):
                 await send_message(thread, "Solo un administrador puede controlar el analizador.", source, reply)
                 return
             mode = rest.casefold()
@@ -12679,7 +12717,7 @@ async def handle_command(event: dict, source: str):
             await send_message(thread, answer, source, reply)
             return
         if sub in ("diagnostico", "diagnóstico"):
-            if not is_admin_uid(raw_uid):
+            if not is_admin_uid(admin_uid):
                 await send_message(thread, "Solo un administrador puede usar Astra Admin AI.", source, reply)
                 return
             try:
@@ -12705,12 +12743,12 @@ async def handle_command(event: dict, source: str):
 
     if command in ("!evento", "!eventos"):
         await handle_community_event_command(
-            thread, source, raw_uid, nickname, args, reply
+            thread, source, raw_uid, nickname, args, reply, admin_uid=admin_uid
         )
         return
 
     if command in ("!admin", "!paneladmin", "!guardian"):
-        if not is_admin_uid(raw_uid):
+        if not is_admin_uid(admin_uid):
             await send_message(thread, "No tienes permisos de administración.", source, reply)
             return
         category = None
@@ -12724,11 +12762,11 @@ async def handle_command(event: dict, source: str):
         if args and category is None:
             await send_message(thread, "Uso: !admin [resumen|actividad|antispam|avisos|historial].", source, reply)
             return
-        await send_admin_panel(thread, source, raw_uid, category, reply)
+        await send_admin_panel(thread, source, admin_uid, category, reply)
         return
 
     if command == "!respuestas":
-        if not is_admin_uid(raw_uid):
+        if not is_admin_uid(admin_uid):
             await send_message(thread, "Solo un administrador puede configurar respuestas automáticas.", source, reply)
             return
         sub = args[0].casefold() if args else "estado"
@@ -12749,7 +12787,7 @@ async def handle_command(event: dict, source: str):
         return
 
     if command == "!respuesta":
-        if not is_admin_uid(raw_uid):
+        if not is_admin_uid(admin_uid):
             await send_message(thread, "Solo un administrador puede gestionar reglas de respuesta.", source, reply)
             return
         parts = query.split(maxsplit=1)
@@ -12842,164 +12880,125 @@ async def handle_command(event: dict, source: str):
     if command in ("!ayuda", "!comandos"):
         help_sections = [
             ("00 · INICIO RÁPIDO", [
-                "También puedes hablarle directamente: «Katherine, ...». Sin invocarla, no responde a conversación normal.",
-                f"{PREFIX}ayuda — abre este catálogo de comandos.",
-                f"{PREFIX}comandos — alias de ayuda.",
-                f"{PREFIX}miuid — muestra tu UID para configurar permisos.",
+                "También puedes dirigirte a Katherine: «Katherine, ...». La mención aislada no activa el bot.",
+                f"{PREFIX}ayuda / comandos — muestra este catálogo.",
+                f"{PREFIX}miuid / mi-id / mi_uid — muestra tu UID real de Anarchy Apps.",
+                f"{PREFIX}asistente <consulta> — consulta el núcleo conversacional de Katherine.",
             ]),
-            ("01 · GENSHIN IMPACT / GUÍAS", [
-                f"{PREFIX}guia <personaje> — guía completa: estadísticas, sets, armas, equipos, talentos, constelaciones y materiales.",
-                f"{PREFIX}cobertura <personaje> — apartados disponibles, faltantes y fuentes de la guía.",
-                f"{PREFIX}equipos <personaje> — composiciones publicadas para el personaje.",
-                f"{PREFIX}rotacion <personaje> — rotaciones y combos documentados.",
-                f"{PREFIX}sinergia <personaje 1>, <personaje 2> — busca equipos que incluyan a ambos.",
+            ("01 · GENSHIN IMPACT · GUÍAS Y ARCHIVO", [
+                f"{PREFIX}guia <personaje> — guía de build, armas, artefactos, talentos y equipos.",
+                f"{PREFIX}cobertura <personaje> — apartados disponibles y fuentes de la guía.",
+                f"{PREFIX}equipos <personaje> — composiciones recomendadas.",
+                f"{PREFIX}rotacion <personaje> — rotación documentada.",
+                f"{PREFIX}sinergia <personaje 1>, <personaje 2> — composiciones que incluyen a ambos.",
                 f"{PREFIX}materiales <personaje> — materiales de ascensión y talentos.",
                 f"{PREFIX}jefes — lista de jefes reconocidos.",
-                f"{PREFIX}banner — banners con fuente oficial verificable.",
-                f"{PREFIX}calendario — eventos y fechas verificables.",
-                f"{PREFIX}enciclopedia <nombre> — consulta el archivo de Teyvat por categorías.",
+                f"{PREFIX}banner / calendario — banners y eventos con fuentes verificables.",
+                f"{PREFIX}enciclopedia / archivo / teyvat <nombre> — consulta el archivo de Teyvat.",
                 f"{PREFIX}buscargenshin <texto> — busca personajes y objetos.",
-                f"{PREFIX}lista personajes|enemigos [página] — consulta listados.",
-                f"{PREFIX}enemigo <nombre> — ficha de enemigo o jefe.",
-                f"{PREFIX}geografia <nombre> — ubicaciones y regiones.",
-                f"{PREFIX}elemento <nombre> — información de elementos.",
+                f"{PREFIX}lista personajes|enemigos [página] — listados por categoría.",
+                f"{PREFIX}enemigo / geografia / elemento <nombre> — fichas de Teyvat.",
+                f"{PREFIX}reacciones <elemento> — reacciones elementales.",
                 f"{PREFIX}curiosidad — dato aleatorio de Genshin.",
             ]),
-            ("02 · GENSHIN IMPACT / SIMULACIÓN", [
-                f"{PREFIX}reacciones <elemento> — consulta las reacciones de un elemento.",
-                f"{PREFIX}deseo — simulador de deseos con pity guardado.",
-                f"{PREFIX}pity — consulta el pity del simulador.",
-                f"{PREFIX}resetpity — reinicia el pity simulado.",
+            ("02 · GENSHIN IMPACT · SIMULACIÓN", [
+                f"{PREFIX}deseo — simulador de deseos con pity independiente.",
+                f"{PREFIX}pity — consulta el contador del simulador.",
+                f"{PREFIX}resetpity — reinicia tu pity simulado.",
+                "La simulación no modifica tu cuenta real de Genshin Impact.",
             ]),
             ("03 · SOCIAL Y PERFILES", [
-                f"{PREFIX}perfil [@usuario] — muestra un perfil.",
+                f"{PREFIX}perfil [@usuario] — consulta un perfil.",
                 f"{PREFIX}bio <texto> — cambia tu biografía.",
                 f"{PREFIX}miestado <texto> — cambia tu estado.",
-                f"{PREFIX}afinidad @usuario — consulta afinidad.",
-                f"{PREFIX}amistad @usuario — alias de afinidad.",
+                f"{PREFIX}afinidad / amistad @usuario — consulta afinidad.",
                 f"{PREFIX}regalo @usuario [mensaje] — envía un regalo simbólico.",
-                f"{PREFIX}muro — muestra los regalos recibidos.",
-                f"{PREFIX}actividad [hoy|semana] — estadísticas, horas pico y usuarios activos.",
-                f"{PREFIX}interaccion @usuario — abre acciones sociales con botones.",
-                f"{PREFIX}diario — reclama la recompensa diaria.",
+                f"{PREFIX}muro — muestra tus regalos recibidos.",
+                f"{PREFIX}actividad [hoy|semana] — actividad y horas pico de la sala.",
+                f"{PREFIX}interaccion @usuario — abre interacciones mediante botones.",
+                f"{PREFIX}diario / daily — reclama tu recompensa diaria.",
                 f"{PREFIX}trabajar — gana puntos con tiempo de espera.",
-                f"{PREFIX}pagar @usuario cantidad — transfiere puntos.",
+                f"{PREFIX}pagar / transferir @usuario <cantidad> — transfiere puntos.",
                 f"{PREFIX}roast @usuario — broma amistosa.",
             ]),
-            ("04 · INTERACCIONES", [
-                f"{PREFIX}abrazo / abrazar @usuario — abrazo.",
-                f"{PREFIX}beso / besar @usuario — beso.",
-                f"{PREFIX}patada @usuario — patada ficticia.",
-                f"{PREFIX}golpe @usuario — golpe ficticio.",
-                f"{PREFIX}cachetada @usuario — cachetada de broma.",
-                f"{PREFIX}acariciar / mimar @usuario — gesto cariñoso.",
-                f"{PREFIX}morder @usuario — mordida ficticia.",
-                f"{PREFIX}consolar @usuario — ofrece consuelo.",
-                f"{PREFIX}felicitar @usuario — felicita.",
-                f"{PREFIX}saludar @usuario — saluda.",
-                f"{PREFIX}proteger @usuario — protege.",
-                f"{PREFIX}bailar @usuario — baila.",
-                f"{PREFIX}cosquillas @usuario — hace cosquillas.",
-                f"{PREFIX}chocar / highfive @usuario — choca los cinco.",
-                f"{PREFIX}ayudar @usuario — ayuda.",
-                f"{PREFIX}acompañar @usuario — acompaña.",
-                f"{PREFIX}asustar @usuario — intenta asustar.",
-                f"{PREFIX}curar @usuario — cura de forma ficticia.",
-                f"{PREFIX}cargar @usuario — carga.",
-                f"{PREFIX}empujar @usuario — empuja de forma ficticia.",
-                f"{PREFIX}regañar @usuario — regaña.",
-                f"{PREFIX}admirar @usuario — expresa admiración.",
-                f"{PREFIX}apoyar @usuario — muestra apoyo.",
-                f"{PREFIX}dormir @usuario — duerme junto a alguien.",
-                f"{PREFIX}ignorar @usuario — ignora de forma ficticia.",
-                f"{PREFIX}mirar @usuario — mira.",
-                f"{PREFIX}invitar @usuario — invita.",
+            ("04 · INTERACCIONES SOCIALES", [
+                "Usa !comando @usuario para estas acciones:",
+                "abrazo, abrazar, beso, besar, patada, golpe, cachetada, acariciar, mimar, morder.",
+                "consolar, felicitar, saludar, proteger, bailar, cosquillas, chocar, highfive.",
+                "ayudar, regalar, acompañar, asustar, curar, cargar, empujar, regañar.",
+                "admirar, apoyar, dormir, ignorar, mirar e invitar.",
             ]),
             ("05 · JUEGOS Y ENTRETENIMIENTO", [
-                f"{PREFIX}trivia — inicia una trivia.",
-                f"{PREFIX}responder <1-4> — responde la trivia.",
-                f"{PREFIX}adivina — inicia el juego del número.",
-                f"{PREFIX}intento <número> — intenta adivinar.",
-                f"{PREFIX}puntos / reputacion — consulta tus puntos.",
-                f"{PREFIX}ranking / top — ranking de puntos.",
-                f"{PREFIX}encuesta pregunta | opción 1 | opción 2 — crea una encuesta.",
-                f"{PREFIX}encuesta resultados <ID> — consulta resultados.",
-                f"{PREFIX}encuesta cerrar <ID> — cierra tu encuesta.",
-                f"{PREFIX}elige opción 1 | opción 2 — elección mediante botones.",
-                f"{PREFIX}duelo @usuario — reto para aceptar o rechazar.",
+                f"{PREFIX}trivia / responder <1-4> — trivia por turnos.",
+                f"{PREFIX}adivina / intento <número> — juego de adivinar.",
+                f"{PREFIX}puntos / reputacion — consulta tu saldo.",
+                f"{PREFIX}ranking / top — clasificación de puntos.",
+                f"{PREFIX}encuesta <pregunta> | <opciones> — crea una encuesta.",
+                f"{PREFIX}encuesta resultados <ID> / cerrar <ID> — gestiona tu encuesta.",
+                f"{PREFIX}elige opción 1 | opción 2 — elección con botones.",
+                f"{PREFIX}duelo @usuario — desafío entre usuarios.",
                 f"{PREFIX}ship <usuario 1> <usuario 2> — compatibilidad ficticia.",
-                f"{PREFIX}azar <mínimo> <máximo> — número aleatorio.",
-                f"{PREFIX}dado — lanza un dado.",
-                f"{PREFIX}moneda — lanza una moneda.",
-                f"{PREFIX}verdad — pregunta de verdad.",
-                f"{PREFIX}8ball <pregunta> — bola mágica.",
-                f"{PREFIX}chiste — cuenta un chiste.",
-                f"{PREFIX}frase — frase aleatoria.",
-                f"{PREFIX}suerte — mensaje de suerte.",
-                f"{PREFIX}reto — propone un reto de Genshin.",
+                f"{PREFIX}azar <mínimo> <máximo> / dado / moneda — azar.",
+                f"{PREFIX}verdad / 8ball <pregunta> — respuestas de entretenimiento.",
+                f"{PREFIX}chiste / frase / suerte / reto — entretenimiento y retos.",
             ]),
-            ("06 · VOZ Y REPRODUCTOR", [
-                f"{PREFIX}join — entra en la llamada de esta sala.",
-                f"{PREFIX}leer — activa la lectura en voz alta.",
-                f"{PREFIX}noleer — desactiva la lectura.",
-                f"{PREFIX}tts ajustes — consulta voz, velocidad y filtros.",
-                f"{PREFIX}tts voces — muestra voces disponibles.",
-                f"{PREFIX}tts voz <nombre> — cambia la voz.",
-                f"{PREFIX}tts velocidad <-50 a 100> — ajusta la velocidad.",
-                f"{PREFIX}tts volumen <0-100> — ajusta el volumen de lectura.",
-                f"{PREFIX}tts enlaces on/off — activa o desactiva lectura de enlaces.",
-                f"{PREFIX}tts menciones on/off — configura lectura de menciones.",
-                f"{PREFIX}volumenlectura / subirvolumenlectura / bajarvolumenlectura — controles rápidos TTS.",
+            ("06 · VOZ, TTS Y REPRODUCTOR", [
+                f"{PREFIX}join — conecta a Katherine a la llamada.",
+                f"{PREFIX}leer / noleer — activa o desactiva lectura en voz alta.",
+                f"{PREFIX}tts ajustes / voces — consulta ajustes y voces disponibles.",
+                f"{PREFIX}tts voz <nombre> / velocidad <-50 a 100> / volumen <0-100>.",
+                f"{PREFIX}tts enlaces on/off / menciones on/off — filtros de lectura.",
+                f"{PREFIX}volumenlectura / subirvolumenlectura / bajarvolumenlectura / silenciolectura.",
                 f"{PREFIX}dj buscar <tema> — busca en Internet Archive, Commons y Jamendo.",
-                f"{PREFIX}dj ambiente <mood> — recomienda música para estudiar, trabajar, dormir, jugar o relajarse.",
-                f"{PREFIX}dj favorito lista/guardar <número>/reproducir <id>/quitar <id> — gestiona favoritos.",
-
-                f"{PREFIX}dj fuentes — muestra catálogos disponibles y su configuración.",
                 f"{PREFIX}buscar <tema> — alias de búsqueda musical.",
-                f"{PREFIX}dj <archivo.mp3> [bucle] — reproduce un archivo local.",
-                f"{PREFIX}dj pausa / reanudar / saltar / cola — controles del reproductor.",
-                f"{PREFIX}dj añadir <archivo> — agrega una pista a la cola.",
-                f"{PREFIX}dj lista — muestra audios locales.",
-                f"{PREFIX}playlist crear/agregar/ver/reproducir/borrar — administra listas.",
-                "Las playlists aceptan archivos locales y favoritos remotos: agregar <nombre> | favorito:<id>.",
-
-                f"{PREFIX}volumen [0-100] — consulta o ajusta la música.",
-                f"{PREFIX}subirvolumen / bajarvolumen [cantidad] — cambia el volumen.",
-                f"{PREFIX}silencio — silencia la música.",
-                f"{PREFIX}djdetener / salirsala — detiene el audio y sale de la sala.",
+                f"{PREFIX}dj ambiente <mood> — búsqueda por ambiente.",
+                f"{PREFIX}dj fuentes — consulta catálogos disponibles.",
+                f"{PREFIX}dj favorito lista / guardar <número> / reproducir <id> / quitar <id>.",
+                f"{PREFIX}dj pausa / reanudar / saltar / cola / actual — controles de reproducción.",
+                f"{PREFIX}dj añadir <archivo> / lista — administra la cola y audios locales.",
+                f"{PREFIX}dj <archivo.mp3> / reproducir <archivo.mp3> — reproduce audio local.",
+                f"{PREFIX}playlist crear / agregar / ver / reproducir / borrar / lista.",
+                f"{PREFIX}volumen / volume [0-100] — consulta o ajusta música.",
+                f"{PREFIX}subirvolumen / bajarvolumen [cantidad] / silencio.",
+                f"{PREFIX}djdetener / djstop / salirsala — detiene y sale de la sala.",
                 f"{PREFIX}salas — consulta salas en vivo.",
             ]),
-            ("07 · SISTEMA Y ADMINISTRACIÓN", [
-                f"{PREFIX}estado — diagnóstico completo de Katherine.",
+            ("07 · UTILIDADES Y HERRAMIENTAS", [
                 f"{PREFIX}fecha — fecha y hora de Chile.",
-                f"{PREFIX}zona <Area/Ciudad> — hora de una zona.",
-                f"{PREFIX}menu — abre el menú interactivo.",
-                f"{PREFIX}economia — explica el sistema de puntos.",
-                f"{PREFIX}autotest — ejecuta pruebas internas.",
-                f"{PREFIX}admin — abre el panel de administración.",
-                f"{PREFIX}guardian — alias del panel de protección y moderación.",
-                f"{PREFIX}antispam enlaces <2-12> / menciones <3-20> — ajusta límites del Guardian.",
-
-                f"{PREFIX}advertir @usuario motivo — registra una advertencia.",
-                f"{PREFIX}advertencias @usuario — consulta advertencias.",
-                f"{PREFIX}quitaradvertencia <ID> — retira una advertencia.",
-                f"{PREFIX}antispam estado/on/off — configura el antispam.",
-                f"{PREFIX}perfilbot <Nombre> | <Estado> — modifica el perfil del bot.",
-                f"{PREFIX}avatarbot <URL> — cambia el avatar del bot.",
-                f"{PREFIX}traducir idioma | texto — traduce texto con detección aproximada.",
-                f"{PREFIX}multimedia imagen|video|audio <consulta> — busca recursos públicos.",
-                f"{PREFIX}ia estado / ayuda / olvidar — controla el núcleo de IA.",
-                f"{PREFIX}ia preguntar <consulta> / genshin <consulta> — conversación y Teyvat AI.",
-                f"{PREFIX}ia musica <descripción> / traducir idioma | texto — Eclipse AI y Language AI.",
-                f"{PREFIX}ia guardian revisar <texto> — revisión preventiva para administradores.",
-                f"{PREFIX}ia analista activar|resumen|limpiar|desactivar — análisis temporal para administradores.",
-                f"{PREFIX}ia diagnostico — explicación técnica asistida para administradores.",
+                f"{PREFIX}zona <Area/Ciudad> — hora de otra zona horaria.",
+                f"{PREFIX}menu / menú — abre el menú interactivo.",
+                f"{PREFIX}economia — explica puntos y recompensas.",
+                f"{PREFIX}traducir <idioma> | <texto> — traduce texto.",
+                f"{PREFIX}multimedia / media imagen|video|audio <consulta> — busca recursos públicos.",
                 f"{PREFIX}imagen / video / audio <consulta> — accesos directos multimedia.",
-                f"{PREFIX}respuestas on/off — activa o pausa respuestas contextuales.",
-                f"{PREFIX}respuesta añadir/lista/eliminar — administra respuestas automáticas.",
-                f"{PREFIX}centro — abre el centro interactivo de Katherine.",
-                f"{PREFIX}fuentes — muestra la salud de las fuentes externas.",
-                f"{PREFIX}evento crear <título>/estado/cerrar — gestiona un evento efímero de sala.",
+                f"{PREFIX}evento / eventos crear <título> — crea un evento temporal de sala.",
+                f"{PREFIX}evento estado / cerrar — consulta o cierra el evento (creador o administrador).",
+                f"{PREFIX}ia ayuda / estado / olvidar — ayuda y contexto de tu sesión.",
+                f"{PREFIX}ia preguntar <consulta> / genshin <consulta> — conversación y Teyvat AI.",
+                f"{PREFIX}ia musica <descripción> / traducir <idioma> | <texto> — Eclipse y Language AI.",
+            ]),
+            ("08 · SISTEMA Y ADMINISTRACIÓN · UID REQUERIDO", [
+                f"{PREFIX}estado — diagnóstico interno del bot. [ADMIN]",
+                f"{PREFIX}fuentes / saludfuentes — salud de proveedores externos. [ADMIN]",
+                f"{PREFIX}autotest — ejecuta pruebas internas. [ADMIN]",
+                f"{PREFIX}centro / nexus — centro de control de Katherine. [ADMIN]",
+                f"{PREFIX}admin / paneladmin / guardian — panel de administración. [ADMIN]",
+                f"{PREFIX}antispam estado/on/off — consulta o controla antispam. [ADMIN]",
+                f"{PREFIX}antispam limite <3-20> / ventana <3-60> / repeticiones <2-10>.",
+                f"{PREFIX}antispam enlaces <2-12> / menciones <3-20> — configura filtros. [ADMIN]",
+                f"{PREFIX}advertir @usuario <motivo> — registra una advertencia. [ADMIN]",
+                f"{PREFIX}advertencias @usuario — consulta advertencias. [ADMIN]",
+                f"{PREFIX}quitaradvertencia <ID> — retira una advertencia. [ADMIN]",
+                f"{PREFIX}perfilbot <nombre> | <estado> — modifica el perfil del bot. [ADMIN]",
+                f"{PREFIX}avatarbot <URL> — cambia el avatar del bot. [ADMIN]",
+                f"{PREFIX}respuestas on/off/estado — activa o pausa respuestas automáticas. [ADMIN]",
+                f"{PREFIX}respuesta añadir/lista/eliminar — administra reglas de respuesta. [ADMIN]",
+                f"{PREFIX}ia probar — comprueba el proveedor de IA. [ADMIN]",
+                f"{PREFIX}ia guardian revisar <texto> — revisión preventiva. [ADMIN]",
+                f"{PREFIX}ia analista activar/resumen/limpiar/desactivar — análisis temporal. [ADMIN]",
+                f"{PREFIX}ia diagnostico — explicación asistida del estado técnico. [ADMIN]",
+                "Los comandos [ADMIN] validan el UID real recibido, nunca el nickname.",
+                "Configura ADMIN_UIDS en Render con los UID autorizados; separa varios con coma o punto y coma.",
             ]),
         ]
 
@@ -14374,7 +14373,7 @@ Uso: !enciclopedia <nombre>""",
                 await send_message(thread, "No encontré esa encuesta en esta sala; pudo haber caducado o Katherine reinició.", source, reply)
                 return
             if sub == "cerrar":
-                if selected.get("creator_uid") != raw_uid and not is_admin_uid(raw_uid):
+                if selected.get("creator_uid") != raw_uid and not is_admin_uid(admin_uid):
                     await send_message(thread, "Solo quien creó la encuesta o un administrador puede cerrarla.", source, reply)
                     return
                 selected["closed"] = True
@@ -14745,7 +14744,7 @@ Uso: !enciclopedia <nombre>""",
         return
 
     if command == "!perfilbot":
-        if not ADMIN_UIDS or raw_uid not in ADMIN_UIDS:
+        if not is_admin_uid(admin_uid):
             await send_message(
                 thread,
                 "No tienes permiso para modificar el perfil de Katherine. "
@@ -14794,7 +14793,7 @@ Uso: !enciclopedia <nombre>""",
         return
 
     if command == "!avatarbot":
-        if not ADMIN_UIDS or raw_uid not in ADMIN_UIDS:
+        if not is_admin_uid(admin_uid):
             await send_message(
                 thread,
                 "No tienes permiso para cambiar el avatar de Katherine.",
@@ -15281,7 +15280,7 @@ Uso: !enciclopedia <nombre>""",
         return
 
     if command in ("!advertir", "!advertencias", "!quitaradvertencia", "!antispam"):
-        if raw_uid not in ADMIN_UIDS:
+        if not is_admin_uid(admin_uid):
             await send_message(thread, "No tienes permisos de administración. Configura ADMIN_UIDS en Render con tu UID.", source, reply)
             return
         if command == "!antispam":
