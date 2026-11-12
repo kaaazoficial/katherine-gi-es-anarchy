@@ -12645,7 +12645,7 @@ async def handle_command(event: dict, source: str):
                 AI_CORE.set_analyst(thread, True)
                 await send_message(
                     thread,
-                    "AVISO · AI CHAT ANALYST ACTIVADO\\n"
+                    "AVISO · AI CHAT ANALYST ACTIVADO\n"
                     "Desde este momento, Katherine recopilará temporalmente los mensajes nuevos "
                     "de esta sala para generar resúmenes solicitados por un administrador. "
                     "El contenido se mantiene solo en memoria del proceso, hasta una hora "
