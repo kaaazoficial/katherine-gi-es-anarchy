@@ -16,7 +16,7 @@ from katherine_nexus import (
         ("Katherine, diagnostica Katherine", "estado"),
         ("Katherine, qué fuentes", "fuentes"),
         ("Katherine, abre el panel de administración", "guardian"),
-        ("Katherine, recomiéndame música para estudiar", "dj ambiente"),
+        ("Katherine, recomiéndame música para estudiar", "dj ambiente estudiar"),
         ("Katherine, consulta la enciclopedia de Genshin sobre Cyno", "enciclopedia cyno"),
         ("Katherine, quién es Nahida", "enciclopedia nahida"),
         ("Katherine, haz un autotest", "autotest"),
