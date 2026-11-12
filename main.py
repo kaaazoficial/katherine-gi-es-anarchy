@@ -12587,6 +12587,10 @@ async def dispatch(event: dict, source: str):
     kind = event.get("type")
 
     if kind == "message":
+        # Ambos bots reciben el mismo evento de chat. Solo el bot developer
+        # procesa texto, comandos y TTS; el community queda reservado para voz.
+        if source != "developer":
+            return
         await enqueue_message_for_speech(event, source)
         await handle_command(event, source)
 
