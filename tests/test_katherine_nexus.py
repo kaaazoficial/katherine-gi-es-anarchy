@@ -3,7 +3,7 @@ import pytest
 
 from katherine_nexus import (
     cleanup_community_events, extract_message_id, format_source_health,
-    interpret_natural_request, toggle_community_participant,
+    interpret_natural_request, parse_command_invocation, toggle_community_participant,
 )
 
 
@@ -124,11 +124,33 @@ def test_format_source_health_summarizes_success_and_failures():
 def test_natural_language_requires_explicit_katherine_invocation():
     assert interpret_natural_request("hola, ¿cómo estás?") is None
     assert interpret_natural_request("pon música para estudiar") is None
-    assert interpret_natural_request("Katherine") == "ayuda"
+    assert interpret_natural_request("Katherine") is None
+    assert interpret_natural_request("Oye Katherine") is None
+    assert interpret_natural_request("Katherine,") is None
+    assert interpret_natural_request("Oye, Katherine.") is None
     assert interpret_natural_request("Oye Katherine, haz algo inesperado") == (
         "asistente haz algo inesperado"
     )
     assert interpret_natural_request("kAtHeRiNe: consulta la enciclopedia de Genshin sobre Cyno") == (
         "enciclopedia cyno"
     )
+
+@pytest.mark.parametrize(("content", "prefix", "expected"), [
+    ("!dj buscar Cyno", "!", ("!dj", ["buscar", "Cyno"])),
+    ("!buscar Cyno", "!", ("!dj", ["buscar", "Cyno"])),
+    ("!guardian actividad", "!", ("!admin", ["actividad"])),
+    ("-estado", "-", ("!estado", [])),
+    ("?ayuda", "?", ("!ayuda", [])),
+    ("!dj", "!", ("!dj", [])),
+    ("!", "!", None),
+    ("hola", "!", None),
+    ("!dj   buscar   Cyno", "!", ("!dj", ["buscar", "Cyno"])),
+])
+def test_command_parser_normalizes_prefixes_and_aliases(content, prefix, expected):
+    assert parse_command_invocation(content, prefix) == expected
+
+
+def test_bare_katherine_mentions_never_open_help_or_menu():
+    for mention in ("Katherine", "katherine", "Oye Katherine", "Katherine,", "Oye, Katherine."):
+        assert interpret_natural_request(mention) is None
 
