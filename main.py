@@ -13015,9 +13015,10 @@ async def handle_command(event: dict, source: str):
             )
             return
 
+        # Actualiza el mismo bot que recibió el comando (developer o community).
         result = await api_upload_bytes(
             "/me/icon",
-            "community",
+            source,
             image_bytes,
             mime
         )
