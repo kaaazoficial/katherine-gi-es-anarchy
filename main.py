@@ -7547,7 +7547,7 @@ async def handle_command(event: dict, source: str):
             f"{PREFIX}pity — consulta tus contadores y garantía del simulador.",
             f"{PREFIX}resetpity — reinicia el pity del simulador.",
             "",
-            f"${PREFIX}autotest — ejecuta pruebas internas de mensajes, estadísticas y cálculos.",
+            f"{PREFIX}autotest — ejecuta pruebas internas de mensajes, estadísticas y cálculos.",
             "SOCIAL Y PERFILES",
             f"{PREFIX}perfil [@usuario] — muestra tu perfil o el de otra persona.",
             f"{PREFIX}bio <texto> — cambia la biografía de tu perfil.",
