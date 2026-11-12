@@ -6,6 +6,7 @@ import json
 import time
 import hmac
 import hashlib
+import html
 import random
 import asyncio
 import logging
@@ -702,8 +703,15 @@ def split_message_content(content: str, limit: int = 2000) -> list[str]:
     chunks = []
     while len(text) > limit:
         newline_at = text.rfind("\n", 0, limit + 1)
+        paragraph_at = text.rfind("\n\n", 0, limit + 1)
+        sentence_ends = [
+            match.end()
+            for match in re.finditer(r"[.!?…](?:[\"')\]]?)(?:\s+|$)", text[:limit + 1])
+            if match.end() >= limit * 0.65
+        ]
+        sentence_at = sentence_ends[-1] if sentence_ends else -1
         space_at = text.rfind(" ", 0, limit + 1)
-        cut = max(newline_at, space_at)
+        cut = max(paragraph_at, newline_at, sentence_at, space_at)
 
         # Evita crear un bloque demasiado corto por un salto temprano.
         if cut < limit // 2:
@@ -843,8 +851,9 @@ async def send_message(
 # ---------------------------------------------------------------------------
 # GENSHIN DATABASE API
 # ---------------------------------------------------------------------------
-async def game_data(folder: str, query: str):
-    key = f"{folder}:{query.casefold()}"
+async def game_data(folder: str, query: str, extra_params: dict | None = None):
+    options_key = json.dumps(extra_params or {}, sort_keys=True, ensure_ascii=False)
+    key = f"{folder}:{query.casefold()}:{options_key}"
 
     if key in cache and cache[key][0] > time.time():
         return cache[key][1]
@@ -858,6 +867,8 @@ async def game_data(folder: str, query: str):
         "queryLanguages": "english,spanish",
         "resultLanguage": "spanish"
     }
+    if extra_params:
+        params.update(extra_params)
 
     try:
         r = await external_request(
@@ -867,12 +878,17 @@ async def game_data(folder: str, query: str):
         data = r.json()
 
         if isinstance(data, dict):
-            data = data.get("data", data.get("result", data))
+            if "result" in data and ("folder" in data or "query" in data):
+                data = data.get("result")
+            else:
+                data = data.get("data", data.get("result", data))
 
         cache[key] = (time.time() + 21600, data)
 
-        if len(cache) > 300:
-            cache.pop(next(iter(cache)))
+        if len(cache) > 400:
+            cleanup_expired_state()
+            while len(cache) > 400:
+                cache.pop(next(iter(cache)))
 
         return data
 
@@ -886,49 +902,219 @@ async def game_data(folder: str, query: str):
         return None
 
 
-def describe_game(data: Any, fallback: str) -> str:
+def clean_game_text(value: Any) -> str:
+    if value is None:
+        return ""
+    text = html.unescape(str(value))
+    text = re.sub(r"<\s*br\s*/?>", "\n", text, flags=re.I)
+    text = re.sub(r"</\s*(?:p|div|li|h[1-6])\s*>", "\n", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def game_excerpt(value: Any, max_chars: int = 850) -> str:
+    text = clean_game_text(value)
+    if len(text) <= max_chars:
+        return text
+
+    sample = text[:max_chars + 1]
+    boundaries = [
+        match.end()
+        for match in re.finditer(r"[.!?…](?:[\"')\]]?)(?:\s+|$)", sample)
+        if match.end() >= int(max_chars * 0.55)
+    ]
+
+    if boundaries:
+        cut = boundaries[-1]
+    else:
+        cut = sample.rfind(" ")
+        if cut < int(max_chars * 0.55):
+            cut = max_chars
+
+    return text[:cut].rstrip(" ,;:-") + "…"
+
+
+def game_items_text(items: Any, limit: int = 7) -> list[str]:
+    if not isinstance(items, list):
+        return []
+
+    lines = []
+    for item in items[:limit]:
+        if isinstance(item, str):
+            value = clean_game_text(item)
+        elif isinstance(item, dict):
+            value = (
+                item.get("name")
+                or item.get("nameText")
+                or item.get("title")
+                or item.get("description")
+            )
+            value = clean_game_text(value)
+            count = item.get("count")
+            rarity = item.get("rarity")
+            if count is not None:
+                value += f" ×{count}"
+            if rarity is not None:
+                value += f" ({rarity}★)"
+        else:
+            continue
+
+        if value:
+            lines.append(value[:180])
+
+    return lines
+
+
+def describe_game(data: Any, fallback: str, folder: str | None = None) -> str:
+    if isinstance(data, dict) and "result" in data and (
+        "folder" in data or "query" in data
+    ):
+        data = data.get("result")
+
     if not isinstance(data, dict):
+        if isinstance(data, list) and data:
+            return (
+                f"RESULTADOS DE GENSHIN — {fallback}\n"
+                + "\n".join(f"• {clean_game_text(x)}" for x in data[:15])
+            )
         return f"No encontré información de «{fallback}»."
 
-    name = data.get("name") or data.get("Name") or fallback
-
-    fields = (
-        ("title", "Título"),
-        ("rarity", "Rareza"),
-        ("elementText", "Elemento"),
-        ("weaponText", "Arma"),
-        ("region", "Región"),
-        ("substatText", "Atributo de ascensión"),
-        ("constellation", "Constelación"),
-        ("birthday", "Cumpleaños"),
-        ("affiliation", "Afiliación"),
-        ("description", "Descripción")
-    )
-
+    name = clean_game_text(data.get("name") or data.get("Name") or fallback)
     lines = [f"GENSHIN IMPACT — {name}"]
+    folder = (folder or "").casefold()
 
-    for key, label in fields:
-        value = data.get(key)
+    def add(label: str, value: Any, cap: int = 500):
+        if value is None or value == "":
+            return
+        if isinstance(value, list):
+            parts = game_items_text(value, limit=6)
+            value_text = ", ".join(parts)
+        elif isinstance(value, dict):
+            value_text = clean_game_text(
+                value.get("name")
+                or value.get("nameText")
+                or value.get("description")
+                or value.get("text")
+                or ""
+            )
+        else:
+            value_text = clean_game_text(value)
+        if value_text:
+            lines.append(f"{label}: {game_excerpt(value_text, cap)}")
 
-        if isinstance(value, (str, int, float)) and str(value).strip():
-            lines.append(f"{label}: {value}")
+    if folder == "enemies":
+        add("Categoría", data.get("categoryText"))
+        add("Tipo", data.get("enemyType") or data.get("monsterType"))
+        add("Nombre especial", data.get("specialNames"), 240)
+        add("Descripción", data.get("description"), 950)
+
+        investigation = data.get("investigation")
+        if isinstance(investigation, dict):
+            inv_name = investigation.get("name")
+            inv_desc = investigation.get("description")
+            if inv_name and clean_game_text(inv_name) != name:
+                add("Registro de archivo", inv_name, 180)
+            if inv_desc and clean_game_text(inv_desc) != clean_game_text(data.get("description")):
+                add("Información de archivo", inv_desc, 500)
+
+        rewards = game_items_text(data.get("rewardPreview"), limit=8)
+        if rewards:
+            lines.append("Recompensas registradas:")
+            lines.extend(f"• {item}" for item in rewards)
+
+        lines.append("Nota: esta ficha muestra los datos disponibles en la base; no inventa estadísticas de combate.")
+
+    elif folder == "weapons":
+        add("Rareza", f"{data.get('rarity')}★" if data.get("rarity") else None)
+        add("Tipo", data.get("weaponText"))
+        add("Ataque base", data.get("baseAtkValue"))
+        add("Atributo secundario", data.get("baseStatText") or data.get("mainStatText"))
+        add("Habilidad pasiva", data.get("effectName"))
+        refine = data.get("r1")
+        if isinstance(refine, dict):
+            add("Efecto R1", refine.get("description") or refine.get("effectDescription"), 700)
+        add("Descripción", data.get("description"), 550)
+        add("Historia", data.get("story"), 350)
+
+    elif folder == "artifacts":
+        rarity = data.get("rarityList") or data.get("rarity")
+        add("Rareza", [f"{x}★" for x in rarity] if isinstance(rarity, list) else rarity)
+        add("Efecto de 1 pieza", data.get("effect1Pc"), 350)
+        add("Efecto de 2 piezas", data.get("effect2Pc"), 500)
+        add("Efecto de 4 piezas", data.get("effect4Pc"), 650)
+        for slot, label in (
+            ("flower", "Flor"),
+            ("plume", "Pluma"),
+            ("sands", "Reloj"),
+            ("goblet", "Copa"),
+            ("circlet", "Corona")
+        ):
+            detail = data.get(slot)
+            if isinstance(detail, dict):
+                detail_name = detail.get("name")
+                detail_desc = detail.get("description")
+                if detail_name:
+                    add(label, detail_name, 130)
+                if detail_desc:
+                    add(f"{label} - descripción", detail_desc, 180)
+
+    else:
+        fields = (
+            ("title", "Título"),
+            ("rarity", "Rareza"),
+            ("elementText", "Elemento"),
+            ("weaponText", "Tipo de arma"),
+            ("region", "Región"),
+            ("substatText", "Atributo secundario"),
+            ("constellation", "Constelación"),
+            ("birthday", "Cumpleaños"),
+            ("affiliation", "Afiliación"),
+            ("categoryText", "Categoría"),
+            ("enemyType", "Tipo"),
+            ("domainTypeText", "Tipo de dominio"),
+            ("foodType", "Tipo de comida"),
+            ("effect", "Efecto"),
+            ("effectName", "Nombre del efecto"),
+            ("mainStatText", "Estadística principal"),
+            ("baseAtkValue", "Ataque base"),
+            ("source", "Obtención")
+        )
+
+        for key, label in fields:
+            if key in data:
+                add(label, data.get(key), 300)
+
+        add("Descripción", data.get("description"), 800)
+        add("Efecto", data.get("effect2Pc") or data.get("effect4Pc"), 650)
+        add("Ingredientes", data.get("ingredients"), 300)
+        add("Recompensas", data.get("rewardPreview"), 300)
+        add("Historia", data.get("story"), 350)
 
     if len(lines) == 1:
-        for k, v in list(data.items())[:10]:
-            if isinstance(v, (str, int, float)):
-                lines.append(f"{k}: {v}")
+        # Respaldo legible para categorías cuyos campos cambien en futuras versiones.
+        for key, value in data.items():
+            if key in ("id", "images", "costs", "stats", "url", "filename"):
+                continue
+            if isinstance(value, (str, int, float)) and str(value).strip():
+                label = key.replace("_", " ").capitalize()
+                add(label, value, 260)
+            if len(lines) >= 8:
+                break
 
-    return "\n".join(lines)[:1950]
+    return "\n".join(lines)
 
 
-async def character_stats(query: str):
-    key = f"stats:{query.casefold()}"
+async def game_stats(folder: str, query: str):
+    key = f"stats:{folder}:{query.casefold()}"
 
     if key in cache and cache[key][0] > time.time():
         return cache[key][1]
 
     params = {
-        "folder": "characters",
+        "folder": folder,
         "query": query,
         "queryLanguages": "english,spanish"
     }
@@ -941,17 +1127,28 @@ async def character_stats(query: str):
         data = response.json()
 
         if isinstance(data, dict):
+            if "result" in data and isinstance(data["result"], dict):
+                data = data["result"]
             cache[key] = (time.time() + 21600, data)
             return data
 
     except Exception as exc:
         logging.warning(
-            "No se pudieron consultar estadísticas de %s: %s",
+            "No se pudieron consultar estadísticas de %s (%s): %s",
             query,
+            folder,
             exc
         )
 
     return None
+
+
+async def character_stats(query: str):
+    return await game_stats("characters", query)
+
+
+async def weapon_stats(query: str):
+    return await game_stats("weapons", query)
 
 
 async def get_character(query: str):
@@ -1158,6 +1355,11 @@ async def handle_command(event: dict, source: str):
             f"Prefijo principal: {PREFIX} (también se reconocen ! y -).",
             "",
             "GENSHIN IMPACT",
+            f"{PREFIX}guia <personaje> — ficha, estadísticas base y nombres de talentos.",
+            f"{PREFIX}buscargenshin <texto> — busca a la vez en varias categorías del juego.",
+            f"{PREFIX}lista <categoría> [página] — lista nombres de personajes, armas, enemigos y más.",
+            f"{PREFIX}statsarma <arma> — estadísticas del arma al nivel 90.",
+            f"{PREFIX}materialesarma <arma> — materiales para ascender un arma.",
             f"{PREFIX}personaje <nombre> / {PREFIX}ficha-personaje <nombre> — ficha general del personaje.",
             f"{PREFIX}estadisticas <nombre> / {PREFIX}statspersonaje <nombre> — estadísticas base al nivel 90.",
             f"{PREFIX}talentos <nombre> — talentos de combate del personaje.",
@@ -1175,6 +1377,27 @@ async def handle_command(event: dict, source: str):
             f"{PREFIX}enemigo <nombre> — consulta información de enemigos.",
             f"{PREFIX}comida <nombre> — consulta platos y comida.",
             f"{PREFIX}material <nombre> — consulta materiales del juego.",
+            f"{PREFIX}receta <nombre> — busca platos (alias de comida).",
+            f"{PREFIX}jefe <nombre> — busca jefes y enemigos.",
+            f"{PREFIX}animal <nombre> — consulta animales y fauna.",
+            f"{PREFIX}tarjeta / {PREFIX}nombrecard <nombre> — consulta tarjetas de nombre.",
+            f"{PREFIX}atuendo <nombre> — consulta atuendos de personajes.",
+            f"{PREFIX}planeador <nombre> — consulta planeadores.",
+            f"{PREFIX}fabricacion <nombre> — consulta recetas de fabricación.",
+            f"{PREFIX}geografia <nombre> — consulta ubicaciones y geografía.",
+            f"{PREFIX}elemento <nombre> — consulta información de elementos.",
+            f"{PREFIX}rangoaventura <rango> — consulta rangos de aventura.",
+            f"{PREFIX}grupologros <nombre> — consulta grupos de logros.",
+            f"{PREFIX}materialtalento <nombre> — consulta tipos de materiales de talento.",
+            f"{PREFIX}emoji <nombre> — consulta emojis del juego.",
+            f"{PREFIX}voz <personaje> — consulta entradas de voz disponibles.",
+            f"{PREFIX}cartatcg <nombre> — busca cartas de personaje del TCG.",
+            f"{PREFIX}acciontcg <nombre> — busca cartas de acción del TCG.",
+            f"{PREFIX}enemigotcg <nombre> — busca cartas de enemigo del TCG.",
+            f"{PREFIX}reglatcg <texto> — busca reglas detalladas del TCG.",
+            f"{PREFIX}efectotcg <nombre> — consulta efectos de estado del TCG.",
+            f"{PREFIX}invocaciontcg <nombre> — consulta invocaciones del TCG.",
+            f"{PREFIX}clavetcg <texto> — consulta palabras clave del TCG.",
             f"{PREFIX}logro <nombre> — busca información de logros.",
             f"{PREFIX}talento <nombre> — busca materiales/libros de talento.",
             f"{PREFIX}constelacion <personaje> — muestra las constelaciones.",
@@ -2346,6 +2569,228 @@ async def handle_command(event: dict, source: str):
         return
 
     # -----------------------------------------------------------------------
+    # GUÍAS, ESTADÍSTICAS Y BÚSQUEDA AMPLIADA DE GENSHIN
+    # -----------------------------------------------------------------------
+    if command == "!statsarma":
+        if not query:
+            await send_message(thread, f"Uso: {PREFIX}statsarma nombre del arma", source, reply)
+            return
+
+        weapon, stats = await asyncio.gather(
+            game_data("weapons", query),
+            weapon_stats(query)
+        )
+        base = get_level90(stats)
+
+        if not isinstance(weapon, dict) or not isinstance(base, dict):
+            await send_message(
+                thread,
+                f"No pude obtener la ficha y las estadísticas de «{query}».",
+                source,
+                reply
+            )
+            return
+
+        answer = (
+            f"ESTADÍSTICAS DEL ARMA — {weapon.get('name', query)}\n"
+            f"Rareza: {weapon.get('rarity', '?')}★\n"
+            f"Tipo: {weapon.get('weaponText', 'No disponible')}\n"
+            f"Ataque base nivel 90: {format_number(base.get('attack'))}\n"
+            f"Atributo de ascensión: {weapon.get('mainStatText') or 'Ninguno'}\n"
+            f"Valor de ascensión nivel 90: {base.get('specialized', 'No disponible')}\n"
+            "Valores de la base de datos; no incluyen refinamiento ni bonificaciones."
+        )
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!materialesarma":
+        if not query:
+            await send_message(thread, f"Uso: {PREFIX}materialesarma nombre del arma", source, reply)
+            return
+
+        weapon = await game_data("weapons", query)
+        costs = weapon.get("costs") if isinstance(weapon, dict) else None
+
+        if not isinstance(costs, dict):
+            await send_message(thread, f"No encontré los materiales de «{query}».", source, reply)
+            return
+
+        totals = defaultdict(int)
+        for stage in costs.values():
+            if isinstance(stage, list):
+                for item in stage:
+                    if isinstance(item, dict) and item.get("name"):
+                        try:
+                            totals[str(item["name"])] += int(item.get("count", 0))
+                        except (TypeError, ValueError):
+                            continue
+
+        if not totals:
+            await send_message(thread, "La API no devolvió materiales de ascensión para esa arma.", source, reply)
+            return
+
+        lines = [
+            f"MATERIALES DEL ARMA — {weapon.get('name', query)}",
+            "Totales para ascenderla al máximo:"
+        ]
+        lines.extend(f"• {name}: {amount}" for name, amount in totals.items())
+        await send_message(thread, "\n".join(lines), source, reply)
+        return
+
+    if command == "!guia":
+        if not query:
+            await send_message(thread, f"Uso: {PREFIX}guia nombre del personaje", source, reply)
+            return
+
+        character, stats = await asyncio.gather(
+            get_character(query),
+            character_stats(query)
+        )
+        if not isinstance(character, dict):
+            await send_message(thread, f"No encontré al personaje «{query}».", source, reply)
+            return
+
+        parts = [describe_game(character, query, "characters")]
+        base = get_level90(stats)
+        if isinstance(base, dict):
+            parts.append(
+                "ESTADÍSTICAS BASE NIVEL 90\n"
+                f"Vida: {format_number(base.get('hp'))} | "
+                f"ATQ: {format_number(base.get('attack'))} | "
+                f"DEF: {format_number(base.get('defense'))}"
+            )
+
+        talents = character.get("skillTalents") or character.get("talents") or []
+        if isinstance(talents, dict):
+            talents = list(talents.values())
+        if isinstance(talents, list) and talents:
+            names = [
+                clean_game_text(x.get("name") or x.get("unlock") or "")
+                for x in talents[:6] if isinstance(x, dict)
+            ]
+            names = [x for x in names if x]
+            if names:
+                parts.append("TALENTOS\n" + "\n".join(f"• {x}" for x in names))
+
+        await send_message(thread, "\n\n".join(parts), source, reply)
+        return
+
+    if command == "!buscargenshin":
+        if not query:
+            await send_message(
+                thread,
+                f"Uso: {PREFIX}buscargenshin nombre. Busca en personajes, armas, artefactos, enemigos, materiales, comida y dominios.",
+                source,
+                reply
+            )
+            return
+
+        folders = [
+            ("Personaje", "characters"),
+            ("Arma", "weapons"),
+            ("Artefacto", "artifacts"),
+            ("Enemigo", "enemies"),
+            ("Material", "materials"),
+            ("Comida", "foods"),
+            ("Dominio", "domains")
+        ]
+        results = await asyncio.gather(
+            *(game_data(folder, query) for _, folder in folders)
+        )
+
+        found = []
+        for (label, folder), data in zip(folders, results):
+            if isinstance(data, dict):
+                name = clean_game_text(data.get("name") or data.get("Name") or query)
+                found.append(f"• {label}: {name} — usa {PREFIX}{ {'characters':'personaje','weapons':'arma','artifacts':'artefacto','enemies':'enemigo','materials':'material','foods':'comida','domains':'dominio'}[folder] } {query}")
+            elif isinstance(data, list) and data:
+                found.append(f"• {label}: {', '.join(clean_game_text(x) for x in data[:3])}")
+
+        answer = f"BÚSQUEDA GENSHIN — {query}\n\n" + (
+            "\n".join(found) if found else "No encontré coincidencias en las categorías consultadas."
+        )
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!lista":
+        categories = {
+            "personajes": "characters",
+            "personaje": "characters",
+            "armas": "weapons",
+            "arma": "weapons",
+            "artefactos": "artifacts",
+            "artefacto": "artifacts",
+            "enemigos": "enemies",
+            "enemigo": "enemies",
+            "dominios": "domains",
+            "dominio": "domains",
+            "comidas": "foods",
+            "comida": "foods",
+            "materiales": "materials",
+            "material": "materials",
+            "talentos": "talents",
+            "talento": "talents",
+            "logros": "achievements",
+            "animales": "animals",
+            "atuendos": "outfits",
+            "tarjetas": "namecards",
+            "planeadores": "windgliders",
+            "elementos": "elements",
+            "fabricaciones": "crafts"
+        }
+
+        args_list = query.split()
+        if not args_list or args_list[0].casefold() not in categories:
+            await send_message(
+                thread,
+                f"Uso: {PREFIX}lista categoría [página]. Categorías: personajes, armas, artefactos, enemigos, dominios, comidas, materiales, talentos, logros, animales, atuendos, tarjetas, planeadores, elementos o fabricaciones.",
+                source,
+                reply
+            )
+            return
+
+        category = args_list[0].casefold()
+        try:
+            page = max(1, int(args_list[1])) if len(args_list) > 1 else 1
+        except ValueError:
+            page = 1
+
+        folder = categories[category]
+        names = await game_data(
+            folder,
+            "names",
+            {"matchCategories": "true"}
+        )
+
+        if isinstance(names, dict) and isinstance(names.get("result"), list):
+            names = names["result"]
+
+        if not isinstance(names, list) or not names:
+            await send_message(
+                thread,
+                f"No pude obtener la lista de {category} desde Genshin-DB.",
+                source,
+                reply
+            )
+            return
+
+        names = [clean_game_text(x) for x in names if isinstance(x, str)]
+        per_page = 20
+        pages = max(1, (len(names) + per_page - 1) // per_page)
+        if page > pages:
+            await send_message(thread, f"Solo existen {pages} página(s) para {category}.", source, reply)
+            return
+
+        selected = names[(page - 1) * per_page:page * per_page]
+        answer = (
+            f"LISTA DE {category.upper()} — PÁGINA {page}/{pages}\n"
+            + "\n".join(f"{(page - 1) * per_page + i + 1}. {name}" for i, name in enumerate(selected))
+            + f"\n\nTotal registrado: {len(names)}"
+        )
+        await send_message(thread, answer, source, reply)
+        return
+
+    # -----------------------------------------------------------------------
     # CONSULTAS DE OBJETOS DE GENSHIN
     # -----------------------------------------------------------------------
     object_commands = {
@@ -2353,10 +2798,32 @@ async def handle_command(event: dict, source: str):
         "!artefacto": "artifacts",
         "!dominio": "domains",
         "!enemigo": "enemies",
-        "!comida": "food",
+        "!jefe": "enemies",
+        "!comida": "foods",
+        "!receta": "foods",
         "!material": "materials",
         "!logro": "achievements",
-        "!talento": "talents"
+        "!talento": "talents",
+        "!animal": "animals",
+        "!nombrecard": "namecards",
+        "!tarjeta": "namecards",
+        "!atuendo": "outfits",
+        "!planeador": "windgliders",
+        "!fabricacion": "crafts",
+        "!geografia": "geographies",
+        "!elemento": "elements",
+        "!rangoaventura": "adventureranks",
+        "!grupologros": "achievementgroups",
+        "!materialtalento": "talentmaterialtypes",
+        "!emoji": "emojis",
+        "!voz": "voiceovers",
+        "!cartatcg": "tcgcharactercards",
+        "!acciontcg": "tcgactioncards",
+        "!enemigotcg": "tcgenemycards",
+        "!reglatcg": "tcgdetailedrules",
+        "!efectotcg": "tcgstatuseffects",
+        "!invocaciontcg": "tcgsummons",
+        "!clavetcg": "tcgkeywords"
     }
 
     if command in object_commands:
@@ -2373,7 +2840,7 @@ async def handle_command(event: dict, source: str):
 
         await send_message(
             thread,
-            describe_game(data, query),
+            describe_game(data, query, object_commands[command]),
             source,
             reply
         )
