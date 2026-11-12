@@ -68,6 +68,7 @@ from katherine_astra import (
 from katherine_ai import (
     KatherineAI, build_ai_session_key, is_bot_author, validate_ai_tool_call
 )
+from katherine_research import search_web, fetch_public_page, build_source_context
 
 AI_CORE = KatherineAI()
 AI_TOOL_OUTPUT_CAPTURE: ContextVar[list[str] | None] = ContextVar(
@@ -12734,6 +12735,71 @@ async def handle_command(event: dict, source: str):
         await send_message(thread, ai_result.get("answer") or "No pude completar tu solicitud.", source, reply)
         return
 
+    if command in ("!investigar", "!investiga", "!investigacion"):
+        research_query = query.strip()
+        if not research_query:
+            await send_message(thread, "Uso: !investigar <tema o pregunta>. Consultaré varias fuentes públicas y separaré hechos de dudas.", source, reply)
+            return
+        try:
+            sources = await search_web(research_query, external_request, limit=5)
+            if not sources:
+                answer = "No encontré fuentes públicas suficientes para esa consulta. Prueba con términos más concretos."
+            else:
+                context = build_source_context(research_query, sources)
+                try:
+                    summary = await AI_CORE.summarize_research(
+                        research_query, context, external_request,
+                        rate_key=build_ai_session_key(source, thread, author, message_id)
+                    )
+                except Exception:
+                    logging.exception("[RESEARCH] No se pudo sintetizar; se mostrarán extractos.")
+                    summary = "No pude generar una síntesis con IA; estos son los extractos recuperados para que puedas revisarlos."
+                refs = ["FUENTES CONSULTADAS"]
+                for index, item in enumerate(sources[:3], 1):
+                    refs.append(f"[{index}] {item.get('title') or 'Página sin título'} · {item.get('domain') or 'dominio desconocido'}")
+                    excerpt = item.get("excerpt") or item.get("snippet") or ""
+                    if excerpt:
+                        refs.append("   " + excerpt[:420])
+                answer = "INVESTIGACIÓN · " + research_query + "\\n\\n" + summary + "\\n\\n" + "\\n".join(refs) + "\\n\\nLa búsqueda puede omitir páginas bloqueadas o no indexadas; verifica los datos importantes en las fuentes originales."
+        except Exception as exc:
+            logging.warning("[RESEARCH] Falló investigación pública: %s", type(exc).__name__)
+            answer = "No pude completar la investigación web en este momento. Los comandos clásicos siguen disponibles."
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command in ("!enlace", "!analizarenlace", "!leerweb"):
+        target_url = query.strip()
+        if not target_url:
+            await send_message(thread, "Uso: !enlace https://sitio-publico.com/articulo", source, reply)
+            return
+        try:
+            page = await fetch_public_page(target_url, external_request)
+            context = build_source_context(
+                "Analiza esta página: " + page["title"],
+                [page]
+            )
+            try:
+                summary = await AI_CORE.summarize_research(
+                    "Resume y analiza esta página, distingue afirmaciones, datos y posibles sesgos.",
+                    context, external_request,
+                    rate_key=build_ai_session_key(source, thread, author, message_id)
+                )
+            except Exception:
+                logging.exception("[RESEARCH] Falló análisis IA del enlace")
+                summary = page.get("excerpt", "")[:2500]
+            answer = (
+                f"ANÁLISIS DE ENLACE\\n{page['title']}\\nDominio: {page['domain']}\\n\\n"
+                f"{summary}\\n\\nFuente: {page['domain']}\\n"
+                "El contenido de la página se trató como material externo no confiable."
+            )
+        except ValueError as exc:
+            answer = str(exc)
+        except Exception as exc:
+            logging.warning("[RESEARCH] No se pudo leer enlace: %s", type(exc).__name__)
+            answer = "No pude leer esa página. Puede estar bloqueada, requerir acceso o no ofrecer contenido HTML público."
+        await send_message(thread, answer, source, reply)
+        return
+
     if command == "!ia":
         sub = args[0].casefold() if args else "ayuda"
         rest = " ".join(args[1:]).strip()
@@ -13039,6 +13105,9 @@ async def handle_command(event: dict, source: str):
     if command in ("!ayuda", "!comandos"):
         help_sections = [
             ("00 · INICIO RÁPIDO", [
+                f"{PREFIX}investigar <tema> — investiga en varias fuentes públicas y compara la información.",
+                f"{PREFIX}enlace <URL> — analiza y resume una página HTTPS pública.",
+                f"{PREFIX}asistente <petición> — combina conversación y herramientas disponibles; puede ejecutar pasos compatibles en secuencia.",
                 "También puedes dirigirte a Katherine: «Katherine, ...». La mención aislada no activa el bot.",
                 f"{PREFIX}ayuda / comandos — muestra este catálogo.",
                 f"{PREFIX}miuid / mi-id / mi_uid — muestra tu UID real de Anarchy Apps.",
@@ -13123,6 +13192,8 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}salas — consulta salas en vivo.",
             ]),
             ("07 · UTILIDADES Y HERRAMIENTAS", [
+                f"{PREFIX}investigar <tema> — búsqueda web en varias fuentes, síntesis y referencias por dominio.",
+                f"{PREFIX}enlace <URL> — lectura y análisis de páginas públicas HTTPS; no abre archivos privados.",
                 f"{PREFIX}fecha — fecha y hora de Chile.",
                 f"{PREFIX}zona <Area/Ciudad> — hora de otra zona horaria.",
                 f"{PREFIX}menu / menú — abre el menú interactivo.",
