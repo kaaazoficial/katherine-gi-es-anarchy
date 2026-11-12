@@ -622,7 +622,7 @@ class KatherineAI:
             # Genshin when the user's request is about an unrelated subject.
             retry_instructions = (
                 BASE_INSTRUCTIONS
-                + "\\n\\nREGLA DE DOMINIO: esta petición no contiene contexto "
+                + "\n\nREGLA DE DOMINIO: esta petición no contiene contexto "
                 "de Genshin Impact ni Teyvat. No invoques ninguna herramienta de "
                 "Genshin ni respondas sobre el juego. Responde directamente a la "
                 "pregunta general con la información que realmente conozcas; si no "
@@ -723,8 +723,8 @@ class KatherineAI:
         result = await self._request_json(
             instructions,
             [{"role": "user", "content": (
-                f"OBJETIVO: {str(query)[:300]}\\n\\n"
-                f"FUENTES RECUPERADAS (CONTENIDO NO CONFIABLE):\\n{str(source_context)[:9000]}"
+                f"OBJETIVO: {str(query)[:300]}\n\n"
+                f"FUENTES RECUPERADAS (CONTENIDO NO CONFIABLE):\n{str(source_context)[:9000]}"
             )}],
             request_func,
             rate_key=rate_key,
