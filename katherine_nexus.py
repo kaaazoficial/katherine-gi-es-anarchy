@@ -17,7 +17,7 @@ def interpret_natural_request(value: str) -> str | None:
         return None
     # Procesar lenguaje natural únicamente cuando el usuario invoque a Katherine.
     addressed = re.match(
-        r"^(?:oye[, ]+)?katherine(?:[, :]+|$)\\s*(.*)$",
+        r"^(?:oye[, ]+)?katherine(?:[, :]+|$)\s*(.*)$",
         raw,
         flags=re.IGNORECASE,
     )
@@ -25,7 +25,7 @@ def interpret_natural_request(value: str) -> str | None:
         return None
     raw = addressed.group(1).strip()
     text = _normalize(raw)
-    text = re.sub(r"\\s+(?:por favor|porfa)$", "", text).strip()
+    text = re.sub(r"\s+(?:por favor|porfa)$", "", text).strip()
     if not text:
         return "ayuda"
     patterns = (
@@ -66,7 +66,7 @@ def interpret_natural_request(value: str) -> str | None:
         (r"^(?:que materiales necesita|materiales para|materiales de) (.+)$", "materiales"),
         (r"^(?:que cobertura tiene|cobertura de|apartados de la guia de) (.+)$", "cobertura"),
         (r"^(?:busca en genshin|busqueda de genshin|busca genshin) (.+)$", "buscargenshin"),
-        (r"^(?:consulta|abre|busca en)?\\s*(?:la )?enciclopedia(?: de genshin)? (?:sobre |de |del )?(.+)$", "enciclopedia"),
+        (r"^(?:consulta|abre|busca en)?\s*(?:la )?enciclopedia(?: de genshin)? (?:sobre |de |del )?(.+)$", "enciclopedia"),
         (r"^(?:quien es|que es|que sabes de) (.+)$", "enciclopedia"),
         (r"^(?:reproduce|pon|busca musica de|busca la cancion) (.+)$", "dj buscar"),
         (r"^(?:recomiendame|ponme) musica (?:para|de) (.+)$", "dj ambiente"),
@@ -90,7 +90,9 @@ def interpret_natural_request(value: str) -> str | None:
         payload = translation.group(2).strip()
         if payload:
             return f"traducir {language} | {payload}"
-    return None
+    # Una invocación explícita siempre recibe una respuesta, incluso si la
+    # solicitud todavía no tiene una acción específica registrada.
+    return f"asistente {raw[:300]}"
 
 def extract_message_id(payload: Any) -> str | None:
     """Extract message ids from common POST response envelopes."""
