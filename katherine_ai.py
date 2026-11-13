@@ -958,9 +958,11 @@ class KatherineAI:
 
         try:
             token_limit = float(normalized.get("x-ratelimit-limit-tokens") or 0)
-            remaining_requests = float(normalized.get("x-ratelimit-remaining-requests"))
         except (TypeError, ValueError):
             token_limit = 0.0
+        try:
+            remaining_requests = float(normalized.get("x-ratelimit-remaining-requests"))
+        except (TypeError, ValueError):
             remaining_requests = -1.0
         try:
             remaining_tokens = float(normalized.get("x-ratelimit-remaining-tokens"))
@@ -976,8 +978,11 @@ class KatherineAI:
             if isinstance(usage, dict):
                 used = usage.get("total_tokens")
                 if used is None:
-                    used = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
-                    used += int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+                    try:
+                        used = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+                        used += int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+                    except (TypeError, ValueError):
+                        used = 0
                 try:
                     used_tokens = max(0, int(used or 0))
                 except (TypeError, ValueError):
