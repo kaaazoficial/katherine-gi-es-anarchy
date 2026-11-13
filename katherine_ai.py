@@ -446,7 +446,8 @@ def classify_request_intent(
         "enviar", "regala", "regalar", "actualiza", "cambia", "borra",
         "elimina", "reinicia", "transfiere", "paga", "lanza", "tira",
         "juega", "inicia", "activa", "desactiva", "conecta", "entra",
-        "unete", "lee", "deja de leer", "resume",
+        "unete", "lee", "deja de leer", "resume", "investiga",
+        "investigar", "analiza", "analizar", "revisa",
     )
     action_count = sum(
         1 for marker in action_markers
@@ -1120,6 +1121,17 @@ class KatherineAI:
             if result["kind"] == "command" else None
         )
         if result["kind"] == "plan":
+            if intent != "multi_action":
+                self._append_history(key, "user", text[:1200])
+                safe_answer = (
+                    "No necesitas encadenar acciones para esta consulta. "
+                    "Dime qué aspecto quieres conocer y te responderé directamente."
+                )
+                self._append_history(key, "assistant", safe_answer)
+                return {
+                    "kind": "answer", "answer": safe_answer,
+                    "command": "", "args": "", "fallback": True,
+                }
             raw_steps = result.get("steps") or []
             validated_steps = []
             if not isinstance(raw_steps, list) or not 1 <= len(raw_steps) <= 3:
@@ -1220,19 +1232,6 @@ class KatherineAI:
             return {
                 "kind": "answer", "answer": safe_answer,
                 "command": "", "args": "",
-            }
-
-        if result["kind"] == "plan" and intent != "multi_action":
-            # Plans are only valid after an explicitly multi-action request.
-            self._append_history(key, "user", text[:1200])
-            safe_answer = (
-                "Puedo ayudarte, pero no voy a ejecutar varias acciones cuando "
-                "solo me estás haciendo una pregunta. ¿Qué necesitas saber exactamente?"
-            )
-            self._append_history(key, "assistant", safe_answer)
-            return {
-                "kind": "answer", "answer": safe_answer,
-                "command": "", "args": "", "fallback": True,
             }
 
         if result["kind"] == "command" and intent == "conversation":
