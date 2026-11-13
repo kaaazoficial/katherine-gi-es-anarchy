@@ -6,10 +6,10 @@ El catálogo de usuario se genera con `!ayuda` y `!comandos` en `main.py`. Debe 
 
 - `!investigar <tema>`: busca páginas públicas en varios resultados independientes, recupera extractos y solicita una síntesis basada en las fuentes.
 - `!enlace <URL>`: analiza una página HTML pública HTTPS; no sigue redirecciones ni acepta hosts locales/privados.
-- La investigación combina resultados web generales con Wikipedia en español/inglés y wikis de Fandom descubiertas por búsqueda, consultando sus APIs MediaWiki cuando están disponibles. Puede incluir hasta cinco fuentes de dominios distintos; Fandom se trata como contenido comunitario y no como fuente oficial.
+- La investigación combina Wikipedia, Wikidata y búsqueda web general. Según la intención, añade Internet Archive (libros/archivos), OpenAlex y Crossref (bibliografía científica), NASA (biblioteca de imágenes y vídeos espaciales), MusicBrainz y Jamendo (metadatos y catálogo musical), y KeqingMains, HoYoLAB y Fandom (Genshin Impact). Las fuentes especializadas solo se consultan en temas pertinentes; no se mezclan con preguntas generales. Se muestran hasta ocho fuentes de dominios distintos. KeqingMains y Fandom son fuentes comunitarias; HoYoLAB puede contener publicaciones oficiales y de usuarios, por lo que se comprueba la autoría. Jamendo requiere `JAMENDO_CLIENT_ID` en Render; sin ella se omite. MusicBrainz limita las consultas a una por segundo. OpenAlex, Crossref, Wikidata, Internet Archive y NASA usan endpoints públicos sin clave de Katherine.
 - `!ia investigar <tema>` y `!ia enlace <URL>`: accesos desde el menú IA.
 - Katherine también reconoce peticiones explícitas como «Katherine, investiga…» y «Katherine, analiza este enlace…». La mención aislada sigue sin activar el bot.
-- La síntesis cita las fuentes por número y dominio; páginas bloqueadas, no HTML o sin texto suficiente pueden omitirse. La búsqueda no garantiza exhaustividad.
+- La síntesis cita las fuentes por número y dominio; páginas bloqueadas, no HTML o sin texto suficiente pueden omitirse. Los metadatos de Crossref/OpenAlex no garantizan acceso al texto completo y los derechos de Internet Archive/Jamendo dependen de cada ítem. La búsqueda no garantiza exhaustividad.
 
 ## Administración por UID
 
