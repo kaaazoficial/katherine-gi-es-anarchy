@@ -223,7 +223,7 @@ def test_topic_router_does_not_call_game_sources_for_general_question(monkeypatc
     assert calls == []
 
 
-def test_source_context_includes_eight_numbered_sources():
+def test_source_context_includes_six_numbered_sources():
     sources = [{
         "title": f"Source {index}",
         "domain": f"source{index}.example",
@@ -232,8 +232,9 @@ def test_source_context_includes_eight_numbered_sources():
         "source_type": "test",
     } for index in range(1, 9)]
     context = research.build_source_context("test", sources)
-    assert "FUENTE [8]" in context
-    assert "source8.example" in context
+    assert "FUENTE [6]" in context
+    assert "FUENTE [7]" not in context
+    assert "source6.example" in context
 
 
 def test_parse_research_modes_and_preserve_subject():
@@ -258,7 +259,7 @@ def test_research_mode_parser_does_not_accept_empty_mode_subject():
     assert research.parse_research_mode("comparar:") == ("general", "comparar:")
 
 
-def test_source_context_keeps_all_eight_sources_with_large_excerpts():
+def test_source_context_bounds_source_count_and_large_excerpts():
     sources = [{
         "title": f"Source {index}",
         "domain": f"source{index}.example",
@@ -268,8 +269,9 @@ def test_source_context_keeps_all_eight_sources_with_large_excerpts():
     } for index in range(1, 9)]
     context = research.build_source_context("test", sources)
     assert len(context) < 18_000
-    assert all(f"FUENTE [{index}]" in context for index in range(1, 9))
-    assert "source8.example" in context
+    assert all(f"FUENTE [{index}]" in context for index in range(1, 7))
+    assert "FUENTE [7]" not in context
+    assert "source8.example" not in context
 
 
 def test_public_page_fetch_uses_dns_pinning_and_stream_byte_limit():
