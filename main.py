@@ -13235,7 +13235,7 @@ async def handle_command(event: dict, source: str):
             await send_message(thread, "Uso: !investigar <tema o pregunta>. Consultaré varias fuentes públicas y separaré hechos de dudas.", source, reply)
             return
         try:
-            sources = await search_web(research_query, external_request, limit=5)
+            sources = await search_web(research_query, external_request, limit=8)
             if not sources:
                 answer = "No encontré fuentes públicas suficientes para esa consulta. Prueba con términos más concretos."
             else:
@@ -13249,7 +13249,7 @@ async def handle_command(event: dict, source: str):
                     logging.exception("[RESEARCH] No se pudo sintetizar; se mostrarán extractos.")
                     summary = "No pude generar una síntesis con IA; estos son los extractos recuperados para que puedas revisarlos."
                 refs = ["FUENTES CONSULTADAS"]
-                for index, item in enumerate(sources[:3], 1):
+                for index, item in enumerate(sources[:8], 1):
                     refs.append(f"[{index}] {item.get('title') or 'Página sin título'} · {item.get('domain') or 'dominio desconocido'}")
                     excerpt = item.get("excerpt") or item.get("snippet") or ""
                     if excerpt:
