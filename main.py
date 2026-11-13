@@ -16108,7 +16108,7 @@ Uso: !enciclopedia <nombre>""",
     allowed_suggestions = set(AI_PUBLIC_COMMANDS)
     if is_admin_uid(admin_uid):
         allowed_suggestions.update(AI_ADMIN_COMMANDS)
-    suggestion = suggest_command(command, allowed_suggestions, score_cutoff=88)
+    suggestion = suggest_command(command, allowed_suggestions, score_cutoff=86)
     if suggestion:
         suggested_name, score = suggestion
         response_text = (
