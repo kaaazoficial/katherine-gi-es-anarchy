@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import hashlib
 import secrets
 import os
 import re
 import time
+from email.utils import parsedate_to_datetime
 from collections import deque
 from typing import Any, Awaitable, Callable
 
@@ -224,6 +226,31 @@ ACTION_SCHEMA = {
     },
     "required": ["kind", "answer", "command", "args", "steps"],
 }
+
+
+def _retry_header_seconds(value: Any) -> float | None:
+    """Parse Groq retry/reset headers: seconds, HTTP date, or 1m2.5s."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        pass
+    try:
+        parsed = parsedate_to_datetime(raw)
+        return max(0.0, parsed.timestamp() - time.time())
+    except (TypeError, ValueError, OverflowError):
+        pass
+    matches = list(re.finditer(r"(\\d+(?:\\.\\d+)?)\\s*(ms|s|m|h)", raw, re.I))
+    if not matches:
+        return None
+    compact = re.sub(r"\\s+", "", raw).casefold()
+    if "".join(match.group(0).replace(" ", "").casefold() for match in matches) != compact:
+        return None
+    units = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
+    return sum(float(match.group(1)) * units[match.group(2).casefold()] for match in matches)
+
 
 def resolve_community_faq(question: str) -> str | None:
     """Canonical facts about Katherine and her community."""
@@ -663,7 +690,6 @@ class KatherineAI:
         self._analyst_enabled: set[str] = set()
         self._analyst_enabled_at: dict[str, float] = {}
         self._analyst: dict[str, deque] = {}
-        self._last_call: dict[str, float] = {}
         self._semaphore: asyncio.Semaphore | None = None
         self._provider_lock = asyncio.Lock()
         self._provider_last_request = 0.0
@@ -746,7 +772,7 @@ class KatherineAI:
 
     def _append_history(self, key: str, role: str, content: str) -> None:
         turns = self._history(key)
-        turns.append({"role": role, "content": str(content)[:1800]})
+        turns.append({"role": role, "content": str(content)})
         self._memory[key] = {
             "turns": turns[-self.memory_turns * 2:],
             "expires": time.time() + self.memory_ttl,
@@ -769,7 +795,7 @@ class KatherineAI:
         self._append_history(
             session_key,
             "assistant",
-            f"Resultado de herramienta ({str(command)[:100]}): {clean_result[:1500]}",
+            f"Resultado de herramienta ({str(command)[:100]}): {clean_result}",
         )
 
     def forget(self, session_key: str) -> bool:
@@ -849,13 +875,21 @@ class KatherineAI:
                 buffer.popleft()
             if key not in self._analyst_enabled:
                 self._analyst.pop(key, None)
-        for key, timestamp in list(self._last_call.items()):
-            if time.monotonic() - timestamp > 600:
-                self._last_call.pop(key, None)
-        if len(self._last_call) > 1000:
-            oldest = sorted(self._last_call.items(), key=lambda item: item[1])
-            for key, _ in oldest[:len(self._last_call) - 1000]:
-                self._last_call.pop(key, None)
+
+    @staticmethod
+    def _provider_retry_delay(response: Any, attempt: int) -> float:
+        """Respect provider retry/reset headers, then use exponential backoff."""
+        headers = getattr(response, "headers", {}) or {}
+        normalized = {str(key).casefold(): value for key, value in headers.items()}
+        for name in (
+            "retry-after",
+            "x-ratelimit-reset-tokens",
+            "x-ratelimit-reset-requests",
+        ):
+            parsed = _retry_header_seconds(normalized.get(name))
+            if parsed is not None:
+                return min(60.0, max(0.5, parsed))
+        return min(30.0, 1.5 * (2 ** max(0, int(attempt))))
 
     @staticmethod
     def _extract_output_text(payload: dict[str, Any]) -> str:
@@ -879,18 +913,12 @@ class KatherineAI:
         messages: list[dict[str, str]],
         request_func: RequestFunc,
         rate_key: str | None = None,
-        cooldown: float = 2.0,
-        max_output_tokens: int = 650,
         max_input_messages: int | None = None,
     ) -> dict[str, str]:
         if not self.is_enabled:
             raise RuntimeError("IA_NO_CONFIGURADA")
-        if rate_key:
-            now = time.monotonic()
-            remaining = cooldown - (now - self._last_call.get(rate_key, 0))
-            if remaining > 0:
-                raise RuntimeError("IA_ENFRIAMIENTO")
-            self._last_call[rate_key] = now
+        # rate_key remains accepted for caller compatibility. Rapid follow-ups
+        # are queued by the provider lock instead of being rejected.
         if self._semaphore is None:
             self._semaphore = asyncio.Semaphore(3)
 
@@ -919,7 +947,7 @@ class KatherineAI:
             "model": self.model,
             "instructions": prompt_instructions,
             "input": [
-                {"role": turn["role"], "content": str(turn["content"])[:4000]}
+                {"role": turn["role"], "content": str(turn["content"])}
                 for turn in messages[-(
                     max(1, min(100, int(max_input_messages)))
                     if max_input_messages is not None
@@ -927,7 +955,6 @@ class KatherineAI:
                 ):]
                 if turn.get("role") in {"user", "assistant"}
             ],
-            "max_output_tokens": max(100, min(1200, int(max_output_tokens))),
             "text": {"format": output_format},
         }
         # Groq's Responses API currently rejects the "store" request parameter.
@@ -936,34 +963,16 @@ class KatherineAI:
             body["store"] = False
 
         async with self._semaphore:
-            # Serialize provider dispatches with a small spacing to avoid
-            # self-inflicted bursts when several rooms call the model at once.
             async with self._provider_lock:
-                spacing = 0.65 - (time.monotonic() - self._provider_last_request)
-                if spacing > 0:
-                    await asyncio.sleep(spacing)
-                response = await request_func(
-                    "POST",
-                    self.api_url,
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                        "Accept": "application/json",
-                    },
-                    json=body,
-                    timeout=35,
-                )
-                self._provider_last_request = time.monotonic()
-                if getattr(response, "status_code", None) == 429:
-                    # One bounded retry. Honor Retry-After when available,
-                    # but cap the wait so a webhook cannot hang indefinitely.
-                    retry_after = 1.5
-                    headers = getattr(response, "headers", {}) or {}
-                    try:
-                        retry_after = float(headers.get("Retry-After", retry_after))
-                    except (TypeError, ValueError):
-                        pass
-                    await asyncio.sleep(max(0.5, min(5.0, retry_after)))
+                # The configured Groq model has a published 30 RPM base tier.
+                # Queue requests instead of rejecting rapid follow-ups.
+                min_interval = 2.1 if self.is_groq else 0.65
+                response = None
+                max_attempts = 4
+                for attempt in range(max_attempts):
+                    spacing = min_interval - (time.monotonic() - self._provider_last_request)
+                    if spacing > 0:
+                        await asyncio.sleep(spacing)
                     response = await request_func(
                         "POST",
                         self.api_url,
@@ -976,6 +985,16 @@ class KatherineAI:
                         timeout=35,
                     )
                     self._provider_last_request = time.monotonic()
+                    if getattr(response, "status_code", None) != 429:
+                        break
+                    if attempt + 1 >= max_attempts:
+                        break
+                    delay = self._provider_retry_delay(response, attempt)
+                    logging.warning(
+                        "[AI] %s HTTP 429; reintento %s/%s en %.2f s.",
+                        self.provider_name, attempt + 1, max_attempts - 1, delay,
+                    )
+                    await asyncio.sleep(delay)
         if not getattr(response, "is_success", False):
             status = getattr(response, "status_code", "desconocido")
             # Preserve only the provider's safe diagnostic fields; never log headers
@@ -1021,7 +1040,7 @@ class KatherineAI:
             raise RuntimeError("La salida JSON de IA contiene campos con tipos no válidos.")
         return {
             "kind": kind,
-            "answer": str(result.get("answer") or "")[:4000],
+            "answer": str(result.get("answer") or ""),
             "command": str(result.get("command") or ""),
             "args": str(result.get("args") or "")[:240],
             "steps": result.get("steps") if isinstance(result.get("steps"), list) else [],
@@ -1057,7 +1076,7 @@ class KatherineAI:
                 # stale Genshin conversation through this early-return path.
                 self._memory.pop(key, None)
             self._append_history(key, "user", text[:1200])
-            self._append_history(key, "assistant", faq_answer[:1800])
+            self._append_history(key, "assistant", faq_answer)
             return {"kind": "answer", "answer": faq_answer, "command": "", "args": ""}
 
         clarification = clarification_for_unspecified_topic(text)
@@ -1065,7 +1084,7 @@ class KatherineAI:
             # An unspecified subject is a new topic, not a Genshin follow-up.
             self._memory.pop(key, None)
             self._append_history(key, "user", text[:1200])
-            self._append_history(key, "assistant", clarification[:1800])
+            self._append_history(key, "assistant", clarification)
             return {
                 "kind": "answer", "answer": clarification, "command": "", "args": ""
             }
@@ -1111,9 +1130,7 @@ class KatherineAI:
             )
         except RuntimeError as exc:
             reason = str(exc)
-            if reason == "IA_ENFRIAMIENTO":
-                answer = "Dame un instante antes de otra consulta para evitar saturar el servicio."
-            elif reason == "IA_NO_CONFIGURADA":
+            if reason == "IA_NO_CONFIGURADA":
                 answer = "La inteligencia artificial no está configurada todavía."
             else:
                 answer = "No pude completar la consulta de IA. Los comandos clásicos siguen disponibles."
@@ -1223,8 +1240,6 @@ class KatherineAI:
                     retry_messages,
                     request_func,
                     rate_key=None,
-                    cooldown=0,
-                    max_output_tokens=650,
                     max_input_messages=1,
                 )
             except Exception:
@@ -1236,9 +1251,9 @@ class KatherineAI:
                 and not is_genshin_related_request(retry_answer)
             ):
                 self._append_history(key, "user", text[:1200])
-                self._append_history(key, "assistant", retry_answer[:1800])
+                self._append_history(key, "assistant", retry_answer)
                 return {
-                    "kind": "answer", "answer": retry_answer[:4000],
+                    "kind": "answer", "answer": retry_answer,
                     "command": "", "args": "",
                 }
 
@@ -1281,7 +1296,7 @@ class KatherineAI:
             }
         answer = result["answer"].strip() or "No pude formular una respuesta útil."
         self._append_history(key, "user", text[:1200])
-        self._append_history(key, "assistant", answer[:1800])
+        self._append_history(key, "assistant", answer)
         return {"kind": "answer", "answer": answer, "command": "", "args": ""}
 
     async def synthesize_tool_results(
@@ -1324,13 +1339,11 @@ class KatherineAI:
             }],
             request_func,
             rate_key=rate_key,
-            cooldown=0,
-            max_output_tokens=850,
             max_input_messages=3,
         )
         if result["kind"] != "answer" or not result["answer"].strip():
             raise RuntimeError("El proveedor no devolvió una síntesis de resultados válida.")
-        return result["answer"].strip()[:3000]
+        return result["answer"].strip()
 
     async def summarize_research(
         self,
@@ -1361,12 +1374,10 @@ class KatherineAI:
             )}],
             request_func,
             rate_key=rate_key,
-            cooldown=2.0,
-            max_output_tokens=1000,
         )
         if result["kind"] != "answer" or not result["answer"].strip():
             raise RuntimeError("El proveedor IA no devolvió una síntesis válida.")
-        return result["answer"].strip()[:3500]
+        return result["answer"].strip()
 
     async def task_response(
         self,
@@ -1387,12 +1398,10 @@ class KatherineAI:
             [{"role": "user", "content": text[:10000]}],
             request_func,
             rate_key=rate_key,
-            max_output_tokens=900,
-            cooldown=5.0,
         )
         if result["kind"] != "answer" or not result["answer"].strip():
             raise RuntimeError("El proveedor IA no devolvió una respuesta de texto.")
-        return result["answer"].strip()[:3500]
+        return result["answer"].strip()
 
     async def test_connection(
         self, request_func: RequestFunc, rate_key: str | None = None
@@ -1403,8 +1412,6 @@ class KatherineAI:
             [{"role": "user", "content": "Prueba técnica de conectividad de Katherine."}],
             request_func,
             rate_key=rate_key,
-            cooldown=0,
-            max_output_tokens=250,
         )
         if result["kind"] != "answer" or not result["answer"].strip():
             raise RuntimeError("La prueba no recibió una respuesta válida del proveedor.")
@@ -1459,12 +1466,11 @@ class KatherineAI:
             chunk_inputs,
             request_func,
             rate_key=rate_key,
-            max_output_tokens=1200,
             max_input_messages=len(chunk_inputs),
         )
         if result["kind"] != "answer" or not result["answer"].strip():
             raise RuntimeError("El proveedor IA no devolvió un resumen válido.")
-        return result["answer"].strip()[:3500]
+        return result["answer"].strip()
 
     async def review_guardian(
         self, content: str, request_func: RequestFunc, rate_key: str | None = None
