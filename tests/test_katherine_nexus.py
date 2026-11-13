@@ -123,6 +123,13 @@ def test_format_source_health_summarizes_success_and_failures():
     assert "4/5 correctas" in answer
     assert "126 ms" in answer
 
+def test_open_topic_request_is_forwarded_to_the_ai_assistant():
+    routed = interpret_natural_request(
+        "Katherine Necesito ayuda para saber de un tema"
+    )
+    assert routed == "asistente Necesito ayuda para saber de un tema"
+
+
 def test_natural_language_requires_explicit_katherine_invocation():
     assert interpret_natural_request("hola, ¿cómo estás?") is None
     assert interpret_natural_request("pon música para estudiar") is None
