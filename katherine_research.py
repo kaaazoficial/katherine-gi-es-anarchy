@@ -876,6 +876,18 @@ async def _search_general_web(
     )
 
 
+def _research_source_relevance(query: str, source: dict[str, str]) -> int:
+    """Rank existing results by lexical overlap without adding API calls."""
+    stop = {"para", "sobre", "como", "donde", "cuando", "porque", "desde", "esta", "este", "the", "and", "for", "with", "what", "when", "where", "from", "about"}
+    terms = {token for token in re.findall(r"[a-z0-9]{3,}", _normalized_query(query)) if token not in stop}
+    if not terms:
+        return 0
+    title = set(re.findall(r"[a-z0-9]{3,}", _normalized_query(source.get("title", ""))))
+    text = _normalized_query((source.get("snippet", "") or source.get("excerpt", ""))[:1200])
+    body = set(re.findall(r"[a-z0-9]{3,}", text))
+    return 3 * len(terms & title) + len(terms & body)
+
+
 async def search_web(
     query: str, request_func: RequestFunc, limit: int = 5
 ) -> list[dict[str, str]]:
@@ -939,7 +951,11 @@ async def search_web(
             # One unavailable provider must not cancel all other sources.
             logging.warning("[RESEARCH] Fuente %s falló: %s", name, type(value).__name__)
             continue
-        groups[name] = value or []
+        groups[name] = sorted(
+            value or [],
+            key=lambda source: _research_source_relevance(search_text, source),
+            reverse=True,
+        )
 
     priority = []
     if intent["genshin"]:
@@ -977,7 +993,7 @@ async def search_web(
         page["source_type"] = "public_web"
         return page
 
-    max_results = max(3, min(8, int(limit)))
+    max_results = max(3, min(6, int(limit)))
     selected = combined[:max_results]
     enriched = await asyncio.gather(*(enrich(item) for item in selected))
     return [
@@ -1026,7 +1042,7 @@ def build_source_context(query: str, sources: list[dict[str, str]]) -> str:
         "No confundas fecha de indexación, fecha de consulta y fecha de publicación.",
         "No asignes autoridad por popularidad ni inventes autores, fechas, revisiones o consenso.",
     ]
-    for index, source in enumerate(sources[:8], start=1):
+    for index, source in enumerate(sources[:6], start=1):
         source_type = str(source.get("source_type") or "public_web")[:40]
         domain = str(source.get("domain") or "")[:120]
         date = str(
@@ -1036,13 +1052,13 @@ def build_source_context(query: str, sources: list[dict[str, str]]) -> str:
         author = str(source.get("author") or source.get("authors") or "No indicado")[:180]
         blocks.extend([
             f"FUENTE [{index}]",
-            f"Título: {str(source.get('title') or 'Sin título')[:160]}",
+            f"Título: {str(source.get('title') or 'Sin título')[:120]}",
             f"Dominio: {domain[:100]}",
             f"Tipo de fuente: {source_type}",
             f"Fecha de publicación declarada: {date[:40]}",
-            f"Autoría declarada: {author[:120]}",
-            f"URL: {str(source.get('url') or '')[:350]}",
-            f"Atribución/licencia: {str(source.get('attribution') or 'Consulta la licencia del sitio original.')[:180]}",
-            f"Extracto recuperado (no necesariamente texto completo): {str(source.get('excerpt') or source.get('snippet') or '')[:900]}",
+            f"Autoría declarada: {author[:100]}",
+            f"URL: {str(source.get('url') or '')[:280]}",
+            f"Atribución/licencia: {str(source.get('attribution') or 'Consulta la licencia del sitio original.')[:120]}",
+            f"Extracto (no necesariamente texto completo): {str(source.get('excerpt') or source.get('snippet') or '')[:650]}",
         ])
     return "\n".join(blocks)
