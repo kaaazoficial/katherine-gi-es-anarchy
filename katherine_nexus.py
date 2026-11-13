@@ -191,9 +191,6 @@ def interpret_natural_request(value: str) -> str | None:
     if not text:
         # Mencionar solo el nombre (o "Oye Katherine") no abre menús ni responde.
         return None
-    direct_command = interpret_direct_command(raw)
-    if direct_command:
-        return direct_command
     # Resolve domain, entity type and requested information before generic
     # "qué es/quién es" routes. Strip "Genshin Impact" as a scope qualifier;
     # it is not part of the entity's name.
@@ -295,6 +292,12 @@ def interpret_natural_request(value: str) -> str | None:
         payload = translation.group(2).strip()
         if payload:
             return f"traducir {language} | {payload}"
+    # Natural-language intents have priority over bare command names so
+    # "pausa la música", "equipos para X" and similar phrases keep their
+    # specialized argument normalization and domain safeguards.
+    direct_command = interpret_direct_command(raw)
+    if direct_command:
+        return direct_command
     # Una invocación explícita siempre recibe una respuesta, incluso si la
     # solicitud todavía no tiene una acción específica registrada.
     return f"asistente {raw[:300]}"
