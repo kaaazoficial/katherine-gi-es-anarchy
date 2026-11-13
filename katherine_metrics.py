@@ -12,6 +12,8 @@ _COUNTERS = (
     ("katherine_webhook_events", "webhook_events", "Webhook events accepted by this process."),
     ("katherine_text_messages_received", "text_messages_received", "Text messages received by this process."),
     ("katherine_commands_received", "commands_received", "Commands received by this process."),
+    ("katherine_ai_requests", "ai_requests", "AI requests handled by this process."),
+    ("katherine_ai_errors", "ai_errors", "AI provider errors and fallbacks recorded by this process."),
     ("katherine_messages_sent", "messages_sent", "Messages sent by this process."),
     ("katherine_api_requests", "api_requests", "Anarchy API requests made by this process."),
     ("katherine_api_errors", "api_errors", "Anarchy API request errors recorded by this process."),
