@@ -271,3 +271,34 @@ async def test_pending_delivery_does_not_retry_ambiguous_server_errors(monkeypat
 
     assert calls == ["POST"]
     assert bot_main.metrics["message_send_pending_abandoned"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_response_is_marked_queued_to_prevent_fallback_duplicates(monkeypatch):
+    calls = []
+    scheduled = []
+
+    async def no_wait(_seconds):
+        return None
+
+    async def always_rate_limited(method, path, source="developer", body=None):
+        calls.append((method, path, body))
+        return {"ok": False, "status": 429, "retry_after": "0.5", "data": {}}
+
+    def capture_schedule(thread_id, source, pending_bodies):
+        scheduled.append((thread_id, source, pending_bodies))
+        return True
+
+    monkeypatch.setattr(bot_main.asyncio, "sleep", no_wait)
+    monkeypatch.setattr(bot_main, "api", always_rate_limited)
+    monkeypatch.setattr(bot_main, "schedule_pending_delivery", capture_schedule)
+    monkeypatch.setattr(bot_main, "last_bot_send", 0.0)
+    monkeypatch.setitem(bot_main.last_chat_send, "developer:queued-room", 0.0)
+
+    result = await bot_main.send_message("queued-room", "Se recuperará")
+
+    assert result["ok"] is True
+    assert result["queued"] is True
+    assert result["data"]["queuedBlocks"] == 1
+    assert len(calls) == 4
+    assert len(scheduled) == 1
