@@ -449,3 +449,13 @@ def test_fastapi_lifecycle_uses_lifespan_instead_of_deprecated_events():
     assert callable(katherine.app.router.lifespan_context)
     assert not katherine.app.router.on_startup
     assert not katherine.app.router.on_shutdown
+
+
+def test_antispam_tracking_evicts_oldest_keys_at_capacity(monkeypatch):
+    katherine.USER_MESSAGE_ACTIVITY.clear()
+    monkeypatch.setattr(katherine, "MAX_ANTISPAM_TRACKED_USERS", 2)
+    katherine.USER_MESSAGE_ACTIVITY[("room", "old")] = katherine.deque([(1.0, "a")])
+    katherine.USER_MESSAGE_ACTIVITY[("room", "new")] = katherine.deque([(9.0, "b")])
+    katherine.prune_antispam_tracking(now=10.0)
+    assert ("room", "old") not in katherine.USER_MESSAGE_ACTIVITY
+    assert ("room", "new") in katherine.USER_MESSAGE_ACTIVITY

@@ -661,6 +661,34 @@ def update_tts_volume(thread_id: str, state: dict, target: int) -> int:
     return target
 
 
+MAX_ANTISPAM_TRACKED_USERS = 5000
+
+
+def prune_antispam_tracking(now: float | None = None) -> None:
+    """Bound per-user in-memory anti-spam state without persisting message content."""
+    current = time.time() if now is None else float(now)
+    for key, history in list(USER_MESSAGE_ACTIVITY.items()):
+        if not history or current - history[-1][0] > 300:
+            USER_MESSAGE_ACTIVITY.pop(key, None)
+    if len(USER_MESSAGE_ACTIVITY) >= MAX_ANTISPAM_TRACKED_USERS:
+        excess = len(USER_MESSAGE_ACTIVITY) - MAX_ANTISPAM_TRACKED_USERS + 1
+        oldest = sorted(
+            USER_MESSAGE_ACTIVITY,
+            key=lambda key: USER_MESSAGE_ACTIVITY[key][-1][0]
+            if USER_MESSAGE_ACTIVITY[key] else 0,
+        )[:excess]
+        for key in oldest:
+            USER_MESSAGE_ACTIVITY.pop(key, None)
+
+    for key, expiry in list(USER_SPAM_WARNED_UNTIL.items()):
+        if expiry <= current:
+            USER_SPAM_WARNED_UNTIL.pop(key, None)
+    if len(USER_SPAM_WARNED_UNTIL) > MAX_ANTISPAM_TRACKED_USERS:
+        excess = len(USER_SPAM_WARNED_UNTIL) - MAX_ANTISPAM_TRACKED_USERS
+        for key, _ in sorted(USER_SPAM_WARNED_UNTIL.items(), key=lambda item: item[1])[:excess]:
+            USER_SPAM_WARNED_UNTIL.pop(key, None)
+
+
 def check_antispam_message(event: dict, source: str):
     if source != "developer":
         return False, None
@@ -687,6 +715,8 @@ def check_antispam_message(event: dict, source: str):
 
     now = time.time()
     key = (thread_id, uid)
+    if key not in USER_MESSAGE_ACTIVITY and len(USER_MESSAGE_ACTIVITY) >= MAX_ANTISPAM_TRACKED_USERS:
+        prune_antispam_tracking(now)
     activity = USER_MESSAGE_ACTIVITY[key]
     cutoff = now - config["window_seconds"]
     while activity and activity[0][0] < cutoff:
