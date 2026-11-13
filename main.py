@@ -1858,35 +1858,38 @@ async def send_message(
             if buttons and index == len(parts) - 1:
                 body["buttons"] = buttons
 
-            result = await api(
-                "POST",
-                f"/threads/{thread_id}/messages",
-                source,
-                body
-            )
-
-            if result.get("status") == 429:
-                error_data = result.get("data") or {}
-                if not isinstance(error_data, dict):
-                    error_data = {}
-
-                retry = (
-                    result.get("retry_after")
-                    or error_data.get("retryAfter")
-                    or 2
-                )
-
-                try:
-                    await asyncio.sleep(min(float(retry), 60))
-                except (ValueError, TypeError):
-                    await asyncio.sleep(2)
-
+            result = None
+            max_send_attempts = 4
+            for attempt in range(max_send_attempts):
                 result = await api(
                     "POST",
                     f"/threads/{thread_id}/messages",
                     source,
                     body
                 )
+                if result.get("status") != 429:
+                    break
+                metrics["message_send_429"] += 1
+                if attempt + 1 >= max_send_attempts:
+                    break
+
+                retry_value = result.get("retry_after")
+                try:
+                    retry_seconds = float(retry_value)
+                except (TypeError, ValueError):
+                    retry_seconds = 2.0
+                retry_seconds = max(0.5, min(retry_seconds, 60.0))
+                metrics["message_send_retries"] += 1
+                metrics["message_send_retry_wait_seconds"] += retry_seconds
+                logging.warning(
+                    "[ANARCHY] HTTP 429 al enviar bloque %s/%s; reintento %s/%s en %.2f s.",
+                    index + 1, len(parts), attempt + 1, max_send_attempts - 1,
+                    retry_seconds,
+                )
+                await asyncio.sleep(retry_seconds)
+
+            if result is None:
+                result = {"ok": False, "status": 500, "data": {"error": "No response"}}
 
             last_result = result
 
@@ -1913,16 +1916,18 @@ async def send_message(
                 send_history_bot.append(now)
                 send_history_chat[f"{source}:{thread_id}"].append(now)
             else:
+                metrics["message_send_failures"] += 1
                 if is_not_in_chat_response(result.get("status"), result.get("data")):
                     logging.info(
                         "[ANARCHY] Envío omitido: Katherine ya no pertenece al chat."
                     )
                 else:
                     logging.error(
-                        "No se pudo enviar el bloque %s/%s: %s",
+                        "No se pudo enviar el bloque %s/%s: HTTP %s. "
+                        "Los bloques posteriores no se enviaron para conservar el orden.",
                         index + 1,
                         len(parts),
-                        result
+                        result.get("status"),
                     )
                 return result
 
@@ -15277,6 +15282,9 @@ Uso: !enciclopedia <nombre>""",
             f"TTS: {metrics['tts_priority_enqueued'] + metrics['tts_regular_enqueued']} mensajes en cola",
             f"IA: {metrics['ai_requests']} solicitudes · {metrics['ai_errors']} fallos/respaldo",
             f"Proveedor IA: {'activo' if AI_CORE.is_enabled else 'sin credencial'} · {AI_CORE.provider_name if AI_CORE.is_enabled else 'no configurada'} · {AI_CORE.model if AI_CORE.is_enabled else '—'}",
+            f"IA proveedor: {int(AI_CORE.metrics.get('ai_provider_requests', 0))} solicitudes · {int(AI_CORE.metrics.get('ai_provider_429', 0))} límites 429 · {int(AI_CORE.metrics.get('ai_provider_retries', 0))} reintentos",
+            f"IA tokens: {int(AI_CORE.metrics.get('ai_provider_input_tokens', 0))} entrada · {int(AI_CORE.metrics.get('ai_provider_output_tokens', 0))} salida · {AI_CORE.metrics.get('ai_provider_queue_wait_seconds', 0):.1f} s de espera acumulada",
+            f"Mensajería: {int(metrics['message_send_retries'])} reintentos 429 · {int(metrics['message_send_failures'])} bloques fallidos",
             "Prometheus: endpoint /metrics (contadores agregados, sin datos de usuarios ni conversaciones).",
             "Los contadores se reinician cuando Render reinicia el proceso.",
         ])
