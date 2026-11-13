@@ -5,6 +5,8 @@ import re
 import unicodedata
 from typing import Any
 
+from katherine_topics import is_genshin_related_request
+
 
 REGION_ALIASES = {
     "mondstadt": "Mondstadt",
@@ -64,9 +66,10 @@ def resolve_genshin_entity_intent(value: str) -> tuple[str, str] | None:
     text = normalize_game_query(value)
     explicit_game = bool(re.search(r"\b(?:genshin(?: impact)?|teyvat)\b", text))
     prefixes = (
-        r"^(?:que es|que significa|hablame de|cuentame de|que sabes de|"
-        r"que region es|donde esta|donde se encuentra|informacion sobre|"
-        r"explicame)\s+(?:la region de\s+|region\s+)?(.+)$",
+        r"^(?:que es|que significa|hablame (?:de|sobre)|cuentame (?:de|sobre)|"
+        r"que sabes de|que se sabe de|que region es|que pais es|que nacion es|"
+        r"donde esta|donde se encuentra|informacion sobre|explicame)\s+"
+        r"(?:la region de\s+|region\s+|la nacion de\s+|nacion\s+)?(.+)$",
     )
     for pattern in prefixes:
         match = re.fullmatch(pattern, text)
@@ -83,17 +86,26 @@ def resolve_genshin_entity_intent(value: str) -> tuple[str, str] | None:
 
     patterns = (
         (r"^(?:quien es|quien fue|quien es el|quien es la)\s+(.+)$", "enciclopedia"),
-        (r"^(?:que arma usa|que armas usa|mejor arma para|armas para|build de|guia de)\s+(.+)$", "guia"),
-        (r"^(?:que materiales necesita|materiales para|materiales de ascension de)\s+(.+)$", "materiales"),
-        (r"^(?:que equipos hay para|equipos para|equipo de|composiciones para)\s+(.+)$", "equipos"),
-        (r"^(?:cual es la rotacion de|rotacion de|rotacion para)\s+(.+)$", "rotacion"),
-        (r"^(?:que reacciones tiene|reacciones de)\s+(.+)$", "reacciones"),
+        (r"^(?:que arma usa|que armas usa|que artefactos usa|que set usa|"
+         r"que build tiene|que build lleva|que build se recomienda para|"
+         r"mejor arma para|armas para|artefactos para|build de|guia de)\s+(.+)$", "guia"),
+        (r"^(?:que materiales necesita|que materiales usa|que necesito para ascender a|"
+         r"materiales para|materiales de ascension de)\s+(.+)$", "materiales"),
+        (r"^(?:que equipos hay para|que equipo le conviene a|"
+         r"con quien combina|equipos para|equipo de|composiciones para)\s+(.+)$", "equipos"),
+        (r"^(?:cual es la rotacion de|que rotacion usa|rotacion de|rotacion para)\s+(.+)$", "rotacion"),
+        (r"^(?:que reacciones tiene|como funcionan las reacciones de|reacciones de)\s+(.+)$", "reacciones"),
     )
     for pattern, command in patterns:
         match = re.fullmatch(pattern, text)
         if match:
             subject = strip_game_scope_qualifier(match.group(1))
-            if subject and (explicit_game or command != "enciclopedia"):
+            # Do not mistake ordinary questions about computers, materials or
+            # teams for Genshin requests. Require either explicit game scope or
+            # a recognized game entity/topic in the subject.
+            if subject and (
+                explicit_game or is_genshin_related_request(subject)
+            ):
                 return command, subject
 
     # A region can be named without the exact "qué es" framing.
