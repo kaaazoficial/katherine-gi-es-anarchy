@@ -245,13 +245,13 @@ def _retry_header_seconds(value: Any) -> float | None:
         return max(0.0, parsed.timestamp() - time.time())
     except (TypeError, ValueError, OverflowError):
         pass
-    matches = list(re.finditer(r"(\d+(?:\.\d+)?)\s*(ms|s|m|h)", raw, re.I))
+    matches = list(re.finditer(r"(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)", raw, re.I))
     if not matches:
         return None
     compact = re.sub(r"\s+", "", raw).casefold()
     if "".join(match.group(0).replace(" ", "").casefold() for match in matches) != compact:
         return None
-    units = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
+    units = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
     return sum(float(match.group(1)) * units[match.group(2).casefold()] for match in matches)
 
 
