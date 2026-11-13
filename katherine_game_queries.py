@@ -66,10 +66,10 @@ def resolve_genshin_entity_intent(value: str) -> tuple[str, str] | None:
     text = normalize_game_query(value)
     explicit_game = bool(re.search(r"\b(?:genshin(?: impact)?|teyvat)\b", text))
     prefixes = (
-        r"^(?:que es|que significa|hablame (?:de|sobre)|cuentame (?:de|sobre)|"
+        r"^(?:que es|que significa|como es|hablame (?:de|sobre)|cuentame (?:de|sobre)|"
         r"que sabes de|que se sabe de|que region es|que pais es|que nacion es|"
-        r"donde esta|donde se encuentra|informacion sobre|explicame)\s+"
-        r"(?:la region de\s+|region\s+|la nacion de\s+|nacion\s+)?(.+)$",
+        r"donde esta|donde se encuentra|informacion sobre|explicame)\\s+"
+        r"(?:(?:la )?(?:region|geografia|nacion)\\s+(?:de\\s+)?|)(.+)$",
     )
     for pattern in prefixes:
         match = re.fullmatch(pattern, text)
@@ -134,9 +134,15 @@ def unwrap_genshin_db_response(payload: Any) -> Any:
         return payload
     metadata_keys = {
         "matchtype", "matchType", "matchfolder", "matchFolder",
-        "folder", "query", "filename", "options", "match",
     }
-    if not metadata_keys.intersection(payload):
+    is_dump_envelope = bool(
+        metadata_keys.intersection(payload)
+        or (
+            "result" in payload
+            and ("folder" in payload or "query" in payload)
+        )
+    )
+    if not is_dump_envelope:
         return payload
     match_type = str(payload.get("matchtype") or payload.get("matchType") or "").strip().casefold()
     if match_type in {"none", "no match", "nomatch", "no_match"}:
