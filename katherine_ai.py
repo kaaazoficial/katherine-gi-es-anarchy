@@ -333,6 +333,7 @@ def is_bot_author(author: dict[str, Any] | None, bot_uid: str | None) -> bool:
 def classify_request_intent(value: str) -> str:
     """Classify the user's intent without letting topic words trigger tools."""
     text = normalize_topic_text(value)
+    text = re.sub(r"^(?:oye[, ]+)?katherine(?:[, :]+|$)\\s*", "", text).strip()
     if not text:
         return "conversation"
     # Domain takes precedence over generic action words: researching a
