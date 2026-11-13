@@ -393,6 +393,9 @@ def test_open_topic_request_is_recognized_as_missing_subject():
     assert clarification_for_unspecified_topic(
         "Katherine: necesito ayuda con un tema"
     )
+    assert clarification_for_unspecified_topic("Katherine, necesito ayuda")
+    assert clarification_for_unspecified_topic("Oye Katherine, ¿puedes ayudarme?")
+    assert clarification_for_unspecified_topic("Katherine tengo una pregunta")
     assert clarification_for_unspecified_topic(
         "Katherine, necesito ayuda para saber de electricidad"
     ) is None
@@ -419,6 +422,22 @@ def test_contextual_genshin_followups_require_a_recent_genshin_question():
     assert not is_contextual_genshin_followup(
         "Katherine, cambiando de tema, ¿y qué armas compro?", history
     )
+
+
+@pytest.mark.asyncio
+async def test_canonical_faq_drops_previous_genshin_context(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+    ai._append_history("room:user", "user", "¿Quién es Nahida?")
+    ai._append_history("room:user", "assistant", "Nahida es una arconte.")
+    result = await ai.assist(
+        "Katherine, ¿qué es Anarchy Apps?",
+        "room:user",
+        lambda *args, **kwargs: None,
+    )
+    assert result["kind"] == "answer"
+    assert "Anarchy apps es una red social" in result["answer"]
+    assert "Nahida" not in str(ai._history("room:user"))
 
 
 @pytest.mark.asyncio
