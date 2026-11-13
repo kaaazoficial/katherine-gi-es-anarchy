@@ -646,7 +646,7 @@ async def search_crossref(
             "source_type": "crossref",
             "year": year,
             "authors": ", ".join(authors),
-            "publication_date": "-".join(date_parts[:3]) if date_parts else "",
+            "publication_date": "-".join(str(part) for part in date_parts[:3]) if date_parts else "",
             "attribution": "Crossref, metadatos DOI; el DOI puede dirigir a contenido con acceso restringido.",
         })
     return results
