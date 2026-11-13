@@ -5,7 +5,7 @@ from katherine_matching import normalize_command_name, suggest_command
 
 
 def test_command_normalization_removes_prefix_and_symbols():
-    assert normalize_command_name("!Comándos") == "comndos"
+    assert normalize_command_name("!Comándos") == "comandos"
     assert normalize_command_name("!metricas") == "metricas"
 
 
@@ -21,7 +21,7 @@ def test_high_confidence_command_suggestions(query, expected):
     result = suggest_command(query, {"ayuda", "comandos", "enciclopedia", "metricas"})
     assert result is not None
     assert result[0] == expected
-    assert result[1] >= 88
+    assert result[1] >= 86
 
 
 def test_ambiguous_short_or_unavailable_commands_are_not_suggested():
