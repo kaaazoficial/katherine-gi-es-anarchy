@@ -906,6 +906,8 @@ class KatherineAI:
             (
                 "Gemini usa Chat Completions compatible; la retención y el uso de datos dependen de la configuración y política de Google."
                 if primary["name"] == "Google Gemini"
+                else "Groq: no se envía el parámetro store porque este endpoint no lo admite; la retención externa depende de su política."
+                if primary["name"] == "Groq"
                 else "La retención externa depende de la política del proveedor configurado."
             ),
             f"Analizador de chat: {'ACTIVO' if thread_id and str(thread_id) in self._analyst_enabled else 'INACTIVO'} en esta sala.",
