@@ -346,6 +346,13 @@ def classify_request_intent(value: str) -> str:
     )
     if any(marker in text for marker in research_markers):
         return "research"
+    conversational_question_markers = (
+        "que opinas", "que piensas", "por que", "explicame", "explica ",
+        "cuentame", "hablame de", "que significa", "como funciona",
+        "como se hace", "podrias explicar",
+    )
+    if any(text.startswith(marker) for marker in conversational_question_markers):
+        return "conversation"
     action_markers = (
         "haz", "hacer", "crea", "crear", "abre", "abrir", "muestra",
         "mostrar", "consulta", "consultar", "busca", "buscar", "pon",
@@ -485,7 +492,7 @@ def validate_ai_tool_call(
     } and not args:
         return None
     elif name in {"zona", "menu", "menú", "ayuda", "comandos", "estado",
-                  "fuentes", "saludfuentes", "fecha", "ranking", "top",
+                  "fuentes", "saludfuentes", "metricas", "fecha", "ranking", "top",
                   "puntos", "reputacion", "muro", "economia", "diario", "daily",
                   "trabajar", "trivia", "adivina", "deseo", "pity", "resetpity",
                   "banner", "calendario", "jefes", "curiosidad", "join", "leer",
