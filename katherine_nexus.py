@@ -73,11 +73,15 @@ NATURAL_EXTRA_COMMAND_NAMES = frozenset({
     "regalar", "acompañar", "asustar", "curar", "cargar", "empujar",
     "regañar", "admirar", "apoyar", "dormir", "ignorar", "mirar", "invitar",
 })
+NATURAL_EXTRA_COMMAND_ALIASES = {
+    _normalize(name): name for name in NATURAL_EXTRA_COMMAND_NAMES
+}
 
 NATURAL_COMMAND_NAMES = frozenset(
     set(AI_COMMAND_CATALOG)
     | set(NATURAL_COMMAND_ALIASES)
     | set(NATURAL_EXTRA_COMMAND_NAMES)
+    | set(NATURAL_EXTRA_COMMAND_ALIASES)
     | {
         "asistente", "ia", "investiga", "investigacion", "investigación",
         "analizarenlace", "leerweb", "eventos", "reputacion", "reputación",
@@ -116,7 +120,9 @@ def interpret_direct_command(value: str) -> str | None:
     if command_key not in NATURAL_COMMAND_NAMES:
         return None
 
-    command = NATURAL_COMMAND_ALIASES.get(command_key, command_key)
+    command = NATURAL_COMMAND_ALIASES.get(
+        command_key, NATURAL_EXTRA_COMMAND_ALIASES.get(command_key, command_key)
+    )
     args = remainder.strip() if separator else ""
     if command in GENSHIN_COMMANDS and not _is_genshin_command_request(command, raw, args.split() if args else []):
         return None
