@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import html
 import ipaddress
+import logging
 import os
 import re
 import time
@@ -217,6 +218,8 @@ async def fetch_public_page(url: str, request_func: RequestFunc) -> dict[str, st
         },
         timeout=14,
         follow_redirects=False,
+        safe_public=True,
+        max_response_bytes=600_000,
     )
     status = int(getattr(response, "status_code", 0) or 0)
     if 300 <= status < 400:
