@@ -178,3 +178,12 @@ async def test_admin_cleanup_ignores_expired_ephemeral_message_ids(monkeypatch):
     assert result == {"attempted": 0, "deleted": 0, "failed": 0}
     assert calls == []
     assert key not in bot_main.BOT_SENT_MESSAGES
+
+
+
+def test_periodic_cleanup_removes_expired_own_message_ids():
+    key = ("developer", "cleanup-periodic-room")
+    bot_main.BOT_SENT_MESSAGES[key].clear()
+    bot_main.BOT_SENT_MESSAGES[key].append({"message_id": "expired", "created_at": 1})
+    bot_main.cleanup_expired_state()
+    assert key not in bot_main.BOT_SENT_MESSAGES
