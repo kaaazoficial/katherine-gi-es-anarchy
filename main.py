@@ -75,7 +75,9 @@ from katherine_ai import (
     KatherineAI, build_ai_session_key, is_bot_author, sanitize_ai_trace_text,
     validate_ai_tool_call
 )
-from katherine_research import search_web, fetch_public_page, build_source_context
+from katherine_research import (
+    search_web, fetch_public_page, build_source_context, parse_research_mode,
+ )
 from katherine_game_queries import (
     infer_genshin_data_folder,
     strip_game_scope_qualifier,
@@ -13230,7 +13232,14 @@ async def handle_command(event: dict, source: str):
         return
 
     if command in ("!investigar", "!investiga", "!investigacion"):
-        research_query = query.strip()
+        research_mode, research_query = parse_research_mode(query.strip())
+        research_mode_label = {
+            "general": "INVESTIGACIÓN COMPLETA",
+            "comparar": "COMPARACIÓN DE FUENTES",
+            "verificar": "VERIFICACIÓN DE AFIRMACIONES",
+            "cronologia": "CRONOLOGÍA",
+            "informe": "INFORME EXHAUSTIVO",
+        }.get(research_mode, "INVESTIGACIÓN COMPLETA")
         if not research_query:
             await send_message(thread, "Uso: !investigar <tema o pregunta>. Consultaré varias fuentes públicas y separaré hechos de dudas.", source, reply)
             return
@@ -13243,7 +13252,8 @@ async def handle_command(event: dict, source: str):
                 try:
                     summary = await AI_CORE.summarize_research(
                         research_query, context, external_request,
-                        rate_key=build_ai_session_key(source, thread, author, message_id)
+                        rate_key=build_ai_session_key(source, thread, author, message_id),
+                        mode=research_mode,
                     )
                 except Exception:
                     logging.exception("[RESEARCH] No se pudo sintetizar; se mostrarán extractos.")
@@ -13710,7 +13720,10 @@ async def handle_command(event: dict, source: str):
         help_sections = [
             ("INICIO E INTELIGENCIA", [
                 f"{PREFIX}asistente <petición> — conversa y combina herramientas.",
-                f"{PREFIX}investigar <tema> / enlace <URL> — investiga o analiza páginas públicas.",
+                f"{PREFIX}investigar <tema> — informe completo con varias fuentes.",
+                f"{PREFIX}investigar comparar: <tema> / verificar: <afirmación> — contrasta fuentes y verifica afirmaciones.",
+                f"{PREFIX}investigar cronologia: <tema> / informe: <tema> — ordena hechos o genera un informe exhaustivo.",
+                f"{PREFIX}enlace <URL> — analiza una página pública. También puedes decir «Katherine, ...».",
                 f"{PREFIX}ia preguntar <consulta> / genshin <consulta> — consulta la IA general o de Teyvat.",
                 f"{PREFIX}ia musica <descripción> / traducir <idioma> | <texto> — herramientas de audio e idioma.",
                 f"{PREFIX}ia ayuda / estado / olvidar — ayuda, estado y contexto de sesión.",
