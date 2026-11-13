@@ -76,6 +76,7 @@ from katherine_ai import (
 from katherine_research import search_web, fetch_public_page, build_source_context
 from katherine_game_queries import (
     infer_genshin_data_folder,
+    resolve_genshin_entity_intent,
     strip_game_scope_qualifier,
     unwrap_genshin_db_response,
 )
@@ -88,6 +89,23 @@ AI_TOOL_OUTPUT_CAPTURE: ContextVar[list[str] | None] = ContextVar(
 AI_TOOL_SILENT: ContextVar[bool] = ContextVar(
     "katherine_ai_tool_silent", default=False
 )
+AI_TRACE_UNTIL = 0.0
+AI_TRACE_WINDOW_SECONDS = 900
+
+
+def log_ai_conversation_trace(question: str, answer: str, route: str = "assistant") -> None:
+    """Log a redacted Q/A pair only during the administrator-enabled RAM window."""
+    if time.monotonic() >= AI_TRACE_UNTIL:
+        return
+    from katherine_ai import sanitize_ai_trace_text
+    safe_question = sanitize_ai_trace_text(question, 1200)
+    safe_answer = sanitize_ai_trace_text(answer, 2400)
+    logging.info(
+        "[AI_TRACE] ruta=%s | pregunta=%s | respuesta=%s",
+        sanitize_ai_trace_text(route, 48),
+        safe_question,
+        safe_answer,
+    )
 
 # ---------------------------------------------------------------------------
 # CONFIGURACION
@@ -16751,13 +16769,14 @@ async def dispatch(event: dict, source: str):
             if routed_command:
                 routed_event = dict(event)
                 routed_message = dict(message_data)
-                if AI_CORE.is_enabled and not routed_command.startswith("eliminarmensajes"):
-                    routed_event["_nexus_fallback_command"] = routed_command
-                    routed_message["content"] = f"{PREFIX}asistente {incoming_text}"
-                    logging.info("[AI] Solicitud explícita enviada al núcleo conversacional")
-                else:
-                    routed_message["content"] = f"{PREFIX}{routed_command}"
-                    logging.info("[NEXUS] Solicitud dirigida interpretada como %s", routed_command.split()[0])
+                # interpret_natural_request only emits high-confidence intents.
+                # Execute those routes deterministically: an LLM must not replace
+                # a known region/element/character query with an unrelated tool.
+                routed_message["content"] = f"{PREFIX}{routed_command}"
+                logging.info(
+                    "[NEXUS] Solicitud dirigida interpretada como %s",
+                    routed_command.split()[0],
+                )
                 routed_event["message"] = routed_message
                 await handle_command(routed_event, source)
             else:
