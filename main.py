@@ -71,12 +71,12 @@ from katherine_astra import (
 )
 from katherine_ai import (
     AI_ADMIN_COMMANDS, AI_PLAN_SAFE_COMMANDS, AI_PUBLIC_COMMANDS,
-    KatherineAI, build_ai_session_key, is_bot_author, validate_ai_tool_call
+    KatherineAI, build_ai_session_key, is_bot_author, sanitize_ai_trace_text,
+    validate_ai_tool_call
 )
 from katherine_research import search_web, fetch_public_page, build_source_context
 from katherine_game_queries import (
     infer_genshin_data_folder,
-    resolve_genshin_entity_intent,
     strip_game_scope_qualifier,
     unwrap_genshin_db_response,
 )
@@ -3317,7 +3317,11 @@ async def speech_queue_worker(thread_id: str):
                     )
                     await stop_dj_room(thread_id, request_leave=True)
                 break
-            logging.exception("[TTS] No se pudo leer un mensaje en %s", thread_id)
+            logging.warning(
+                "[TTS] No se pudo leer un mensaje | error=%s | detalle=%s",
+                type(exc).__name__,
+                sanitize_ai_trace_text(exc, 240),
+            )
         finally:
             state["speaking"].clear()
             if temp_path:
@@ -3756,7 +3760,12 @@ async def start_dj_room(
             )
             file_path = temporary_audio
         except Exception as exc:
-            logging.exception("[DJ] No se pudo preparar la pista remota")
+            logging.warning(
+                "[DJ] No se pudo preparar audio remoto | host=%s | error=%s | detalle=%s",
+                urlparse(str(original_source)).hostname or "desconocido",
+                type(exc).__name__,
+                sanitize_ai_trace_text(exc, 240),
+            )
             return False, (
                 "No pude descargar o validar la canción "
                 f"({type(exc).__name__}: {str(exc)[:140]})."
@@ -11803,7 +11812,7 @@ async def collect_character_guide_data(
             metrics["guide_source_failures"] += 1
             logging.warning(
                 "[NEXUS] Fuente %s no disponible (%s): %s",
-                label, type(exc).__name__, str(exc)[:180]
+                label, type(exc).__name__, sanitize_ai_trace_text(exc, 180)
             )
             return None
 
