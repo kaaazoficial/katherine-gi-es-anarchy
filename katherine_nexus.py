@@ -80,7 +80,7 @@ def interpret_direct_command(value: str) -> str | None:
         canonical = command.lstrip("!")
         if canonical not in NATURAL_COMMAND_NAMES:
             return None
-        if canonical in GENSHIN_COMMANDS and not is_genshin_related_request(raw):
+        if args and canonical in GENSHIN_COMMANDS and not is_genshin_related_request(raw):
             return None
         return " ".join([canonical, *args]).strip()
 
@@ -91,7 +91,7 @@ def interpret_direct_command(value: str) -> str | None:
 
     command = NATURAL_COMMAND_ALIASES.get(command_key, command_key)
     args = remainder.strip() if separator else ""
-    if command in GENSHIN_COMMANDS and not is_genshin_related_request(raw):
+    if args and command in GENSHIN_COMMANDS and not is_genshin_related_request(raw):
         return None
 
     # Apply the exact same aliases as the prefixed command parser.
