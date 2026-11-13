@@ -3,8 +3,8 @@
 Esta expansión excluye CREATIVITY AI. La IA es una capa opcional sobre los comandos y fuentes que Katherine ya tiene; no reemplaza el enrutador determinista ni las herramientas actuales.
 
 ## Componentes
-- **Katherine AI Core:** Responses API compatible con OpenAI o Groq, con salida JSON validada (Structured Outputs o JSON Object según proveedor/modelo). No impone un máximo artificial de tokens a la salida; las respuestas extensas se entregan en bloques de hasta 2.000 unidades UTF-16 para respetar el límite de mensajería.
-- **Memoria contextual:** aislada por usuario y sala, solo RAM, caduca a los 10 minutos y conserva hasta 6 turnos.
+- **Katherine AI Core:** Gemini 3.5 Flash-Lite es el proveedor principal y Groq GPT-OSS 20B el respaldo. Las respuestas normales se limitan a 512 tokens; Groq usa razonamiento bajo. Los resultados de comandos se entregan sin una segunda llamada de IA.
+- **Memoria contextual:** aislada por usuario y sala, solo RAM, caduca a los 5 minutos y conserva hasta 2 intercambios.
 - **Teyvat AI:** delega consultas en enciclopedia, guías, equipos, rotaciones, materiales, reacciones y noticias oficiales.
 - **Guardian AI:** revisión contextual manual; recomienda revisión humana, no sanciona ni borra mensajes.
 - **AI Chat Analyst:** resume solo mensajes recibidos desde la activación administrativa. Buffer en RAM, hasta 15 minutos y máximo 60 mensajes; se guardan etiquetas efímeras de participantes, no sus nombres; al solicitar un resumen, el contenido seleccionado se envía al proveedor IA configurado. Desactivar borra el buffer.
@@ -15,20 +15,24 @@ Esta expansión excluye CREATIVITY AI. La IA es una capa opcional sobre los coma
 ## Configuración del proveedor
 Katherine valida las opciones de proceso con Pydantic Settings. Las credenciales permanecen en variables de entorno y nunca se devuelven en diagnósticos. El reconocimiento aproximado de comandos usa RapidFuzz y solo propone sugerencias; no ejecuta automáticamente una coincidencia. Las métricas Prometheus son agregadas y no incluyen etiquetas de usuario, sala ni contenido.
 
-Variables:
-- \`KATHERINE_AI_API_KEY\`: clave API. También acepta \`OPENAI_API_KEY\`.
-- \`KATHERINE_AI_MODEL\`: identificador del modelo disponible en el endpoint configurado; el modo de salida estructurada depende del proveedor/modelo.
-- \`KATHERINE_AI_API_URL\`: endpoint compatible; default \`https://api.openai.com/v1/responses\`.
+Variables principales:
+- `GEMINI_API_KEY`: clave del proveedor principal.
+- `GEMINI_MODEL`: modelo principal; default `gemini-3.5-flash-lite`.
+- `GROQ_API_KEY`: credencial secundaria.
+- `GROQ_MODEL`: modelo secundario; default `openai/gpt-oss-20b`.
+- `KATHERINE_AI_PRIMARY_PROVIDER`: se mantiene en `gemini`.
+- Compatibilidad: `KATHERINE_AI_API_KEY`, `KATHERINE_AI_MODEL` y `KATHERINE_AI_API_URL` siguen aceptándose en instalaciones heredadas.
 
 Sin clave, la IA informa que no está conectada y los comandos clásicos siguen disponibles. No se inserta una clave ficticia ni se copia una credencial al repositorio. A OpenAI se envía store=false; el endpoint Responses de Groq no admite ese parámetro y Katherine lo omite. Ninguna de las dos opciones sustituye la política de retención del proveedor.
 
-## Comandos
-- \`!ia estado\`, \`!ia probar\` (administrador; valida la conexión real con el proveedor configurado), \`!ia ayuda\`, \`!ia olvidar\`.
-- \`!ia preguntar <consulta>\`, \`!ia genshin <consulta>\`.
-- \`!ia musica <descripción>\`, \`!ia traducir idioma | texto\`.
-- \`!ia guardian revisar <texto>\` (administradores).
-- \`!ia analista activar|resumen|limpiar|desactivar\` (administradores).
-- \`!ia diagnostico\` (administradores).
+## Comandos de IA
+La ayuda de IA está separada del catálogo clásico `!ayuda` y se consulta con `!ia ayuda`.
+- `!asistente <petición>` o «Katherine, ...»: conversación y acciones en lenguaje natural.
+- `!ia preguntar <consulta>`, `!ia genshin <consulta>`.
+- `!investigar <tema>` / `!ia investigar <tema>`; `!enlace <URL>` / `!ia enlace <URL>`.
+- `!ia musica <descripción>`, `!ia traducir <idioma> | <texto>`.
+- `!ia estado`, `!ia olvidar`.
+- Solo administradores: `!ia probar [gemini|groq]`, `!ia trazas`, `!ia guardian`, `!ia analista`, `!ia diagnostico`.
 
 Las solicitudes naturales explícitas se envían al núcleo si hay clave configurada; si no, conservan el enrutador determinista. Las herramientas de Teyvat solo se seleccionan cuando la consulta menciona Genshin/Teyvat o una entidad reconocible del juego; preguntas generales sobre Anarchy Apps, Katherine, bots, APIs o programación nunca se derivan a la enciclopedia. La mención aislada «Katherine» nunca activa el bot.
 
@@ -77,7 +81,7 @@ El núcleo de IA puede devolver un plan de hasta tres herramientas. Katherine va
 
 ## Protección de cuotas y entrega de respuestas
 
-- El control de solicitudes de Groq adapta el intervalo de salida a las cabeceras de límite de solicitudes y tokens cuando el proveedor las entrega; conserva un intervalo prudente como respaldo.
+- Gemini y Groq mantienen sus esperas y bloqueos por separado. Groq ajusta el ritmo con sus cabeceras de cuota cuando están disponibles. Las respuestas usan un máximo de 512 tokens y los resultados de comandos evitan una segunda llamada de IA.
 - Los HTTP 429 se reintentan respetando `Retry-After` y los encabezados de reinicio. Cuando el error o las cabeceras indican agotamiento de cuota diaria, Katherine deja de reintentar en bucle y comunica que la IA volverá a estar disponible tras el reinicio.
 - Los bloques de mensajes rechazados explícitamente con HTTP 429 se pueden recuperar en una tarea temporal de RAM. La cola admite hasta 100 tareas concurrentes, conserva los bloques pendientes durante un máximo de 10 minutos y se pierde al reiniciar el proceso. Los errores distintos de 429 no se reenvían automáticamente para evitar duplicados cuando el resultado del primer envío es incierto.
 - Los mensajes largos mantienen el límite de transporte de 2000 unidades UTF-16 por bloque; no se recorta el contenido generado. Si un bloque no puede entregarse, los posteriores esperan a la recuperación para conservar el orden.

@@ -77,6 +77,16 @@ def render_prometheus_metrics(
         "Cumulative seconds AI requests waited for provider capacity.",
         registry=registry,
     ).set(_finite_number(counters.get("ai_provider_queue_wait_seconds", 0)))
+    Counter(
+        "katherine_ai_provider_latency_seconds",
+        "Cumulative seconds spent waiting for AI provider responses.",
+        registry=registry,
+    ).inc(_finite_number(counters.get("ai_provider_latency_seconds_total", 0)))
+    Counter(
+        "katherine_ai_provider_latency_observations",
+        "Number of AI provider request latency observations.",
+        registry=registry,
+    ).inc(_finite_number(counters.get("ai_provider_latency_observations", 0)))
     Gauge(
         "katherine_message_send_retry_wait_seconds",
         "Cumulative seconds spent waiting before outgoing message retries.",

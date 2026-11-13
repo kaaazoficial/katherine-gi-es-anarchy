@@ -1,6 +1,6 @@
 # Katherine · Catálogo y permisos de comandos
 
-El catálogo de usuario se genera con `!ayuda` y `!comandos` en `main.py`. Debe mantenerse sincronizado con los manejadores reales.
+El catálogo clásico se genera con `!ayuda` y `!comandos`. Los comandos de IA tienen ayuda separada mediante `!ia ayuda`; ambos deben mantenerse sincronizados con sus manejadores.
 
 ## Investigación y herramientas universales
 

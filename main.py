@@ -7959,19 +7959,10 @@ async def execute_ai_plan(
     reply_id = message.get("messageId")
     if not results:
         return False
-    try:
-        answer = await AI_CORE.synthesize_tool_results(
-            request_text or "Solicitud de varias acciones",
-            results,
-            external_request,
-            rate_key=None,
-        )
-    except Exception as exc:
-        logging.warning("[AI] No se pudo sintetizar el plan: %s", type(exc).__name__)
-        answer = "\n\n".join(
-            f"{item['command']}: {item['output'] or 'Sin resultado verificable.'}"
-            for item in results
-        )
+    answer = "\n\n".join(
+        f"{index}. {str(item.get('output') or 'Sin resultado verificable.')}"
+        for index, item in enumerate(results, start=1)
+    )
     log_ai_conversation_trace(request_text or "Plan de acciones", answer, "!asistente:plan")
     await send_message(thread, answer, source, reply_id)
     return True
@@ -8164,28 +8155,9 @@ async def handle_command(event: dict, source: str):
                         "!asistente:accion",
                     )
                 if command_name not in interactive_commands:
-                    try:
-                        answer = await AI_CORE.synthesize_tool_results(
-                            request_text, [tool_result],
-                            external_request, rate_key=None,
-                        )
-                        log_ai_conversation_trace(request_text, answer, "!asistente:herramienta")
-                        await send_message(thread, answer, source, reply)
-                    except Exception as exc:
-                        logging.warning(
-                            "[AI] No se pudo sintetizar la herramienta: %s",
-                            type(exc).__name__,
-                        )
-                        if tool_result.get("output"):
-                            await send_message(
-                                thread, tool_result["output"], source, reply
-                            )
-                        else:
-                            await send_message(
-                                thread,
-                                "La acción se intentó, pero no recibí un resultado verificable.",
-                                source, reply,
-                            )
+                    answer = str(tool_result.get("output") or "La acción se intentó, pero no recibí un resultado verificable.")
+                    log_ai_conversation_trace(request_text, answer, "!asistente:herramienta")
+                    await send_message(thread, answer, source, reply)
                 return
             if has_deterministic_fallback:
                 logging.warning(
@@ -8211,7 +8183,7 @@ async def handle_command(event: dict, source: str):
             await send_message(thread, "Uso: !investigar <tema o pregunta>. Consultaré varias fuentes públicas y separaré hechos de dudas.", source, reply)
             return
         try:
-            sources = await search_web(research_query, external_request, limit=8)
+            sources = await search_web(research_query, external_request, limit=4)
             if not sources:
                 answer = "No encontré fuentes públicas suficientes para esa consulta. Prueba con términos más concretos."
             else:
@@ -8226,7 +8198,7 @@ async def handle_command(event: dict, source: str):
                     logging.exception("[RESEARCH] No se pudo sintetizar; se mostrarán extractos.")
                     summary = "No pude generar una síntesis con IA; estos son los extractos recuperados para que puedas revisarlos."
                 refs = ["FUENTES CONSULTADAS"]
-                for index, item in enumerate(sources[:8], 1):
+                for index, item in enumerate(sources[:4], 1):
                     publication_date = (
                         item.get("publication_date") or item.get("published_at")
                         or item.get("date") or item.get("year") or "fecha no indicada"
@@ -8247,7 +8219,7 @@ async def handle_command(event: dict, source: str):
                 answer = (
                     f"CENTRO DE INVESTIGACIÓN AVANZADA · {research_mode_label} · {research_query}"
                     + "\n\n" + summary + "\n\n" + "\n".join(refs)
-                ) + "\n\nAlcance: se analizaron hasta ocho resultados y sus extractos recuperados; no implica lectura íntegra de cada documento. La búsqueda puede omitir páginas bloqueadas o no indexadas. Verifica los datos críticos en los documentos originales."
+                ) + "\n\nAlcance: se analizaron hasta cuatro resultados y sus extractos recuperados; no implica lectura íntegra de cada documento. La búsqueda puede omitir páginas bloqueadas o no indexadas. Verifica los datos críticos en los documentos originales."
         except Exception as exc:
             logging.warning("[RESEARCH] Falló investigación pública: %s", type(exc).__name__)
             answer = "No pude completar la investigación web en este momento. Los comandos clásicos siguen disponibles."
@@ -8320,14 +8292,14 @@ async def handle_command(event: dict, source: str):
             return
         if sub in ("ayuda", "help"):
             await send_message(thread,
-                "ASTRA INTELLIGENCE\n!ia estado / probar [gemini|groq] / olvidar / preguntar <consulta> / genshin <consulta>\n"
-                "!ia trazas activar|estado|desactivar (administradores; 15 min, contenido redactado).\n"
-                "!ia investigar <tema> / enlace <URL> — investigación web y análisis de páginas públicas.\n"
-                "!ia musica <descripción> / traducir idioma | texto\n"
-                "!ia guardian revisar <texto> (administradores)\n"
-                "!ia analista activar|resumen|limpiar|desactivar (administradores)\n"
-                "!ia diagnostico (UID de administrador).\n"
-                "Los subcomandos administrativos requieren un UID configurado en ADMIN_UIDS.", source, reply)
+                "ASTRA INTELLIGENCE · COMANDOS DE IA\n"
+                "CONVERSACIÓN: !asistente <petición> o !ia preguntar <consulta>. También puedes decir «Katherine, ...».\n"
+                "TEYVAT: !ia genshin <consulta>.\n"
+                "INVESTIGACIÓN: !investigar <tema> / !ia investigar <tema> / !enlace <URL> / !ia enlace <URL>.\n"
+                "TAREAS: !ia musica <descripción> / !ia traducir <idioma> | <texto>.\n"
+                "SESIÓN: !ia estado / !ia olvidar.\n"
+                "ADMIN: !ia probar [gemini|groq] / !ia trazas / !ia guardian / !ia analista / !ia diagnostico.\n"
+                "Los comandos clásicos están en !ayuda. Los comandos ADMIN requieren UID en ADMIN_UIDS.", source, reply)
             return
         if sub in ("estado", "status"):
             await send_message(thread, AI_CORE.status(thread), source, reply)
@@ -8358,8 +8330,8 @@ async def handle_command(event: dict, source: str):
                 provider = AI_CORE.last_provider_name
                 answer = f"Conexión directa con {provider} verificada. Modelo: {AI_CORE.last_model}."
             except Exception as exc:
-                detail = str(exc)[:360]
-                logging.warning("[AI] Prueba directa fallida | proveedor=%s | motivo=%s", provider, detail)
+                detail = sanitize_ai_trace_text(str(exc), 360) or type(exc).__name__
+                logging.warning("[AI] Prueba directa fallida | proveedor=%s | tipo=%s | motivo=%s", provider, type(exc).__name__, detail)
                 if "HTTP 401" in detail or "HTTP 403" in detail:
                     answer = f"{provider} rechazó la credencial (HTTP 401/403). Comprueba que la clave corresponda a ese proveedor y que tenga permisos para el modelo."
                 elif "HTTP 429" in detail:
@@ -8430,15 +8402,8 @@ async def handle_command(event: dict, source: str):
                             "!ia:accion",
                         )
                     if command_name not in interactive_commands:
-                        try:
-                            answer = await AI_CORE.synthesize_tool_results(
-                                rest, [tool_result], external_request, rate_key=None
-                            )
-                            log_ai_conversation_trace(rest, answer, "!ia:herramienta")
-                        except Exception:
-                            answer = tool_result.get("output") or (
-                                "La acción se intentó, pero no recibí un resultado verificable."
-                            )
+                        answer = str(tool_result.get("output") or "La acción se intentó, pero no recibí un resultado verificable.")
+                        log_ai_conversation_trace(rest, answer, "!ia:herramienta")
                         await send_message(thread, answer, source, reply)
                     return
             final_answer = result.get("answer") or "No pude responder."
@@ -8715,81 +8680,63 @@ async def handle_command(event: dict, source: str):
     # -----------------------------------------------------------------------
     if command in ("!ayuda", "!comandos"):
         help_sections = [
-            ("INICIO E INTELIGENCIA", [
-                f"{PREFIX}asistente <petición> — conversa y combina herramientas.",
-                f"{PREFIX}investigar <tema> — informe completo con varias fuentes.",
-                f"{PREFIX}investigar comparar: <tema> / verificar: <afirmación> — contrasta fuentes y verifica afirmaciones.",
-                f"{PREFIX}investigar cronologia: <tema> / informe: <tema> — ordena hechos o genera un informe exhaustivo.",
-                f"{PREFIX}enlace <URL> — analiza una página pública. También puedes decir «Katherine, ...».",
-                f"{PREFIX}ia preguntar <consulta> / genshin <consulta> — consulta la IA general o de Teyvat.",
-                f"{PREFIX}ia musica <descripción> / traducir <idioma> | <texto> — herramientas de audio e idioma.",
-                f"{PREFIX}ia ayuda / estado / olvidar — ayuda, estado y contexto de sesión.",
-                f"{PREFIX}ayuda / comandos — abre esta guía. {PREFIX}menu — menú interactivo.",
-                "También puedes escribir «Katherine, ...»; mencionar solo su nombre no la activa.",
-            ]),
             ("GENSHIN IMPACT", [
-                f"{PREFIX}guia <personaje> — builds, armas, artefactos y talentos.",
+                f"{PREFIX}guia <personaje> — build y talentos.",
                 f"{PREFIX}equipos / rotacion / sinergia <personaje> — equipos y estrategias.",
-                f"{PREFIX}materiales / cobertura <personaje> — materiales y contenido disponible.",
+                f"{PREFIX}materiales / cobertura <personaje> — materiales y contenido.",
                 f"{PREFIX}banner / calendario / jefes — banners, eventos y jefes.",
-                f"{PREFIX}enciclopedia <nombre> / buscargenshin <texto> — consulta y búsqueda en Teyvat.",
+                f"{PREFIX}enciclopedia <nombre> / buscargenshin <texto> — datos de Teyvat.",
                 f"{PREFIX}lista personajes|enemigos [página] / enemigo / geografia / elemento — fichas y listados.",
-                f"{PREFIX}reacciones <elemento> / curiosidad — mecánicas y datos.",
-                f"{PREFIX}deseo / pity / resetpity — simulador de deseos; no afecta tu cuenta real.",
+                f"{PREFIX}reacciones <elemento> / curiosidad — mecánicas y curiosidades.",
+                f"{PREFIX}deseo / pity / resetpity — simulador local de deseos.",
             ]),
             ("COMUNIDAD Y PERFILES", [
                 f"{PREFIX}perfil [@usuario] / bio <texto> / miestado <texto> — perfil y estado.",
-                f"{PREFIX}afinidad @usuario / actividad [hoy|semana] — vínculos y actividad de sala.",
-                f"{PREFIX}interaccion @usuario — abre acciones sociales con botones.",
-                "Acciones directas: abrazo, beso, patada, golpe, acariciar, mimar, consolar, felicitar, saludar, proteger, bailar, ayudar, curar y más; añade @usuario.",
-                f"{PREFIX}regalo @usuario [mensaje] / muro — regalos simbólicos y recibidos.",
-                f"{PREFIX}evento crear <título> / estado / cerrar — organiza eventos temporales.",
-                f"{PREFIX}miuid / mi-id / mi_uid — muestra tu UID de Anarchy Apps.",
+                f"{PREFIX}afinidad @usuario / actividad [hoy|semana] — vínculos y actividad.",
+                f"{PREFIX}interaccion @usuario — acciones sociales con botones.",
+                "Acciones directas: abrazo, beso, patada, acariciar, mimar, consolar, felicitar y saludar; añade @usuario.",
+                f"{PREFIX}regalo @usuario [mensaje] / muro — regalos.",
+                f"{PREFIX}evento crear <título> / estado / cerrar — eventos temporales.",
+                f"{PREFIX}miuid — muestra tu UID de Anarchy Apps.",
             ]),
             ("JUEGOS Y ECONOMÍA", [
                 f"{PREFIX}trivia / responder <1-4> / adivina / intento <número> — minijuegos.",
                 f"{PREFIX}duelo @usuario / ship <usuario 1> <usuario 2> / reto — desafíos.",
                 f"{PREFIX}encuesta <pregunta> | <opciones> / resultados <ID> / cerrar <ID> — votaciones.",
-                f"{PREFIX}elige opción 1 | opción 2 / verdad / 8ball <pregunta> — decisiones y preguntas.",
-                f"{PREFIX}azar <mínimo> <máximo> / dado / moneda / chiste / frase / suerte — azar y diversión.",
-                f"{PREFIX}puntos / ranking / diario / trabajar / pagar @usuario <cantidad> — puntos y recompensas.",
+                f"{PREFIX}elige opción 1 | opción 2 / verdad / 8ball <pregunta> — decisiones.",
+                f"{PREFIX}azar <mínimo> <máximo> / dado / moneda / chiste / frase / suerte — juegos rápidos.",
+                f"{PREFIX}puntos / ranking / diario / trabajar / pagar @usuario <cantidad> — recompensas.",
                 f"{PREFIX}roast @usuario — broma amistosa.",
             ]),
             ("MÚSICA Y VOZ", [
-                f"{PREFIX}join / salirsala / salas — conexión y salas en vivo.",
-                f"{PREFIX}dj buscar <tema> / buscar <tema> / ambiente <estilo> / fuentes — encuentra música.",
-                f"{PREFIX}dj pausa / reanudar / saltar / cola / actual / detener / añadir / lista — controla la reproducción.",
-                f"{PREFIX}playlist crear / agregar / ver / reproducir / borrar — administra listas.",
-                f"{PREFIX}dj favorito / reproducir <ID> / guardar <número> — gestiona favoritos.",
-                f"{PREFIX}leer / noleer / silenciolectura — lectura en voz alta. {PREFIX}tts ajustes / voces — opciones de voz.",
-                f"{PREFIX}tts voces / voz <nombre> / velocidad <valor> / volumen <0-100> — configura la voz.",
-                f"{PREFIX}volumen <0-100> / subirvolumen / bajarvolumen / silencio / djdetener / salirsala — volumen y cierre del reproductor.",
-                f"{PREFIX}tts enlaces on|off / menciones on|off — filtros de lectura."
+                f"{PREFIX}join / salirsala / salas — salas en vivo.",
+                f"{PREFIX}dj buscar <tema> / ambiente <estilo> / fuentes — búsqueda musical.",
+                f"{PREFIX}dj pausa / reanudar / saltar / cola / actual / detener — controles.",
+                f"{PREFIX}playlist crear / agregar / ver / reproducir / borrar — listas.",
+                f"{PREFIX}dj favorito / reproducir <ID> — favoritos.",
+                f"{PREFIX}leer / noleer / silenciolectura / tts voces — lectura y voz.",
+                f"{PREFIX}volumen <0-100> / subirvolumen / bajarvolumen / silencio — audio.",
             ]),
             ("UTILIDADES", [
-                f"{PREFIX}traducir <idioma> | <texto> — traduce mensajes.",
-                f"{PREFIX}fecha / zona <Area/Ciudad> — hora de Chile u otra zona.",
-                f"{PREFIX}multimedia imagen|video|audio <búsqueda> — busca recursos públicos.",
-                f"{PREFIX}imagen / video / audio <búsqueda> — accesos directos multimedia.",
-                f"{PREFIX}economia — explica puntos y recompensas.",
-                f"{PREFIX}respuestas / respuesta — consulta reglas de respuestas automáticas.",
+                f"{PREFIX}fecha / zona <Area/Ciudad> — hora local u otra zona.",
+                f"{PREFIX}multimedia imagen|video|audio <búsqueda> — recursos públicos.",
+                f"{PREFIX}imagen / video / audio <búsqueda> — accesos directos.",
+                f"{PREFIX}economia — puntos y recompensas.",
             ]),
             ("ADMINISTRACIÓN · UID AUTORIZADO", [
-                f"{PREFIX}estado / fuentes / saludfuentes / metricas / autotest — diagnóstico, métricas y pruebas. [ADMIN]",
-                f"{PREFIX}centro / nexus / admin / paneladmin / guardian — paneles de control. [ADMIN]",
-                f"{PREFIX}antispam estado|on|off|limite|ventana|repeticiones|enlaces|menciones — protección del chat. [ADMIN]",
-                f"{PREFIX}advertir / advertencias / quitaradvertencia — gestión de advertencias. [ADMIN]",
-                f"{PREFIX}perfilbot [ambos|comunidad|desarrollador] Nombre | Estado — sincroniza perfiles. [ADMIN]",
-                f"{PREFIX}avatarbot [ambos|comunidad|desarrollador] URL — sincroniza avatares de chat y llamada. [ADMIN]",
-                f"{PREFIX}eliminarmensajes — elimina mensajes enviados por Katherine en esta sala. [ADMIN]",
-                f"{PREFIX}respuestas on|off|estado / respuesta añadir|lista|eliminar — reglas automáticas. [ADMIN]",
-                f"{PREFIX}ia probar [gemini|groq] / estado / guardian revisar / analista / diagnostico — conexión por proveedor y herramientas de IA. [ADMIN]",
-                "Los comandos administrativos verifican el UID autorizado, no el nickname.",
+                f"{PREFIX}estado / fuentes / saludfuentes / metricas / autotest — diagnóstico. [ADMIN]",
+                f"{PREFIX}centro / nexus / admin / paneladmin / guardian — paneles. [ADMIN]",
+                f"{PREFIX}antispam estado|on|off|limite|ventana|repeticiones — protección. [ADMIN]",
+                f"{PREFIX}advertir / advertencias / quitaradvertencia — moderación. [ADMIN]",
+                f"{PREFIX}perfilbot / avatarbot — perfiles y avatares. [ADMIN]",
+                f"{PREFIX}eliminarmensajes — elimina mensajes propios disponibles. [ADMIN]",
+                f"{PREFIX}respuestas / respuesta — reglas automáticas. [ADMIN]",
+                "Los comandos administrativos verifican el UID, no el nickname.",
             ]),
         ]
         header = (
-            f"KATHERINE · COMANDOS\nPrefijo: {PREFIX} (también ! y -)\n"
-            "Consulta la categoría que necesites; [ADMIN] requiere UID autorizado."
+            f"KATHERINE · COMANDOS CLÁSICOS\nPrefijo: {PREFIX} (también ! y -)\n"
+            "La IA tiene una guía independiente: !ia ayuda. [ADMIN] requiere UID autorizado."
         )
         await send_message(thread, header, source, reply)
         for title, entries in help_sections:

@@ -211,7 +211,7 @@ def test_ai_responses_have_no_artificial_output_token_cap(monkeypatch):
         }))
     result = pytest.importorskip("asyncio").run(ai.test_connection(fake_request))
     assert len(result) == 12000
-    assert "max_output_tokens" not in captured
+    assert captured["max_output_tokens"] == 512
 
 
 def test_provider_retry_header_parser_handles_seconds_and_units():
@@ -232,7 +232,7 @@ async def test_provider_connection_probe(monkeypatch):
         }))
     assert await ai.test_connection(fake_request) == "OK"
     assert captured["json"]["store"] is False
-    assert "max_output_tokens" not in captured["json"]
+    assert captured["json"]["max_output_tokens"] == 512
 
 @pytest.mark.asyncio
 async def test_model_cannot_request_unapproved_tool(monkeypatch):
@@ -978,16 +978,17 @@ async def test_gemini_is_primary_and_uses_native_generate_content(monkeypatch):
         }))
 
     assert await ai.test_connection(fake_request) == "OK"
-    assert calls[0][0] == "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
+    assert calls[0][0] == "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent"
     assert calls[0][1]["headers"]["x-goog-api-key"] == "gemini-test-key"
     assert "Authorization" not in calls[0][1]["headers"]
     assert "systemInstruction" in calls[0][1]["json"]
     assert calls[0][1]["json"]["generationConfig"]["responseMimeType"] == "application/json"
-    assert calls[0][1]["json"]["generationConfig"]["thinkingConfig"]["thinkingLevel"] == "LOW"
-    assert calls[0][1]["timeout"] == 12
+    assert calls[0][1]["json"]["generationConfig"]["thinkingConfig"]["thinkingLevel"] == "minimal"
+    assert calls[0][1]["json"]["generationConfig"]["maxOutputTokens"] == 512
+    assert calls[0][1]["timeout"] == 8
     assert calls[0][1]["json"]["contents"][0]["role"] == "user"
     assert ai.last_provider_name == "Google Gemini"
-    assert ai.last_model == "gemini-3.8-flash"
+    assert ai.last_model == "gemini-3.5-flash-lite"
 
 
 @pytest.mark.asyncio
@@ -1022,7 +1023,7 @@ async def test_gemini_failure_falls_back_to_groq(monkeypatch):
     )
     assert result["answer"] == "Groq respondió."
     assert [item[0] for item in calls] == [
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
     ] * 2 + [
         "https://api.groq.com/openai/v1/responses",
     ]
@@ -1060,7 +1061,7 @@ async def test_gemini_read_timeout_fails_over_without_waiting_for_more_retries(m
     assert result["answer"] == "Groq respondió rápido."
     assert len(calls) == 2
     assert "generativelanguage.googleapis.com" in calls[0][0]
-    assert calls[0][1]["timeout"] == 12
+    assert calls[0][1]["timeout"] == 8
     assert "api.groq.com" in calls[1][0]
     assert ai.metrics["ai_provider_retries"] == 0
     assert ai.metrics["ai_provider_failovers"] == 1
@@ -1085,7 +1086,7 @@ async def test_direct_gemini_probe_does_not_fall_back_to_groq(monkeypatch):
     with pytest.raises(RuntimeError, match="HTTP 503"):
         await ai.test_provider_connection("gemini", fake_request)
     assert calls == [
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent"
     ] * 2
 
 
@@ -1119,3 +1120,50 @@ def test_ai_status_exposes_primary_and_secondary_without_secrets(monkeypatch):
     assert "Proveedor secundario: Groq (configurado)" in status
     assert "gemini-test-secret" not in status
     assert "groq-test-secret" not in status
+
+
+def test_gemini_defaults_to_flash_lite_for_a_lightweight_bot(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    assert KatherineAI()._primary_provider_config()["model"] == "gemini-3.5-flash-lite"
+
+
+def test_ai_tool_catalog_is_scoped_to_intent_and_topic():
+    from katherine_ai import AI_PUBLIC_COMMANDS, select_ai_tool_commands
+    assert not select_ai_tool_commands(
+        "explícame cómo funciona una API", AI_PUBLIC_COMMANDS, "conversation"
+    )
+    music = select_ai_tool_commands(
+        "reproduce música tranquila", AI_PUBLIC_COMMANDS, "action"
+    )
+    assert "dj" in music
+    assert "enciclopedia" not in music
+    research = select_ai_tool_commands(
+        "investiga las novedades", AI_PUBLIC_COMMANDS, "research"
+    )
+    assert research == frozenset({"investigar", "enlace"})
+
+
+def test_groq_provider_lock_does_not_share_gemini_lock():
+    import asyncio
+    ai = KatherineAI()
+    gemini = ai._provider_locks.setdefault("google gemini", asyncio.Lock())
+    groq = ai._provider_locks.setdefault("groq", asyncio.Lock())
+    assert gemini is not groq
+
+
+@pytest.mark.asyncio
+async def test_groq_uses_low_reasoning_and_output_cap(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
+    ai = KatherineAI()
+    captured = {}
+
+    async def fake_request(method, url, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse(response_payload({
+            "kind": "answer", "answer": "OK", "command": "", "args": ""
+        }))
+
+    assert await ai.test_provider_connection("groq", fake_request) == "OK"
+    assert captured["json"]["reasoning"] == {"effort": "low"}
+    assert captured["json"]["max_output_tokens"] == 512
