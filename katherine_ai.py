@@ -573,6 +573,18 @@ def classify_request_intent(
     return "conversation"
 
 
+def classify_request_difficulty(value: str, intent: str = "conversation") -> str:
+    """Classify locally; model tier selection never makes a second AI call."""
+    text = _normalize_ai_request(value)
+    words = re.findall(r"[a-z0-9']+", text)
+    markers = ("compara", "comparar", "diferencias", "paso a paso", "detalladamente", "a fondo", "exhaustivo", "cronologia", "verifica", "fuentes", "analiza", "investiga", "metodologia", "pros y contras")
+    if intent in {"research", "multi_action"} or len(text) > 320 or len(words) > 48 or sum(marker in text for marker in markers) >= 2:
+        return "complex"
+    if len(words) <= 7 and len(text) <= 100 and intent in {"conversation", "action", "genshin"}:
+        return "simple"
+    return "standard"
+
+
 def select_ai_tool_commands(
     request_text: str,
     allowed_commands: set[str] | frozenset[str] | None = None,
@@ -671,7 +683,7 @@ def build_ai_instructions(
         "action": "Acción explícita: elige el comando coincidente; no inventes argumentos.",
         "multi_action": "Plan: máximo tres consultas independientes de solo lectura.",
         "research": "Investigación: usa investigar/enlace solo si aportan evidencia.",
-        "genshin": "Teyvat solo para consultas claramente relacionadas con Genshin.",
+        "genshin": "INTENCIÓN: Genshin Impact. Usa datos de Teyvat solo para esta consulta.",
         "conversation": "Responde directamente; no ejecutes herramientas.",
     }.get(intent, "Responde directamente; no inventes acciones.")
     tool_text = (
@@ -1007,6 +1019,9 @@ class KatherineAI:
         primary = self._primary_provider_config()
         fallback = self._fallback_provider_config()
         tertiary = self._tertiary_provider_config()
+        override = self._provider_override.get()
+        if override:
+            return bool(override.get("key") and override.get("url") and override.get("model"))
         return bool(
             (primary["key"] and primary["url"] and primary["model"])
             or (fallback and fallback["key"] and fallback["url"] and fallback["model"])
@@ -1461,12 +1476,22 @@ class KatherineAI:
         request_func: RequestFunc,
         rate_key: str | None = None,
         max_input_messages: int | None = None,
-        max_output_tokens: int = 512,
+        max_output_tokens: int | None = None,
+        difficulty: str = "standard",
     ) -> dict[str, str]:
         self._enforce_user_rate_limit(rate_key)
         primary = self._primary_provider_config()
         fallback = self._fallback_provider_config()
         tertiary = self._tertiary_provider_config()
+        tier = str(difficulty or "standard").upper()
+        prefixes = {"Google Gemini": "GEMINI", "Groq": "GROQ", "OpenRouter": "OPENROUTER"}
+        for config in (primary, fallback, tertiary):
+            if not config:
+                continue
+            prefix = prefixes.get(config.get("name", ""))
+            tier_model = (os.getenv(f"{prefix}_MODEL_{tier}") or "").strip() if prefix else ""
+            if tier_model:
+                config["model"] = tier_model
         providers: list[dict[str, str]] = []
         if primary["key"] and primary["url"] and primary["model"]:
             providers.append(primary)
@@ -1583,7 +1608,7 @@ class KatherineAI:
         request_func: RequestFunc,
         rate_key: str | None = None,
         max_input_messages: int | None = None,
-        max_output_tokens: int = 512,
+        max_output_tokens: int | None = None,
     ) -> dict[str, str]:
         if not self.is_enabled:
             raise RuntimeError("IA_NO_CONFIGURADA")
@@ -1620,8 +1645,15 @@ class KatherineAI:
             ):]
             if turn.get("role") in {"user", "assistant"}
         ]
-        output_limit = max(128, min(1024, int(max_output_tokens)))
+        output_limit = max(128, min(8192, int(max_output_tokens))) if max_output_tokens is not None else None
         if self.is_gemini:
+            generation_config = {
+                "responseMimeType": "application/json",
+                "responseSchema": GEMINI_ACTION_SCHEMA,
+                "thinkingConfig": {"thinkingLevel": "minimal"},
+            }
+            if output_limit is not None:
+                generation_config["maxOutputTokens"] = output_limit
             body = {
                 "systemInstruction": {"parts": [{"text": prompt_instructions}]},
                 "contents": [
@@ -1631,12 +1663,7 @@ class KatherineAI:
                     }
                     for turn in recent_messages
                 ],
-                "generationConfig": {
-                    "responseMimeType": "application/json",
-                    "responseSchema": GEMINI_ACTION_SCHEMA,
-                    "thinkingConfig": {"thinkingLevel": "minimal"},
-                    "maxOutputTokens": output_limit,
-                },
+                "generationConfig": generation_config,
             }
         else:
             body = {
@@ -1644,8 +1671,9 @@ class KatherineAI:
                 "instructions": prompt_instructions,
                 "input": recent_messages,
                 "text": {"format": output_format},
-                "max_output_tokens": output_limit,
             }
+            if output_limit is not None:
+                body["max_output_tokens"] = output_limit
             if self.is_groq:
                 body["reasoning"] = {"effort": "low"}
             if not self.is_groq and not self.is_openrouter:
@@ -1748,11 +1776,13 @@ class KatherineAI:
                     ):
                         fallback_body = dict(body)
                         if self.is_gemini:
-                            fallback_body["generationConfig"] = {
+                            fallback_generation_config = {
                                 "responseMimeType": "application/json",
                                 "thinkingConfig": {"thinkingLevel": "minimal"},
-                                "maxOutputTokens": output_limit,
                             }
+                            if output_limit is not None:
+                                fallback_generation_config["maxOutputTokens"] = output_limit
+                            fallback_body["generationConfig"] = fallback_generation_config
                         else:
                             fallback_body["text"] = {"format": {"type": "json_object"}}
                             fallback_body["instructions"] = (
@@ -1981,6 +2011,7 @@ class KatherineAI:
             text, contextual_genshin=contextual_genshin
         )
         allowed = select_ai_tool_commands(text, allowed, intent)
+        difficulty = classify_request_difficulty(text, intent)
         instructions = build_ai_instructions(allowed, intent)
         if not self.is_enabled:
             return {
@@ -1997,7 +2028,8 @@ class KatherineAI:
         messages = [*history, {"role": "user", "content": text}]
         try:
             result = await self._request_json(
-                instructions, messages, request_func, rate_key=rate_key or key
+                instructions, messages, request_func, rate_key=rate_key or key,
+                difficulty=difficulty,
             )
         except RuntimeError as exc:
             reason = str(exc)
@@ -2128,6 +2160,7 @@ class KatherineAI:
                     request_func,
                     rate_key=None,
                     max_input_messages=1,
+                    difficulty="simple",
                 )
             except Exception:
                 retry = {"kind": "answer", "answer": ""}
