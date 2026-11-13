@@ -12994,7 +12994,7 @@ async def execute_ai_plan(
 
 
 async def handle_command(event: dict, source: str):
-    global LAST_EVENT_AT, LAST_COMMAND_AT, LAST_COMMAND_NAME, LAST_COMMAND_USER
+    global LAST_EVENT_AT, LAST_COMMAND_AT, LAST_COMMAND_NAME, LAST_COMMAND_USER, AI_TRACE_UNTIL
     LAST_EVENT_AT = time.time()
     msg = event.get("message") or {}
     author = msg.get("author") or {}
@@ -13262,9 +13262,37 @@ async def handle_command(event: dict, source: str):
         sub = args[0].casefold() if args else "ayuda"
         rest = " ".join(args[1:]).strip()
         session_key = build_ai_session_key(source, thread, author, message_id)
+        if sub in ("trazas", "traza", "trace"):
+            if not is_admin_uid(admin_uid):
+                await send_message(thread, "Solo un administrador puede controlar las trazas de IA.", source, reply)
+                return
+            mode = rest.casefold() or "estado"
+            if mode in ("activar", "on", "iniciar"):
+                AI_TRACE_UNTIL = time.monotonic() + AI_TRACE_WINDOW_SECONDS
+                answer = (
+                    "Trazas de IA activadas durante 15 minutos. Se registrarán preguntas y respuestas "
+                    "redactadas en los logs de Render; no se guardan en SQLite ni en memoria persistente. "
+                    "La activación caduca automáticamente."
+                )
+                logging.warning("[AI_TRACE] Activación administrativa temporal; vence en 15 minutos.")
+            elif mode in ("desactivar", "off", "detener"):
+                AI_TRACE_UNTIL = 0.0
+                answer = "Trazas de IA desactivadas."
+                logging.warning("[AI_TRACE] Desactivación administrativa.")
+            elif mode in ("estado", "status"):
+                remaining = max(0, int(AI_TRACE_UNTIL - time.monotonic()))
+                answer = (
+                    f"Trazas activas: sí, quedan {remaining // 60} min {remaining % 60} s."
+                    if remaining else "Trazas de IA desactivadas."
+                )
+            else:
+                answer = "Uso: !ia trazas activar|estado|desactivar."
+            await send_message(thread, answer, source, reply)
+            return
         if sub in ("ayuda", "help"):
             await send_message(thread,
                 "ASTRA INTELLIGENCE\n!ia estado / probar / olvidar / preguntar <consulta> / genshin <consulta>\n"
+                "!ia trazas activar|estado|desactivar (administradores; 15 min, contenido redactado).\n"
                 "!ia investigar <tema> / enlace <URL> — investigación web y análisis de páginas públicas.\n"
                 "!ia musica <descripción> / traducir idioma | texto\n"
                 "!ia guardian revisar <texto> (administradores)\n"
