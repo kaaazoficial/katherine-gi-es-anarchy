@@ -418,7 +418,7 @@ async def test_avatarbot_remains_uid_protected(monkeypatch, tmp_path):
         },
     }
     await bot_main.handle_command(event, "developer")
-    assert sent and "No tienes permiso" in sent[0]
+    assert sent and "Acceso restringido" in sent[0]
 
 
 @pytest.mark.asyncio
