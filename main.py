@@ -13075,9 +13075,31 @@ async def handle_command(event: dict, source: str):
                 )
                 return
             if result.get("kind") == "command":
-                invocation = validate_ai_tool_call(result.get("command", ""), result.get("args", ""))
+                invocation = validate_ai_tool_call(
+                    result.get("command", ""), result.get("args", ""),
+                    allowed_commands=allowed_ai_commands,
+                )
                 if invocation:
-                    await execute_ai_tool(event, source, session_key, invocation)
+                    command_name = invocation.split(maxsplit=1)[0]
+                    interactive_commands = {
+                        "menu", "centro", "nexus", "interaccion", "evento",
+                        "trivia", "adivina", "encuesta", "elige", "duelo",
+                        "join", "playlist", "tts", "dj", "reproducir",
+                    }
+                    tool_result = await execute_ai_tool(
+                        event, source, session_key, invocation,
+                        silent=command_name not in interactive_commands,
+                    )
+                    if command_name not in interactive_commands:
+                        try:
+                            answer = await AI_CORE.synthesize_tool_results(
+                                rest, [tool_result], external_request, rate_key=None
+                            )
+                        except Exception:
+                            answer = tool_result.get("output") or (
+                                "La acción se intentó, pero no recibí un resultado verificable."
+                            )
+                        await send_message(thread, answer, source, reply)
                     return
             await send_message(thread, result.get("answer") or "No pude responder.", source, reply)
             return
