@@ -244,7 +244,7 @@ def test_parse_research_modes_and_preserve_subject():
         "verificar", "esta afirmación es cierta"
     )
     assert research.parse_research_mode("cronología de la exploración espacial") == (
-        "cronologia", "de la exploración espacial"
+        "cronologia", "la exploración espacial"
     )
     assert research.parse_research_mode("informe: inteligencia artificial") == (
         "informe", "inteligencia artificial"
