@@ -38,14 +38,52 @@ def test_allowlist_accepts_safe_existing_commands():
     assert validate_ai_tool_call("traducir", "inglés | buenos días") == "traducir inglés | buenos días"
 
 @pytest.mark.parametrize(("command", "args"), [
-    ("admin", "resumen"), ("guardian", ""), ("evento", "crear actividad"), ("advertir", "@usuario"),
-    ("pagar", "@usuario 100"), ("avatarbot", "https://example.com"),
+    ("admin", "resumen"), ("guardian", ""), ("advertir", "@usuario"),
+    ("pagar", "@usuario"), ("avatarbot", "https://example.com"),
     ("dj", "subirvolumen 100"), ("multimedia", "ejecutar programa"),
     ("actividad", "mes"), ("zona", "x"), ("enciclopedia", ""),
     ("traducir", "solo texto"),
 ])
 def test_allowlist_rejects_sensitive_or_malformed_actions(command, args):
     assert validate_ai_tool_call(command, args) is None
+
+
+def test_explicit_user_actions_are_available_but_plans_stay_read_only():
+    from katherine_ai import (
+        AI_ADMIN_COMMANDS, AI_PLAN_SAFE_COMMANDS, AI_PUBLIC_COMMANDS,
+        classify_request_intent, build_ai_instructions,
+    )
+    assert validate_ai_tool_call("evento", "crear reunión") == "evento crear reunión"
+    assert validate_ai_tool_call("pagar", "@Ana 100") == "pagar @Ana 100"
+    assert validate_ai_tool_call("bio", "Me gusta la música") == "bio Me gusta la música"
+    assert validate_ai_tool_call("antispam", "off", AI_ADMIN_COMMANDS) is None
+    assert "pagar" not in AI_PLAN_SAFE_COMMANDS
+    assert "evento" not in AI_PLAN_SAFE_COMMANDS
+    assert classify_request_intent("Katherine, transfiere 100 puntos a Ana") == "action"
+    assert classify_request_intent("Katherine, investiga novedades de Python") == "research"
+    assert classify_request_intent("Katherine, investiga Python y consulta la guía de Cyno") == "genshin"
+    public_prompt = build_ai_instructions(AI_PUBLIC_COMMANDS, "action")
+    admin_prompt = build_ai_instructions(AI_PUBLIC_COMMANDS | AI_ADMIN_COMMANDS, "action")
+    assert "- antispam:" not in public_prompt
+    assert "- antispam:" in admin_prompt
+
+
+@pytest.mark.asyncio
+async def test_assist_uses_role_scoped_command_allowlist(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+    async def fake_request(method, url, **kwargs):
+        assert "- antispam:" not in kwargs["json"]["instructions"]
+        return FakeResponse(response_payload({
+            "kind": "command", "answer": "", "command": "antispam",
+            "args": "off", "steps": [],
+        }))
+    result = await ai.assist(
+        "desactiva el antispam", "room:user", fake_request,
+        allowed_commands={"ayuda"},
+    )
+    assert result["kind"] == "answer"
+    assert result["fallback"] is True
 
 def test_memory_is_isolated_and_expires():
     ai = KatherineAI(memory_ttl=60)
