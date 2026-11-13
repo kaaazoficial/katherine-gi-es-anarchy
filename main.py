@@ -92,6 +92,9 @@ AI_TOOL_SILENT: ContextVar[bool] = ContextVar(
 )
 AI_TRACE_UNTIL = 0.0
 AI_TRACE_WINDOW_SECONDS = 900
+AI_TRACE_CAPTURE: ContextVar[list[str] | None] = ContextVar(
+    "katherine_ai_trace_capture", default=None
+)
 
 
 def log_ai_conversation_trace(question: str, answer: str, route: str = "assistant") -> None:
@@ -1918,6 +1921,9 @@ async def send_message(
         return None
 
     content = sanitize_chat_text(content)
+    trace_capture = AI_TRACE_CAPTURE.get()
+    if trace_capture is not None and content and len(trace_capture) < 10:
+        trace_capture.append(content)
     capture = AI_TOOL_OUTPUT_CAPTURE.get()
     if AI_TOOL_SILENT.get():
         if capture is not None and content:
@@ -16845,7 +16851,21 @@ async def dispatch(event: dict, source: str):
                     routed_command.split()[0],
                 )
                 routed_event["message"] = routed_message
-                await handle_command(routed_event, source)
+                trace_capture = (
+                    [] if time.monotonic() < AI_TRACE_UNTIL else None
+                )
+                trace_token = AI_TRACE_CAPTURE.set(trace_capture)
+                try:
+                    await handle_command(routed_event, source)
+                finally:
+                    AI_TRACE_CAPTURE.reset(trace_token)
+                    if trace_capture is not None:
+                        log_ai_conversation_trace(
+                            incoming_text,
+                            "\n".join(trace_capture)
+                            or "La ruta determinista no produjo una respuesta textual.",
+                            "!nexus",
+                        )
             else:
                 # Conversación ordinaria: se mantienen estadísticas de actividad,
                 # pero no se activa el asistente ni las respuestas automáticas.
