@@ -245,7 +245,7 @@ def _retry_header_seconds(value: Any) -> float | None:
         return max(0.0, parsed.timestamp() - time.time())
     except (TypeError, ValueError, OverflowError):
         pass
-    matches = list(re.finditer(r"(\d+(?:\\.\d+)?)\s*(ms|s|m|h)", raw, re.I))
+    matches = list(re.finditer(r"(\d+(?:\.\d+)?)\s*(ms|s|m|h)", raw, re.I))
     if not matches:
         return None
     compact = re.sub(r"\s+", "", raw).casefold()
