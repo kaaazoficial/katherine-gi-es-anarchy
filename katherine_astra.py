@@ -40,7 +40,7 @@ def build_jamendo_download_url(client_id: str, track_id: str) -> str | None:
     identifier = str(track_id or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9_-]{3,80}", client):
         return None
-    if not re.fullmatch(r"\\d{1,20}", identifier):
+    if not re.fullmatch(r"\d{1,20}", identifier):
         return None
     params = urlencode({
         "client_id": client,
