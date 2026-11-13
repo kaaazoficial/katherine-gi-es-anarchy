@@ -13273,7 +13273,10 @@ async def handle_command(event: dict, source: str):
                     excerpt = item.get("excerpt") or item.get("snippet") or ""
                     if excerpt:
                         refs.append("   " + excerpt[:420])
-                answer = "CENTRO DE INVESTIGACIÓN AVANZADA · " + research_query + "\n\n" + summary + "\n\n" + "\n".join(refs) + "\n\nAlcance: se analizaron hasta ocho resultados y sus extractos recuperados; no implica lectura íntegra de cada documento. La búsqueda puede omitir páginas bloqueadas o no indexadas. Verifica los datos críticos en los documentos originales."
+                answer = (
+                    f"CENTRO DE INVESTIGACIÓN AVANZADA · {research_mode_label} · {research_query}"
+                    + "\n\n" + summary + "\n\n" + "\n".join(refs)
+                ) + "\n\nAlcance: se analizaron hasta ocho resultados y sus extractos recuperados; no implica lectura íntegra de cada documento. La búsqueda puede omitir páginas bloqueadas o no indexadas. Verifica los datos críticos en los documentos originales."
         except Exception as exc:
             logging.warning("[RESEARCH] Falló investigación pública: %s", type(exc).__name__)
             answer = "No pude completar la investigación web en este momento. Los comandos clásicos siguen disponibles."
