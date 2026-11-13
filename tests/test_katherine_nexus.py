@@ -4,6 +4,7 @@ import pytest
 from katherine_nexus import (
     cleanup_community_events, extract_message_id, format_source_health,
     interpret_natural_request, parse_command_invocation, toggle_community_participant,
+    should_execute_deterministic_fallback,
 )
 
 
@@ -192,3 +193,25 @@ def test_genshin_entity_names_still_route_to_teyvat():
 )
 def test_public_research_requests_route_to_research_tools(utterance, expected):
     assert interpret_natural_request(utterance) == expected
+
+
+@pytest.mark.parametrize(("request", "fallback", "expected"), [
+    ("Katherine, qué es el gremio de aventureros", "enciclopedia el gremio", False),
+    ("Katherine, quién es Anarchy Apps", "enciclopedia anarchy apps", False),
+    ("Katherine, abre el menú", "menu", True),
+    ("Katherine, pausa la música", "dj pausa", True),
+    ("Katherine, investiga Python", "investigar python", True),
+    ("Katherine, qué es Anarchy Apps", "enciclopedia anarchy apps", True),
+])
+def test_deterministic_fallback_requires_explicit_intent(request, fallback, expected):
+    assert should_execute_deterministic_fallback(request, fallback) is expected
+
+
+def test_provider_failure_can_use_existing_deterministic_fallback():
+    assert should_execute_deterministic_fallback(
+        "Katherine, qué es Anarchy Apps", "enciclopedia anarchy apps",
+        provider_failed=True,
+    )
+    assert not should_execute_deterministic_fallback(
+        "Katherine, hola", "asistente hola", provider_failed=True,
+    )
