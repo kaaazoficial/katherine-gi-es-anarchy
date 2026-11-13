@@ -1849,7 +1849,7 @@ async def retry_pending_delivery(
                 metrics["message_send_429"] += 1
                 retry_value = result.get("retry_after")
                 try:
-                    delay = max(0.5, min(float(retry_value), 60.0))
+                    delay = max(0.5, min(float(retry_value), 600.0))
                 except (TypeError, ValueError):
                     delay = 2.0
                 metrics["message_send_retries"] += 1
@@ -1986,7 +1986,7 @@ async def send_message(
                     retry_seconds = float(retry_value)
                 except (TypeError, ValueError):
                     retry_seconds = 2.0
-                retry_seconds = max(0.5, min(retry_seconds, 60.0))
+                retry_seconds = max(0.5, min(retry_seconds, 600.0))
                 metrics["message_send_retries"] += 1
                 metrics["message_send_retry_wait_seconds"] += retry_seconds
                 logging.warning(
