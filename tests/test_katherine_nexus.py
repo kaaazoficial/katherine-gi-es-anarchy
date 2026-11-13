@@ -77,6 +77,8 @@ def test_translation_routes_to_existing_translation_command():
 
 @pytest.mark.parametrize(("payload", "expected"), [
     ({"messageId": "abc"}, "abc"),
+    ({"id": "top-level-id"}, "top-level-id"),
+    ({"data": {"id": "data-id"}}, "data-id"),
     ({"message": {"id": "xyz"}}, "xyz"),
     ({"data": {"message": {"messageId": "nested"}}}, "nested"),
 ])
