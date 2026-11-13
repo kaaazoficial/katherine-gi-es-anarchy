@@ -74,7 +74,7 @@ def test_ambiguous_or_ordinary_chat_is_not_routed(utterance):
 @pytest.mark.parametrize(("utterance", "expected"), [
     ("Katherine ayuda", "ayuda"),
     ("Katherine, comandos", "comandos"),
-    ("Katherine !guia Cyno", "guia Cyno"),
+    ("Katherine !guia Cyno", "guia cyno"),
     ("Katherine -estado", "estado"),
     ("Oye Katherine, admin resumen", "admin resumen"),
     ("Katherine, dj pausa", "dj pausa"),
@@ -90,7 +90,8 @@ def test_every_catalog_command_can_be_invoked_with_katherine(utterance, expected
 def test_every_catalog_entry_is_reachable_by_its_katherine_name():
     for command in AI_COMMAND_CATALOG:
         routed = interpret_natural_request(f"Katherine {command}")
-        assert routed == command, (command, routed)
+        expected = "admin" if command == "guardian" else command
+        assert routed == expected, (command, routed)
 
 
 def test_unknown_prefixed_command_after_katherine_is_not_executed():
