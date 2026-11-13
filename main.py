@@ -1793,6 +1793,25 @@ async def retry_pending_delivery(
         for body in pending_bodies:
             delivered = False
             while time.monotonic() < deadline and not delivered:
+                now = time.monotonic()
+                wait = max(
+                    0.0,
+                    1.05 - (now - last_bot_send),
+                    2.05 - (now - last_chat_send[f"{source}:{thread_id}"]),
+                )
+                while send_history_bot and send_history_bot[0] < now - 3600:
+                    send_history_bot.popleft()
+                history = send_history_chat[f"{source}:{thread_id}"]
+                while history and history[0] < now - 600:
+                    history.popleft()
+                if len(send_history_bot) >= 300:
+                    wait = max(wait, send_history_bot[0] + 3600 - now)
+                if len(history) >= 60:
+                    wait = max(wait, history[0] + 600 - now)
+                if wait > 0:
+                    await asyncio.sleep(min(wait, max(0.0, deadline - time.monotonic())))
+                if time.monotonic() >= deadline:
+                    break
                 result = await api(
                     "POST",
                     f"/threads/{thread_id}/messages",
