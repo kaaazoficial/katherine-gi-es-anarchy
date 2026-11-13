@@ -76,7 +76,10 @@ def interpret_direct_command(value: str) -> str | None:
         if not parsed:
             return None
         command, args = parsed
-        return " ".join([command.lstrip("!"), *args]).strip()
+        canonical = command.lstrip("!")
+        if canonical not in NATURAL_COMMAND_NAMES:
+            return None
+        return " ".join([canonical, *args]).strip()
 
     first, separator, remainder = raw.partition(" ")
     command_key = _normalize(first)
