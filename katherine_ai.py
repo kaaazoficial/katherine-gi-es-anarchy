@@ -48,6 +48,7 @@ AI_ADMIN_COMMANDS = frozenset({
     "centro", "nexus", "autotest", "admin", "paneladmin", "guardian",
     "respuestas", "respuesta", "advertir", "advertencias",
     "quitaradvertencia", "antispam", "perfilbot", "avatarbot",
+    "eliminarmensajes",
 })
 
 # Backwards-compatible public allowlist. Privileged tools are added only for
@@ -78,6 +79,7 @@ AI_DIRECT_ACTION_COMMANDS = frozenset({
     "bio", "miestado", "interaccion", "regalo", "evento", "roast",
     "resetpity", "pagar", "transferir", "advertir", "quitaradvertencia",
     "antispam", "respuestas", "respuesta", "perfilbot", "avatarbot",
+    "eliminarmensajes",
 })
 
 AI_COMMAND_CATALOG = {
@@ -102,6 +104,7 @@ AI_COMMAND_CATALOG = {
     "antispam": "[estado|on|off|limite N|ventana N|repeticiones N|enlaces N|menciones N] (administradores).",
     "perfilbot": "nombre | estado: actualiza el perfil del bot (administradores).",
     "avatarbot": "URL HTTPS: actualiza el avatar del bot (administradores).",
+    "eliminarmensajes": "sin argumentos: elimina mensajes enviados por Katherine en esta sala (administradores).",
     "miuid": "sin argumentos: muestra tu UID de Anarchy Apps.",
     "fecha": "sin argumentos: fecha y hora local.",
     "zona": "Area/Ciudad: hora de otra zona horaria.",
