@@ -884,14 +884,19 @@ class KatherineAI:
         """Respect provider retry/reset headers, then use exponential backoff."""
         headers = getattr(response, "headers", {}) or {}
         normalized = {str(key).casefold(): value for key, value in headers.items()}
-        for name in (
-            "retry-after",
-            "x-ratelimit-reset-tokens",
-            "x-ratelimit-reset-requests",
-        ):
-            parsed = _retry_header_seconds(normalized.get(name))
-            if parsed is not None:
-                return min(60.0, max(0.5, parsed))
+        retry_after = _retry_header_seconds(normalized.get("retry-after"))
+        if retry_after is not None:
+            return min(60.0, max(0.5, retry_after))
+        reset_delays = [
+            parsed
+            for name in (
+                "x-ratelimit-reset-tokens",
+                "x-ratelimit-reset-requests",
+            )
+            if (parsed := _retry_header_seconds(normalized.get(name))) is not None
+        ]
+        if reset_delays:
+            return min(60.0, max(0.5, max(reset_delays)))
         return min(30.0, 1.5 * (2 ** max(0, int(attempt))))
 
     @staticmethod
