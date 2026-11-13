@@ -1786,6 +1786,7 @@ async def retry_pending_delivery(
     expires_in: int = 600,
 ) -> None:
     """Retry only definitive 429 responses; keep pending text in RAM for at most 10 minutes."""
+    global last_bot_send
     deadline = time.monotonic() + expires_in
     await asyncio.sleep(5)
     async with send_lock:
@@ -1814,7 +1815,6 @@ async def retry_pending_delivery(
                             "created_at": time.time(),
                         })
                     now = time.monotonic()
-                    global last_bot_send
                     last_bot_send = now
                     last_chat_send[f"{source}:{thread_id}"] = now
                     send_history_bot.append(now)
@@ -15383,7 +15383,8 @@ Uso: !enciclopedia <nombre>""",
             f"Proveedor IA: {'activo' if AI_CORE.is_enabled else 'sin credencial'} · {AI_CORE.provider_name if AI_CORE.is_enabled else 'no configurada'} · {AI_CORE.model if AI_CORE.is_enabled else '—'}",
             f"IA proveedor: {int(AI_CORE.metrics.get('ai_provider_requests', 0))} solicitudes · {int(AI_CORE.metrics.get('ai_provider_429', 0))} límites 429 · {int(AI_CORE.metrics.get('ai_provider_retries', 0))} reintentos",
             f"IA tokens: {int(AI_CORE.metrics.get('ai_provider_input_tokens', 0))} entrada · {int(AI_CORE.metrics.get('ai_provider_output_tokens', 0))} salida · {AI_CORE.metrics.get('ai_provider_queue_wait_seconds', 0):.1f} s de espera acumulada",
-            f"Mensajería: {int(metrics['message_send_retries'])} reintentos 429 · {int(metrics['message_send_failures'])} bloques fallidos",
+            f"Mensajería: {int(metrics['message_send_retries'])} reintentos 429 · {int(metrics['message_send_recovered'])} bloques recuperados · {int(metrics['message_send_failures'])} bloques fallidos",
+            f"Pendientes: {int(metrics['message_send_pending_queued'])} bloques encolados · {int(metrics['message_send_pending_expired'])} expirados · {int(metrics['message_send_pending_abandoned'])} abandonados",
             "Prometheus: endpoint /metrics (contadores agregados, sin datos de usuarios ni conversaciones).",
             "Los contadores se reinician cuando Render reinicia el proceso.",
         ])
