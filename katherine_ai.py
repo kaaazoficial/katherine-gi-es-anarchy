@@ -309,7 +309,8 @@ def is_contextual_followup_request(value: str) -> bool:
         or (
             game_followup_subject
             and re.match(r"^(?:que|cual|como|y que|y cual|y como)\b", text)
-        )\n        or re.match(r"^y (?:que|cual|como|con|para|sobre|respecto a)\\b", text)
+)
+        or re.match(r"^y (?:que|cual|como|con|para|sobre|respecto a)\b", text)
     )
 
 
