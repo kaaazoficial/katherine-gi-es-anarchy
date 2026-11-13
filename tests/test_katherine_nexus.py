@@ -1,6 +1,8 @@
 """Tests for Katherine Nexus routing, health reporting and ephemeral events."""
 import pytest
 
+from katherine_ai import AI_COMMAND_CATALOG
+
 from katherine_nexus import (
     cleanup_community_events, extract_message_id, format_source_health,
     interpret_natural_request, parse_command_invocation, toggle_community_participant,
@@ -83,6 +85,16 @@ def test_ambiguous_or_ordinary_chat_is_not_routed(utterance):
 ])
 def test_every_catalog_command_can_be_invoked_with_katherine(utterance, expected):
     assert interpret_natural_request(utterance) == expected
+
+
+def test_every_catalog_entry_is_reachable_by_its_katherine_name():
+    for command in AI_COMMAND_CATALOG:
+        routed = interpret_natural_request(f"Katherine {command}")
+        assert routed == command, (command, routed)
+
+
+def test_unknown_prefixed_command_after_katherine_is_not_executed():
+    assert interpret_natural_request("Katherine !notacommand") is None
 
 
 def test_catalog_routing_does_not_activate_for_bare_name_or_unaddressed_commands():
