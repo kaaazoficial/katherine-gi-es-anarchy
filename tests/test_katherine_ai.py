@@ -132,8 +132,8 @@ def test_chat_analyst_is_disabled_by_default_and_records_only_when_enabled():
 
 def test_ai_context_defaults_are_short_and_bounded():
     ai = KatherineAI()
-    assert ai.memory_ttl == 600
-    assert ai.memory_turns == 6
+    assert ai.memory_ttl == 300
+    assert ai.memory_turns == 2
     assert ai.analyst_ttl == 900
     assert ai.analyst_limit == 60
 
@@ -617,12 +617,7 @@ async def test_unrelated_question_cannot_execute_genshin_tool(monkeypatch):
     result = await ai.assist("qué ofrece el ecosistema comunitario de esta aplicación", "room:user", fake_request)
     assert result["kind"] == "answer"
     assert "anarchy apps" in result["answer"].casefold()
-    assert len(requests) == 2
-    assert "No ejecutes herramientas" in requests[1]["json"]["instructions"]
-    assert "- enciclopedia:" not in requests[1]["json"]["instructions"]
-    assert requests[1]["json"]["input"] == [
-        {"role": "user", "content": "qué ofrece el ecosistema comunitario de esta aplicación"}
-    ]
+    assert len(requests) == 0  # Canonical answer served locally; no API tokens consumed.
 
 
 @pytest.mark.asyncio
@@ -911,8 +906,9 @@ def test_provider_adapts_request_and_token_pacing_from_headers(monkeypatch):
             }
 
     ai._update_provider_limits(LimitedHeadersResponse())
-    assert ai._provider_min_interval == pytest.approx(1.05)
-    assert ai._provider_token_interval == pytest.approx(1.575)
+    state = ai._provider_runtime_state["Groq"]
+    assert state["min_interval"] == pytest.approx(1.05)
+    assert state["token_interval"] == pytest.approx(1.575)
 
 
 def test_provider_detects_daily_quota_and_uses_reset_window(monkeypatch):
@@ -941,7 +937,7 @@ def test_provider_token_pacing_works_when_remaining_request_header_is_absent(mon
             self.headers = {"x-ratelimit-limit-tokens": "6000"}
 
     ai._update_provider_limits(PartialHeadersResponse())
-    assert ai._provider_token_interval == pytest.approx(1.05)
+    assert ai._provider_runtime_state["Groq"]["token_interval"] == pytest.approx(1.05)
 
 
 def chat_completion_payload(result):
@@ -1116,8 +1112,8 @@ def test_ai_status_exposes_primary_and_secondary_without_secrets(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "groq-test-secret")
     ai = KatherineAI()
     status = ai.status()
-    assert "Proveedor principal: Google Gemini" in status
-    assert "Proveedor secundario: Groq (configurado)" in status
+    assert "Principal: Google Gemini" in status
+    assert "• Groq:" in status and "configurado" in status
     assert "gemini-test-secret" not in status
     assert "groq-test-secret" not in status
 
@@ -1155,6 +1151,8 @@ def test_groq_provider_lock_does_not_share_gemini_lock():
 @pytest.mark.asyncio
 async def test_groq_uses_low_reasoning_and_output_cap(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
+    monkeypatch.setenv("KATHERINE_AI_PRIMARY_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
     ai = KatherineAI()
     captured = {}
 
@@ -1299,3 +1297,13 @@ def test_non_genshin_topic_does_not_expose_teyvat_tools():
     assert intent == "conversation"
     assert not tools
     assert classify_request_intent("Katherine, busca información sobre OpenRouter") == "research"
+
+def test_anarchy_apps_semantic_faq_does_not_require_llm():
+    from katherine_ai import resolve_community_faq
+    answer = resolve_community_faq("¿Qué ofrece el ecosistema comunitario de esta aplicación?")
+    assert answer == "Anarchy apps es una red social para crear comunidades, unirse a ellas y hablar con la gente"
+
+
+def test_common_greeting_is_answered_locally():
+    from katherine_ai import resolve_community_faq
+    assert resolve_community_faq("Hola Katherine") == "¡Hola! ¿Qué hacemos hoy?"
