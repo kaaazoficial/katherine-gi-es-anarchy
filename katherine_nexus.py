@@ -7,6 +7,7 @@ from typing import Any
 
 from katherine_topics import is_genshin_related_request
 from katherine_game_queries import resolve_genshin_entity_intent
+from katherine_ai import AI_COMMAND_CATALOG
 
 
 GENSHIN_COMMANDS = frozenset({
@@ -24,6 +25,75 @@ COMMAND_ALIASES = {
     "!buscar": ("!dj", ("buscar",)),
     "!guardian": ("!admin", ()),
 }
+
+
+# Source of truth: the complete catalogue already used by the AI tool validator
+# and !ayuda. This lets every existing command be addressed as "Katherine ...".
+NATURAL_COMMAND_ALIASES = {
+    "menu": "menu",
+    "menú": "menu",
+    "mi-id": "mi-id",
+    "mi_uid": "mi_uid",
+    "investiga": "investigar",
+    "investigacion": "investigar",
+    "investigación": "investigar",
+    "analizarenlace": "enlace",
+    "leerweb": "enlace",
+    "eventos": "evento",
+    "reputacion": "reputacion",
+    "reputación": "reputacion",
+    "top": "top",
+    "volumenlectura": "volumenlectura",
+    "subirvolumenlectura": "subirvolumenlectura",
+    "bajarvolumenlectura": "bajarvolumenlectura",
+}
+NATURAL_COMMAND_NAMES = frozenset(
+    set(AI_COMMAND_CATALOG)
+    | set(NATURAL_COMMAND_ALIASES)
+    | {
+        "asistente", "ia", "investiga", "investigacion", "investigación",
+        "analizarenlace", "leerweb", "eventos", "reputacion", "reputación",
+        "top", "volumenlectura", "subirvolumenlectura",
+        "bajarvolumenlectura", "mi-id", "mi_uid",
+    }
+)
+
+
+def interpret_direct_command(value: str) -> str | None:
+    """Convert 'Katherine <existing command> [args]' into the original command.
+
+    The original handle_command remains responsible for permissions, argument
+    validation, UID checks and side effects. This function only resolves names.
+    """
+    raw = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not raw:
+        return None
+
+    # Also accept "Katherine !command args" and "Katherine -command args".
+    if raw.startswith(("!", "-")):
+        used = raw[0]
+        parsed = parse_command_invocation(raw, used)
+        if not parsed:
+            return None
+        command, args = parsed
+        return " ".join([command.lstrip("!"), *args]).strip()
+
+    first, separator, remainder = raw.partition(" ")
+    command_key = _normalize(first)
+    if command_key not in NATURAL_COMMAND_NAMES:
+        return None
+
+    command = NATURAL_COMMAND_ALIASES.get(command_key, command_key)
+    args = remainder.strip() if separator else ""
+
+    # Apply the exact same aliases as the prefixed command parser.
+    alias = COMMAND_ALIASES.get("!" + command)
+    if alias:
+        command, prepended = alias
+        args = " ".join([*prepended, args]).strip()
+
+    # The command handlers expect their canonical command name without prefix.
+    return " ".join([command.lstrip("!"), args]).strip()
 
 
 def parse_command_invocation(
@@ -118,6 +188,9 @@ def interpret_natural_request(value: str) -> str | None:
     if not text:
         # Mencionar solo el nombre (o "Oye Katherine") no abre menús ni responde.
         return None
+    direct_command = interpret_direct_command(raw)
+    if direct_command:
+        return direct_command
     # Resolve domain, entity type and requested information before generic
     # "qué es/quién es" routes. Strip "Genshin Impact" as a scope qualifier;
     # it is not part of the entity's name.
