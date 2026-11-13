@@ -293,13 +293,11 @@ def is_contextual_followup_request(value: str) -> bool:
     )
     if any(marker in text for marker in topic_change_markers):
         return False
-    if text.startswith((
-        "y ", "entonces ", "en ese caso ", "para ese ", "para esa ",
-        "sobre eso ", "y con ", "y para ", "respecto a eso ",
-    )):
-        return True
     pronoun_reference = re.search(
-        r"\b(?:le|lo|la|su|sus|ese|esa|eso|ellos|ellas)\b", text
+        r"\b(?:ella|ellas|ellos|eso|ese|esa|lo anterior|la anterior|el anterior|"
+        r"la misma|el mismo|a ella|con ella|para ella|sobre ella|de ella|"
+        r"le sirve|le sirven|le conviene|le queda)\b",
+        text,
     )
     game_followup_subject = re.search(
         r"\b(?:arma|armas|build|artefactos?|talentos?|equipos?|materiales|"
@@ -311,7 +309,7 @@ def is_contextual_followup_request(value: str) -> bool:
         or (
             game_followup_subject
             and re.match(r"^(?:que|cual|como|y que|y cual|y como)\b", text)
-        )
+        )\n        or re.match(r"^y (?:que|cual|como|con|para|sobre|respecto a)\\b", text)
     )
 
 
