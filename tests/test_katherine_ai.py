@@ -48,6 +48,21 @@ def test_allowlist_rejects_sensitive_or_malformed_actions(command, args):
     assert validate_ai_tool_call(command, args) is None
 
 
+def test_metrics_command_is_admin_only_and_read_only():
+    from katherine_ai import AI_ADMIN_COMMANDS, AI_PLAN_SAFE_COMMANDS
+    assert validate_ai_tool_call("metricas", "") is None
+    assert validate_ai_tool_call("metricas", "", AI_ADMIN_COMMANDS) == "metricas"
+    assert "metricas" in AI_PLAN_SAFE_COMMANDS
+
+
+def test_conversational_questions_are_not_misclassified_as_actions():
+    from katherine_ai import classify_request_intent
+    assert classify_request_intent("Katherine, ¿qué opinas del nuevo diseño?") == "conversation"
+    assert classify_request_intent("Katherine, explícame cómo funciona una API") == "conversation"
+    assert classify_request_intent("Katherine, investiga las novedades de FastAPI") == "research"
+    assert classify_request_intent("Katherine, pausa la música") == "action"
+
+
 def test_explicit_user_actions_are_available_but_plans_stay_read_only():
     from katherine_ai import (
         AI_ADMIN_COMMANDS, AI_PLAN_SAFE_COMMANDS, AI_PUBLIC_COMMANDS,
