@@ -226,7 +226,7 @@ def interpret_natural_request(value: str) -> str | None:
 def extract_message_id(payload: Any) -> str | None:
     """Extract message ids from common POST response envelopes."""
     if isinstance(payload, dict):
-        for key in ("messageId", "message_id"):
+        for key in ("messageId", "message_id", "id"):
             value = payload.get(key)
             if isinstance(value, (str, int)) and str(value).strip():
                 return str(value)
