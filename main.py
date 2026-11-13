@@ -3794,7 +3794,15 @@ def describe_game(data: Any, fallback: str, folder: str | None = None) -> str:
         if value_text:
             lines.append(f"{label}: {game_excerpt(value_text, cap)}")
 
-    if folder == "enemies":
+    if folder == "geographies":
+        add("Tipo", data.get("type") or data.get("categoryText"))
+        add("Nación", data.get("nation") or data.get("regionName"))
+        add("Arconte", data.get("archon") or data.get("archonName"))
+        add("Elemento asociado", data.get("elementText") or data.get("element"))
+        add("Descripción", data.get("description"), 1100)
+        add("Subzonas", data.get("subareas") or data.get("areas"), 500)
+
+    elif folder == "enemies":
         add("Categoría", data.get("categoryText"))
         add("Tipo", data.get("enemyType") or data.get("monsterType"))
         add("Nombre especial", data.get("specialNames"), 240)
