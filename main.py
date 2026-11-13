@@ -875,7 +875,7 @@ DJ_ROOMS: dict[str, dict] = {}
 DJ_READY_EVENTS: dict[str, asyncio.Event] = {}
 VOICE_CONNECT_LOCKS: dict[str, asyncio.Lock] = {}
 BOT_IDENTITIES: dict[str, dict] = {}
-BOT_SENT_MESSAGES: dict[tuple[str, str], deque] = defaultdict(lambda: deque(maxlen=5000))
+BOT_SENT_MESSAGES: dict[tuple[str, str], deque] = defaultdict(deque)
 TTS_VOICE = SETTINGS.tts_voice
 TTS_VOICE_OPTIONS = {
     "catalina": "es-CL-CatalinaNeural",
@@ -16597,7 +16597,7 @@ async def dispatch(event: dict, source: str):
             if routed_command:
                 routed_event = dict(event)
                 routed_message = dict(message_data)
-                if AI_CORE.is_enabled:
+                if AI_CORE.is_enabled and not routed_command.startswith("eliminarmensajes"):
                     routed_event["_nexus_fallback_command"] = routed_command
                     routed_message["content"] = f"{PREFIX}asistente {incoming_text}"
                     logging.info("[AI] Solicitud explícita enviada al núcleo conversacional")
