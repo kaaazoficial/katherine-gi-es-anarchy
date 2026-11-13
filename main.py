@@ -1778,6 +1778,95 @@ async def delete_katherine_messages(thread_id: str, source: str) -> dict[str, in
     return {"attempted": len(tracked), "deleted": deleted, "failed": failed}
 
 
+async def retry_pending_delivery(
+    thread_id: str,
+    source: str,
+    pending_bodies: list[dict],
+    *,
+    expires_in: int = 600,
+) -> None:
+    """Retry only definitive 429 responses; keep pending text in RAM for at most 10 minutes."""
+    deadline = time.monotonic() + expires_in
+    await asyncio.sleep(5)
+    async with send_lock:
+        for body in pending_bodies:
+            delivered = False
+            while time.monotonic() < deadline and not delivered:
+                result = await api(
+                    "POST",
+                    f"/threads/{thread_id}/messages",
+                    source,
+                    body,
+                )
+                if result.get("ok"):
+                    delivered = True
+                    metrics["message_send_recovered"] += 1
+                    metrics["messages_sent"] += 1
+                    sent_message_id = extract_message_id(result.get("data"))
+                    if sent_message_id:
+                        key = (str(source), str(thread_id))
+                        history = BOT_SENT_MESSAGES[key]
+                        cutoff = time.time() - BOT_SENT_MESSAGE_TTL
+                        while history and float(history[0].get("created_at", 0)) < cutoff:
+                            history.popleft()
+                        history.append({
+                            "message_id": sent_message_id,
+                            "created_at": time.time(),
+                        })
+                    now = time.monotonic()
+                    global last_bot_send
+                    last_bot_send = now
+                    last_chat_send[f"{source}:{thread_id}"] = now
+                    send_history_bot.append(now)
+                    send_history_chat[f"{source}:{thread_id}"].append(now)
+                    break
+                if result.get("status") != 429:
+                    metrics["message_send_pending_abandoned"] += 1
+                    logging.error(
+                        "[ANARCHY] Se detuvo la recuperación de un bloque pendiente (HTTP %s).",
+                        result.get("status"),
+                    )
+                    return
+                metrics["message_send_429"] += 1
+                retry_value = result.get("retry_after")
+                try:
+                    delay = max(0.5, min(float(retry_value), 60.0))
+                except (TypeError, ValueError):
+                    delay = 2.0
+                metrics["message_send_retries"] += 1
+                metrics["message_send_retry_wait_seconds"] += delay
+                await asyncio.sleep(min(delay, max(0.0, deadline - time.monotonic())))
+            if not delivered:
+                metrics["message_send_pending_expired"] += 1
+                logging.error(
+                    "[ANARCHY] Un bloque pendiente expiró sin poder entregarse; no se guardó en disco."
+                )
+                return
+
+
+def schedule_pending_delivery(
+    thread_id: str,
+    source: str,
+    pending_bodies: list[dict],
+) -> bool:
+    """Schedule a bounded, process-local retry task for blocks rejected with HTTP 429."""
+    active = sum(
+        1 for task in background_tasks
+        if not task.done() and task.get_name().startswith("katherine-pending-delivery:")
+    )
+    if active >= 100 or not pending_bodies:
+        metrics["message_send_pending_rejected"] += 1
+        return False
+    task = asyncio.create_task(
+        retry_pending_delivery(thread_id, source, pending_bodies),
+        name=f"katherine-pending-delivery:{source}:{thread_id}",
+    )
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
+    metrics["message_send_pending_queued"] += len(pending_bodies)
+    return True
+
+
 async def send_message(
     thread_id: str,
     content: str,
@@ -1917,6 +2006,16 @@ async def send_message(
                 send_history_chat[f"{source}:{thread_id}"].append(now)
             else:
                 metrics["message_send_failures"] += 1
+                if result.get("status") == 429:
+                    pending_bodies = []
+                    for pending_index in range(index, len(parts)):
+                        pending_body = {"content": parts[pending_index]}
+                        if reply_id and pending_index == 0:
+                            pending_body["replyMessageId"] = str(reply_id)
+                        if buttons and pending_index == len(parts) - 1:
+                            pending_body["buttons"] = buttons
+                        pending_bodies.append(pending_body)
+                    schedule_pending_delivery(thread_id, source, pending_bodies)
                 if is_not_in_chat_response(result.get("status"), result.get("data")):
                     logging.info(
                         "[ANARCHY] Envío omitido: Katherine ya no pertenece al chat."
