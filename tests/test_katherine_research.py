@@ -234,3 +234,25 @@ def test_source_context_includes_eight_numbered_sources():
     context = research.build_source_context("test", sources)
     assert "FUENTE [8]" in context
     assert "source8.example" in context
+
+
+def test_parse_research_modes_and_preserve_subject():
+    assert research.parse_research_mode("comparar: energía nuclear y solar") == (
+        "comparar", "energía nuclear y solar"
+    )
+    assert research.parse_research_mode("verificar: esta afirmación es cierta") == (
+        "verificar", "esta afirmación es cierta"
+    )
+    assert research.parse_research_mode("cronología de la exploración espacial") == (
+        "cronologia", "de la exploración espacial"
+    )
+    assert research.parse_research_mode("informe: inteligencia artificial") == (
+        "informe", "inteligencia artificial"
+    )
+    assert research.parse_research_mode("cambios en Chile") == (
+        "general", "cambios en Chile"
+    )
+
+
+def test_research_mode_parser_does_not_accept_empty_mode_subject():
+    assert research.parse_research_mode("comparar:") == ("general", "comparar:")
