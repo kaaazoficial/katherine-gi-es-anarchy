@@ -259,7 +259,7 @@ def resolve_community_faq(question: str) -> str | None:
 def _normalize_ai_request(value: str) -> str:
     """Normalize an addressed utterance for intent and clarification checks."""
     text = normalize_topic_text(value)
-    return re.sub(r"^(?:oye )?katherine\\s+", "", text).strip()
+    return re.sub(r"^(?:oye )?katherine\s+", "", text).strip()
 
 
 def clarification_for_unspecified_topic(value: str) -> str | None:
@@ -299,18 +299,18 @@ def is_contextual_followup_request(value: str) -> bool:
     )):
         return True
     pronoun_reference = re.search(
-        r"\\b(?:le|lo|la|su|sus|ese|esa|eso|ellos|ellas)\\b", text
+        r"\b(?:le|lo|la|su|sus|ese|esa|eso|ellos|ellas)\b", text
     )
     game_followup_subject = re.search(
-        r"\\b(?:arma|armas|build|artefactos?|talentos?|equipos?|materiales|"
-        r"rotacion|constelacion|elemento|personaje|habilidad|ascension)\\b",
+        r"\b(?:arma|armas|build|artefactos?|talentos?|equipos?|materiales|"
+        r"rotacion|constelacion|elemento|personaje|habilidad|ascension)\b",
         text,
     )
     return bool(
         (pronoun_reference and len(text.split()) <= 18)
         or (
             game_followup_subject
-            and re.match(r"^(?:que|cual|como|y que|y cual|y como)\\b", text)
+            and re.match(r"^(?:que|cual|como|y que|y cual|y como)\b", text)
         )
     )
 
@@ -452,7 +452,7 @@ def classify_request_intent(
     )
     action_count = sum(
         1 for marker in action_markers
-        if re.search(rf"\\b{re.escape(marker)}\\b", text)
+        if re.search(rf"\b{re.escape(marker)}\b", text)
     )
     connectors = (" y ", " despues ", " luego ", " tambien ", " ademas ")
     has_multiple_actions = action_count >= 2 and any(
