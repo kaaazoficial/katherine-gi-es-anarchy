@@ -503,6 +503,8 @@ async def search_internet_archive(
             "snippet": excerpt,
             "excerpt": excerpt or title,
             "source_type": "internet_archive",
+            "year": year,
+            "authors": creator,
             "attribution": "Internet Archive, catálogo y metadatos de materiales archivados; disponibilidad y derechos dependen de cada ítem.",
         })
     return results
@@ -576,6 +578,8 @@ async def search_openalex(
                 "snippet": excerpt,
                 "excerpt": excerpt or f"Publicación académica, {year}.",
                 "source_type": "openalex",
+                "year": year,
+                "authors": ", ".join(authors),
                 "attribution": "OpenAlex, metadatos bibliográficos agregados; verifica el artículo original y sus condiciones de acceso.",
             })
     return results
@@ -640,6 +644,9 @@ async def search_crossref(
             "snippet": excerpt,
             "excerpt": excerpt or f"Registro DOI de Crossref, {year}.",
             "source_type": "crossref",
+            "year": year,
+            "authors": ", ".join(authors),
+            "publication_date": "-".join(date_parts[:3]) if date_parts else "",
             "attribution": "Crossref, metadatos DOI; el DOI puede dirigir a contenido con acceso restringido.",
         })
     return results
@@ -684,6 +691,7 @@ async def search_nasa(
             "snippet": excerpt,
             "excerpt": excerpt or title,
             "source_type": "nasa_library",
+            "publication_date": date_created,
             "attribution": "NASA Image and Video Library; consulta los créditos y condiciones de uso indicados en cada recurso.",
         })
     return results
@@ -751,6 +759,7 @@ async def search_musicbrainz(
             "snippet": _plain(details, 900),
             "excerpt": _plain(details, 1100) or title,
             "source_type": "musicbrainz",
+            "publication_date": str(item.get("first-release-date") or ""),
             "attribution": "MusicBrainz, base de datos colaborativa de metadatos musicales; no proporciona por sí sola derechos de reproducción.",
         })
     return results
