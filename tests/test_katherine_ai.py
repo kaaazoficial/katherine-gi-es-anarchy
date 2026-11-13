@@ -504,7 +504,7 @@ async def test_persistent_domain_drift_uses_neutral_recovery_not_teyvat_rejectio
         })),
         FakeResponse(response_payload({
             "kind": "answer",
-            "answer": "La consulta continúa sin tema suficiente.",
+            "answer": "La consulta continúa sin tema suficiente en Genshin Impact y Teyvat.",
             "command": "", "args": "",
         })),
     ]
