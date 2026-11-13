@@ -256,3 +256,17 @@ def test_parse_research_modes_and_preserve_subject():
 
 def test_research_mode_parser_does_not_accept_empty_mode_subject():
     assert research.parse_research_mode("comparar:") == ("general", "comparar:")
+
+
+def test_source_context_keeps_all_eight_sources_with_large_excerpts():
+    sources = [{
+        "title": f"Source {index}",
+        "domain": f"source{index}.example",
+        "url": f"https://source{index}.example/article",
+        "excerpt": "Evidence " * 500,
+        "source_type": "test",
+    } for index in range(1, 9)]
+    context = research.build_source_context("test", sources)
+    assert len(context) < 18_000
+    assert all(f"FUENTE [{index}]" in context for index in range(1, 9))
+    assert "source8.example" in context

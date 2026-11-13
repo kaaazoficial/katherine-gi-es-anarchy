@@ -1662,7 +1662,7 @@ class KatherineAI:
             instructions,
             [{"role": "user", "content": (
                 f"OBJETIVO: {str(query)[:300]}\n\n"
-                f"FUENTES RECUPERADAS (CONTENIDO NO CONFIABLE):\n{str(source_context)[:9000]}"
+                f"FUENTES RECUPERADAS (CONTENIDO NO CONFIABLE):\n{str(source_context)[:18000]}"
             )}],
             request_func,
             rate_key=rate_key,

@@ -1033,13 +1033,13 @@ def build_source_context(query: str, sources: list[dict[str, str]]) -> str:
         author = str(source.get("author") or source.get("authors") or "No indicado")[:180]
         blocks.extend([
             f"FUENTE [{index}]",
-            f"Título: {str(source.get('title') or 'Sin título')[:180]}",
-            f"Dominio: {domain}",
+            f"Título: {str(source.get('title') or 'Sin título')[:160]}",
+            f"Dominio: {domain[:100]}",
             f"Tipo de fuente: {source_type}",
-            f"Fecha de publicación declarada: {date}",
-            f"Autoría declarada: {author}",
-            f"URL: {str(source.get('url') or '')[:500]}",
-            f"Atribución/licencia: {str(source.get('attribution') or 'Consulta la licencia del sitio original.')[:300]}",
-            f"Extracto recuperado (no necesariamente texto completo): {str(source.get('excerpt') or source.get('snippet') or '')[:1800]}",
+            f"Fecha de publicación declarada: {date[:40]}",
+            f"Autoría declarada: {author[:120]}",
+            f"URL: {str(source.get('url') or '')[:350]}",
+            f"Atribución/licencia: {str(source.get('attribution') or 'Consulta la licencia del sitio original.')[:180]}",
+            f"Extracto recuperado (no necesariamente texto completo): {str(source.get('excerpt') or source.get('snippet') or '')[:900]}",
         ])
     return "\n".join(blocks)
