@@ -10,7 +10,7 @@ import os
 import re
 import time
 from email.utils import parsedate_to_datetime
-from collections import deque
+from collections import defaultdict, deque
 from typing import Any, Awaitable, Callable
 
 from katherine_topics import is_genshin_related_request, normalize_topic_text
@@ -696,6 +696,11 @@ class KatherineAI:
         self._semaphore: asyncio.Semaphore | None = None
         self._provider_lock = asyncio.Lock()
         self._provider_last_request = 0.0
+        self._provider_min_interval = 0.0
+        self._provider_token_interval = 0.0
+        self._provider_cooldown_until = 0.0
+        self._daily_quota_reset_at = 0.0
+        self.metrics: dict[str, float] = defaultdict(float)
 
     @property
     def api_key(self) -> str:
@@ -886,7 +891,7 @@ class KatherineAI:
         normalized = {str(key).casefold(): value for key, value in headers.items()}
         retry_after = _retry_header_seconds(normalized.get("retry-after"))
         if retry_after is not None:
-            return min(60.0, max(0.5, retry_after))
+            return min(3600.0, max(0.5, retry_after))
         reset_delays = [
             parsed
             for name in (
@@ -896,8 +901,110 @@ class KatherineAI:
             if (parsed := _retry_header_seconds(normalized.get(name))) is not None
         ]
         if reset_delays:
-            return min(60.0, max(0.5, max(reset_delays)))
+            return min(3600.0, max(0.5, max(reset_delays)))
         return min(30.0, 1.5 * (2 ** max(0, int(attempt))))
+
+    @staticmethod
+    def _daily_quota_reset_delay(response: Any) -> float | None:
+        """Return a reset delay only when a 429 clearly indicates a daily quota."""
+        headers = getattr(response, "headers", {}) or {}
+        normalized = {str(key).casefold(): value for key, value in headers.items()}
+        try:
+            payload = response.json()
+        except Exception:
+            payload = {}
+        error = payload.get("error", {}) if isinstance(payload, dict) else {}
+        if not isinstance(error, dict):
+            error = {}
+        detail = " ".join(
+            str(error.get(key) or "")
+            for key in ("code", "type", "message")
+        ).casefold()
+        daily_markers = (
+            "per day", "per-day", "daily limit", "daily quota",
+            "tokens per day", "requests per day", "day limit",
+        )
+        resets = [
+            parsed
+            for name in (
+                "x-ratelimit-reset-tokens",
+                "x-ratelimit-reset-requests",
+            )
+            if (parsed := _retry_header_seconds(normalized.get(name))) is not None
+        ]
+        if any(marker in detail for marker in daily_markers):
+            return min(7 * 24 * 3600.0, max(resets, default=3600.0))
+        # A reset longer than an hour is not a useful short-window retry.
+        if max(resets, default=0.0) > 3600.0:
+            return min(7 * 24 * 3600.0, max(resets))
+        return None
+
+    def _update_provider_limits(self, response: Any) -> None:
+        """Adapt request pacing using aggregate rate-limit headers, when present."""
+        if not self.is_groq:
+            return
+        headers = getattr(response, "headers", {}) or {}
+        normalized = {str(key).casefold(): value for key, value in headers.items()}
+        try:
+            request_limit = float(normalized.get("x-ratelimit-limit-requests") or 0)
+        except (TypeError, ValueError):
+            request_limit = 0.0
+        if request_limit > 0:
+            self._provider_min_interval = max(
+                0.1, min(10.0, 60.0 / request_limit * 1.05)
+            )
+        else:
+            self._provider_min_interval = self._provider_min_interval or 2.1
+
+        try:
+            token_limit = float(normalized.get("x-ratelimit-limit-tokens") or 0)
+            remaining_requests = float(normalized.get("x-ratelimit-remaining-requests"))
+        except (TypeError, ValueError):
+            token_limit = 0.0
+            remaining_requests = -1.0
+        try:
+            remaining_tokens = float(normalized.get("x-ratelimit-remaining-tokens"))
+        except (TypeError, ValueError):
+            remaining_tokens = -1.0
+
+        if token_limit > 0:
+            try:
+                payload = response.json()
+            except Exception:
+                payload = {}
+            usage = payload.get("usage", {}) if isinstance(payload, dict) else {}
+            if isinstance(usage, dict):
+                used = usage.get("total_tokens")
+                if used is None:
+                    used = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+                    used += int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+                try:
+                    used_tokens = max(0, int(used or 0))
+                except (TypeError, ValueError):
+                    used_tokens = 0
+                if used_tokens:
+                    self._provider_token_interval = max(
+                        0.1, min(10.0, 60.0 * used_tokens / token_limit * 1.05)
+                    )
+
+        if remaining_requests == 0 or remaining_tokens == 0:
+            reset_delays = [
+                parsed
+                for name in (
+                    "x-ratelimit-reset-requests",
+                    "x-ratelimit-reset-tokens",
+                )
+                if (parsed := _retry_header_seconds(normalized.get(name))) is not None
+            ]
+            if reset_delays:
+                reset = max(reset_delays)
+                if reset > 3600:
+                    self._daily_quota_reset_at = time.monotonic() + reset
+                else:
+                    self._provider_cooldown_until = max(
+                        self._provider_cooldown_until,
+                        time.monotonic() + reset,
+                    )
 
     @staticmethod
     def _extract_output_text(payload: dict[str, Any]) -> str:
@@ -970,15 +1077,29 @@ class KatherineAI:
         if not self.is_groq:
             body["store"] = False
 
+        queued_at = time.monotonic()
         async with self._semaphore:
             async with self._provider_lock:
-                # The configured Groq model has a published 30 RPM base tier.
-                # Queue requests instead of rejecting rapid follow-ups.
-                min_interval = 2.1 if self.is_groq else 0.65
+                self.metrics["ai_provider_queue_wait_seconds"] += max(
+                    0.0, time.monotonic() - queued_at
+                )
+                if self._daily_quota_reset_at > time.monotonic():
+                    raise RuntimeError("IA_CUOTA_DIARIA_AGOTADA")
+
+                base_interval = 2.1 if self.is_groq else 0.65
                 response = None
                 max_attempts = 4
                 for attempt in range(max_attempts):
-                    spacing = min_interval - (time.monotonic() - self._provider_last_request)
+                    now = time.monotonic()
+                    min_interval = max(
+                        base_interval,
+                        self._provider_min_interval,
+                        self._provider_token_interval,
+                    )
+                    spacing = max(
+                        min_interval - (now - self._provider_last_request),
+                        self._provider_cooldown_until - now,
+                    )
                     if spacing > 0:
                         await asyncio.sleep(spacing)
                     response = await request_func(
@@ -993,11 +1114,24 @@ class KatherineAI:
                         timeout=35,
                     )
                     self._provider_last_request = time.monotonic()
+                    self.metrics["ai_provider_requests"] += 1
+                    self._update_provider_limits(response)
                     if getattr(response, "status_code", None) != 429:
                         break
+                    self.metrics["ai_provider_429"] += 1
+                    daily_reset = self._daily_quota_reset_delay(response)
+                    if daily_reset is not None:
+                        self._daily_quota_reset_at = time.monotonic() + daily_reset
+                        self.metrics["ai_provider_daily_quota_hits"] += 1
+                        logging.warning(
+                            "[AI] %s alcanzó una cuota diaria; no se harán reintentos prematuros.",
+                            self.provider_name,
+                        )
+                        raise RuntimeError("IA_CUOTA_DIARIA_AGOTADA")
                     if attempt + 1 >= max_attempts:
                         break
                     delay = self._provider_retry_delay(response, attempt)
+                    self.metrics["ai_provider_retries"] += 1
                     logging.warning(
                         "[AI] %s HTTP 429; reintento %s/%s en %.2f s.",
                         self.provider_name, attempt + 1, max_attempts - 1, delay,
@@ -1032,6 +1166,18 @@ class KatherineAI:
             payload = response.json()
         except Exception as exc:
             raise RuntimeError("El proveedor IA devolvió una respuesta no JSON.") from exc
+        usage = payload.get("usage", {})
+        if isinstance(usage, dict):
+            for key, aliases in (
+                ("ai_provider_input_tokens", ("input_tokens", "prompt_tokens")),
+                ("ai_provider_output_tokens", ("output_tokens", "completion_tokens")),
+            ):
+                value = next((usage.get(alias) for alias in aliases if usage.get(alias) is not None), 0)
+                try:
+                    self.metrics[key] += max(0, int(value or 0))
+                except (TypeError, ValueError):
+                    pass
+        self.metrics["ai_provider_responses_completed"] += 1
         raw = self._extract_output_text(payload)
         if not raw:
             raise RuntimeError("El proveedor IA no devolvió texto de salida.")
@@ -1140,6 +1286,12 @@ class KatherineAI:
             reason = str(exc)
             if reason == "IA_NO_CONFIGURADA":
                 answer = "La inteligencia artificial no está configurada todavía."
+            elif reason == "IA_CUOTA_DIARIA_AGOTADA":
+                answer = (
+                    "El proveedor de IA alcanzó su cuota diaria disponible. "
+                    "La conexión se reintentará cuando se restablezca el límite; "
+                    "los comandos clásicos siguen disponibles."
+                )
             else:
                 answer = "No pude completar la consulta de IA. Los comandos clásicos siguen disponibles."
             self._append_history(key, "user", text)
