@@ -239,23 +239,91 @@ async def fetch_public_page(url: str, request_func: RequestFunc) -> dict[str, st
     }
 
 
+async def search_fandom_wikis(
+    query: str, request_func: RequestFunc, limit: int = 2
+) -> list[dict[str, str]]:
+    """Search relevant Fandom communities through their standard MediaWiki API.
+
+    Fandom's core Action API is used instead of undocumented Fandom-only
+    endpoints. Each wiki is discovered through public search; no wiki hostname
+    is guessed from the user's query.
+    """
+    search_text = re.sub(r"\s+", " ", str(query or "")).strip()
+    if not 3 <= len(search_text) <= 160:
+        return []
+    response = await request_func(
+        "GET", SEARCH_URL,
+        params={"q": f"site:fandom.com {search_text}"},
+        headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"},
+        timeout=14, follow_redirects=False,
+    )
+    if not getattr(response, "is_success", False):
+        return []
+    candidates = parse_search_results(str(getattr(response, "text", "") or ""), limit=8)
+    results: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        parsed = urlsplit(candidate["url"])
+        host = (parsed.hostname or "").casefold()
+        if not host.endswith(".fandom.com") or host == "fandom.com" or host in seen:
+            continue
+        seen.add(host)
+        api_url = f"https://{host}/api.php"
+        try:
+            api_response = await request_func(
+                "GET", api_url,
+                params={
+                    "action": "query",
+                    "list": "search",
+                    "srsearch": search_text,
+                    "srnamespace": 0,
+                    "srlimit": 3,
+                    "format": "json",
+                    "utf8": 1,
+                },
+                headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+                timeout=12, follow_redirects=False,
+            )
+            if not getattr(api_response, "is_success", False):
+                continue
+            payload = api_response.json()
+            hits = payload.get("query", {}).get("search", []) if isinstance(payload, dict) else []
+            if not isinstance(hits, list) or not hits:
+                continue
+            for hit in hits[:2]:
+                title = _plain(str(hit.get("title") or ""), 180)
+                page_url = f"https://{host}/wiki/{quote(title.replace(' ', '_'))}"
+                excerpt = _plain(str(hit.get("snippet") or ""), 1200)
+                if not title:
+                    continue
+                results.append({
+                    "title": title,
+                    "url": page_url,
+                    "domain": host,
+                    "snippet": excerpt,
+                    "excerpt": excerpt,
+                    "source_type": "fandom_mediawiki",
+                    "attribution": "Fandom community wiki; verify the individual wiki's license and editorial quality.",
+                })
+        except Exception:
+            continue
+        if len(results) >= max(1, min(4, int(limit))):
+            break
+    return results[:max(1, min(4, int(limit)))]
+
+
 async def search_web(
     query: str, request_func: RequestFunc, limit: int = 5
 ) -> list[dict[str, str]]:
-    """Search public web pages and enrich up to three independent domains."""
+    """Search the public web and add relevant Fandom wiki results when useful."""
     search_text = re.sub(r"\s+", " ", str(query or "")).strip()
     if not 3 <= len(search_text) <= 160:
         raise ValueError("La consulta debe contener entre 3 y 160 caracteres.")
     response = await request_func(
-        "GET",
-        SEARCH_URL,
+        "GET", SEARCH_URL,
         params={"q": search_text},
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml",
-        },
-        timeout=14,
-        follow_redirects=False,
+        headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"},
+        timeout=14, follow_redirects=False,
     )
     if not getattr(response, "is_success", False):
         status = getattr(response, "status_code", "desconocido")
@@ -263,19 +331,36 @@ async def search_web(
     sources = parse_search_results(
         str(getattr(response, "text", "") or ""), limit=max(3, min(8, limit))
     )
-    if not sources:
+    fandom_task = search_fandom_wikis(search_text, request_func, limit=2)
+    fandom_sources = await fandom_task
+    combined = []
+    seen_domains = set()
+    for source in [*fandom_sources, *sources]:
+        domain = (source.get("domain") or "").casefold()
+        if not domain or domain in seen_domains:
+            continue
+        seen_domains.add(domain)
+        combined.append(source)
+    if not combined:
         return []
+
     async def enrich(source: dict[str, str]) -> dict[str, str]:
+        if source.get("source_type") == "fandom_mediawiki":
+            return source
         try:
             page = await fetch_public_page(source["url"], request_func)
         except Exception:
             source["excerpt"] = source.get("snippet", "")
             return source
         page["snippet"] = source.get("snippet", "")
+        page["source_type"] = "public_web"
         return page
 
-    enriched = await asyncio.gather(*(enrich(item) for item in sources[:3]))
-    return [item for item in enriched if item.get("excerpt") or item.get("snippet")][:3]
+    enriched = await asyncio.gather(*(enrich(item) for item in combined[:max(3, min(5, limit))]))
+    return [
+        item for item in enriched
+        if item.get("excerpt") or item.get("snippet")
+    ][:max(3, min(5, limit))]
 
 
 def build_source_context(query: str, sources: list[dict[str, str]]) -> str:
@@ -286,6 +371,9 @@ def build_source_context(query: str, sources: list[dict[str, str]]) -> str:
             f"FUENTE [{index}]",
             f"Título: {str(source.get('title') or 'Sin título')[:180]}",
             f"Dominio: {str(source.get('domain') or '')[:120]}",
+            f"Tipo: {str(source.get('source_type') or 'public_web')[:40]}",
+            f"URL: {str(source.get('url') or '')[:500]}",
+            f"Atribución/licencia: {str(source.get('attribution') or 'Consulta la licencia del sitio original.')[:300]}",
             f"Extracto: {str(source.get('excerpt') or source.get('snippet') or '')[:2600]}",
         ])
     return "\n".join(blocks)
