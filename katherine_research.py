@@ -886,7 +886,15 @@ async def search_web(
             ("crossref", search_crossref(search_text, request_func, limit=2)),
         ])
     if intent["nasa"]:
-        jobs.append(("nasa", search_nasa(search_text, request_func, limit=2)))
+        jobs.extend([
+            ("nasa", search_nasa(search_text, request_func, limit=2)),
+            ("nasa_web", search_scoped_site(
+                search_text, "nasa.gov", request_func,
+                source_type="nasa_official",
+                attribution="NASA, sitio oficial de la agencia espacial estadounidense; verifica fecha, misión y contexto de cada publicación.",
+                limit=2,
+            )),
+        ])
     if intent["music"]:
         jobs.extend([
             ("musicbrainz", search_musicbrainz(search_text, request_func, limit=2)),
@@ -925,7 +933,7 @@ async def search_web(
     if intent["genshin"]:
         priority.extend(["keqingmains", "hoyolab", "fandom"])
     if intent["nasa"]:
-        priority.append("nasa")
+        priority.extend(["nasa_web", "nasa"])
     if intent["music"]:
         priority.extend(["musicbrainz", "jamendo"])
     if intent["academic"]:
