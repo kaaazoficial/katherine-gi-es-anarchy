@@ -272,6 +272,11 @@ def clarification_for_unspecified_topic(value: str) -> str | None:
         r"^(?:podrias|puedes) ayudarme (?:a|para) (?:saber|aprender|conocer) (?:de|sobre) (?:un|algun) tema$",
         r"^(?:quiero|quisiera) aprender (?:de|sobre) (?:un|algun) tema$",
         r"^(?:tengo|me surgio) (?:una )?duda (?:sobre|de) (?:un|algun) tema$",
+        r"^(?:necesito ayuda|quiero ayuda|ayudame|ayuda por favor)$",
+        r"^(?:puedes|podrias) ayudarme$",
+        r"^(?:me puedes|me podrias) ayudar$",
+        r"^(?:necesito|quiero) saber algo$",
+        r"^(?:tengo) (?:una )?(?:duda|pregunta)$",
     )
     if any(re.fullmatch(pattern, text) for pattern in patterns):
         return (
