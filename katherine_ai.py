@@ -233,10 +233,10 @@ ACTION_SCHEMA = {
 def sanitize_ai_trace_text(value: Any, limit: int = 2400) -> str:
     """Redact obvious credentials and personal identifiers before temporary diagnostics."""
     text = str(value or "")
-    text = re.sub(r"(?i)\b(?:gsk_[A-Za-z0-9_-]{12,}|sk-proj-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{20,})\\b", "[secreto]", text)
-    text = re.sub(r"(?i)\bBearer\\s+[^\\s,;]+", "Bearer [secreto]", text)
-    text = re.sub(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b", "[correo]", text)
-    text = re.sub(r"(?<![\w])@[A-Za-z0-9_.-]{2,64}\\b", "@[usuario]", text)
+    text = re.sub(r"(?i)\b(?:gsk_[A-Za-z0-9_-]{12,}|sk-proj-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{20,})\b", "[secreto]", text)
+    text = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [secreto]", text)
+    text = re.sub(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", "[correo]", text)
+    text = re.sub(r"(?<![\w])@[A-Za-z0-9_.-]{2,64}\b", "@[usuario]", text)
     text = re.sub(r"(?<!\w)\d{7,}(?!\w)", "[identificador]", text)
     text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
@@ -1171,7 +1171,7 @@ class KatherineAI:
                         fallback_body["text"] = {"format": {"type": "json_object"}}
                         fallback_body["instructions"] = (
                             prompt_instructions
-                            + "\\n\\nDevuelve solo JSON válido sin Markdown. "
+                            + "\n\nDevuelve solo JSON válido sin Markdown. "
                             + "Incluye kind, answer, command, args y steps. "
                             + "steps debe ser una lista de cero a tres objetos con command y args."
                         )
