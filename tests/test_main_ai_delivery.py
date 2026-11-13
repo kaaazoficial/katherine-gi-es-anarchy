@@ -415,3 +415,16 @@ async def test_avatarbot_remains_uid_protected(monkeypatch):
     }
     await bot_main.handle_command(event, "developer")
     assert sent and "No tienes permiso" in sent[0]
+
+
+@pytest.mark.asyncio
+async def test_research_source_links_are_preserved_only_when_explicitly_allowed(monkeypatch):
+    safe_url = "https://example.org/article"
+    safe = bot_main.sanitize_chat_text(f"Fuente [Abrir fuente]({safe_url})", allow_safe_links=True)
+    assert safe == f"Fuente [Abrir fuente]({safe_url})"
+    ordinary = bot_main.sanitize_chat_text(f"Visita [Abrir fuente]({safe_url})")
+    assert "https://" not in ordinary
+    unsafe = bot_main.sanitize_chat_text(
+        "Fuente [interna](https://127.0.0.1/admin)", allow_safe_links=True
+    )
+    assert "127.0.0.1" not in unsafe
