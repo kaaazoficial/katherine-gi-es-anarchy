@@ -611,3 +611,36 @@ def test_structured_ai_schema_requires_bounded_steps_array():
     assert ACTION_SCHEMA["properties"]["steps"]["items"]["required"] == [
         "command", "args"
     ]
+
+
+@pytest.mark.asyncio
+async def test_provider_retries_one_transient_429(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+    calls = []
+    class RateLimited(FakeResponse):
+        def __init__(self):
+            super().__init__({"error": {"message": "rate limited"}}, status_code=429)
+            self.headers = {"Retry-After": "0.5"}
+    async def fake_request(method, url, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return RateLimited()
+        return FakeResponse(response_payload({
+            "kind": "answer", "answer": "OK", "command": "", "args": ""
+        }))
+    assert await ai.test_connection(fake_request) == "OK"
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_provider_does_not_retry_non_429_errors(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+    calls = []
+    async def fake_request(method, url, **kwargs):
+        calls.append(1)
+        return FakeResponse({"error": {"message": "bad request"}}, status_code=400)
+    with pytest.raises(RuntimeError, match="HTTP 400"):
+        await ai.test_connection(fake_request)
+    assert len(calls) == 1
