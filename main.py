@@ -3654,12 +3654,43 @@ async def download_dj_audio(url: str, file_extension: str | None = None) -> Path
                             )
                             locked_hosts.add(current_host)
                         pinned_url, pinned_headers, pinned_extensions = await pin_public_https_url(current_url)
+                        host_state = SOURCE_HEALTH.setdefault(current_host, {
+                            "requests": 0, "successes": 0, "failures": 0,
+                            "last_status": None, "last_latency_ms": 0.0,
+                            "last_success_at": None, "last_error": None,
+                            "consecutive_failures": 0, "circuit_open_until": 0.0,
+                            "last_seen_at": time.time(),
+                        })
+                        if float(host_state.get("circuit_open_until", 0) or 0) > time.time():
+                            metrics["external_circuit_open"] += 1
+                            raise RuntimeError("La fuente musical está temporalmente aislada por fallos consecutivos.")
                         request = client.build_request(
                             "GET", pinned_url,
                             headers={**headers, **pinned_headers},
                             extensions=pinned_extensions,
                         )
+                        request_started = time.perf_counter()
                         response = await client.send(request, stream=True, follow_redirects=False)
+                        host_state["requests"] = int(host_state.get("requests", 0)) + 1
+                        host_state["last_seen_at"] = time.time()
+                        host_state["last_status"] = response.status_code
+                        host_state["last_latency_ms"] = (time.perf_counter() - request_started) * 1000
+                        if response.is_success or response.status_code in (301, 302, 303, 307, 308):
+                            host_state["successes"] = int(host_state.get("successes", 0)) + 1
+                            host_state["last_success_at"] = time.time()
+                            host_state["last_error"] = None
+                            host_state["consecutive_failures"] = 0
+                            host_state["circuit_open_until"] = 0.0
+                        else:
+                            host_state["failures"] = int(host_state.get("failures", 0)) + 1
+                            host_state["last_error"] = f"HTTP {response.status_code}"
+                            if response.status_code in (429, 500, 502, 503, 504):
+                                host_state["consecutive_failures"] = int(host_state.get("consecutive_failures", 0)) + 1
+                                if host_state["consecutive_failures"] >= 6:
+                                    host_state["circuit_open_until"] = time.time() + 30
+                                    logging.warning("[DJ] Circuit breaker abierto para %s durante 30 s", current_host)
+                            else:
+                                host_state["consecutive_failures"] = 0
                         if response.status_code not in (301, 302, 303, 307, 308):
                             break
                         location = response.headers.get("location")
