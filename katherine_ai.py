@@ -431,8 +431,6 @@ def classify_request_intent(
         "analiza este enlace", "resume este enlace", "lee este articulo",
         "consulta fuentes", "que ha pasado recientemente",
     )
-    if any(marker in text for marker in research_markers):
-        return "research"
     conversational_question_markers = (
         "que opinas", "que piensas", "por que", "explicame", "explica ",
         "cuentame", "hablame de", "que significa", "como funciona",
@@ -460,6 +458,8 @@ def classify_request_intent(
     )
     if has_multiple_actions:
         return "multi_action"
+    if any(marker in text for marker in research_markers):
+        return "research"
     if action_count:
         return "action"
     return "conversation"
