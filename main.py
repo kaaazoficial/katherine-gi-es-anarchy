@@ -8320,7 +8320,7 @@ async def handle_command(event: dict, source: str):
             return
         if sub in ("ayuda", "help"):
             await send_message(thread,
-                "ASTRA INTELLIGENCE\n!ia estado / probar / olvidar / preguntar <consulta> / genshin <consulta>\n"
+                "ASTRA INTELLIGENCE\n!ia estado / probar [gemini|groq] / olvidar / preguntar <consulta> / genshin <consulta>\n"
                 "!ia trazas activar|estado|desactivar (administradores; 15 min, contenido redactado).\n"
                 "!ia investigar <tema> / enlace <URL> — investigación web y análisis de páginas públicas.\n"
                 "!ia musica <descripción> / traducir idioma | texto\n"
@@ -8336,21 +8336,41 @@ async def handle_command(event: dict, source: str):
             if not is_admin_uid(admin_uid):
                 await send_message(thread, "Solo un administrador puede probar la conexión de IA.", source, reply)
                 return
-            provider = AI_CORE.provider_name
+            requested = rest.casefold().strip()
+            if requested in {"", "gemini", "google", "principal", "primario"}:
+                provider_target = "primary" if requested not in {"gemini", "google"} else "gemini"
+                provider = "Google Gemini" if provider_target == "gemini" else AI_CORE._primary_provider_config()["name"]
+            elif requested in {"groq", "secundario", "respaldo"}:
+                provider_target = "groq"
+                provider = "Groq"
+            else:
+                await send_message(
+                    thread,
+                    "Uso: !ia probar [gemini|groq]. La prueba consulta el proveedor indicado sin recurrir al respaldo.",
+                    source,
+                    reply,
+                )
+                return
             try:
-                await AI_CORE.test_connection(external_request, rate_key=session_key)
+                await AI_CORE.test_provider_connection(
+                    provider_target, external_request, rate_key=session_key
+                )
                 provider = AI_CORE.last_provider_name
-                answer = f"Conexión con {provider} verificada. Modelo: {AI_CORE.last_model}."
+                answer = f"Conexión directa con {provider} verificada. Modelo: {AI_CORE.last_model}."
             except Exception as exc:
                 detail = str(exc)[:360]
-                logging.warning("[AI] Prueba fallida | proveedor=%s | motivo=%s", provider, detail)
+                logging.warning("[AI] Prueba directa fallida | proveedor=%s | motivo=%s", provider, detail)
                 if "HTTP 401" in detail or "HTTP 403" in detail:
                     answer = f"{provider} rechazó la credencial (HTTP 401/403). Comprueba que la clave corresponda a ese proveedor y que tenga permisos para el modelo."
                 elif "HTTP 429" in detail:
                     answer = f"{provider} respondió HTTP 429. Comprueba cuota, facturación y límites del proyecto. Detalle: {detail}"
+                elif "HTTP 503" in detail or "HTTP 502" in detail or "HTTP 504" in detail:
+                    answer = f"{provider} sigue sin estar disponible tras los reintentos automáticos. La prueba fue directa y no se sustituyó por Groq. Detalle: {detail}"
+                elif "ReadTimeout" in detail or "ConnectTimeout" in detail or "timed out" in detail.casefold():
+                    answer = f"La conexión directa con {provider} agotó el tiempo de espera después de los reintentos. No se utilizó otro proveedor. Detalle: {detail}"
                 elif "HTTP 400" in detail:
                     answer = f"{provider} rechazó el formato de la solicitud (HTTP 400). Comprueba el modelo y sus funciones compatibles. Detalle: {detail}"
-                elif "IA_NO_CONFIGURADA" in detail:
+                elif "NO_CONFIGURADA" in detail:
                     answer = "No hay credenciales de IA configuradas. Añade GEMINI_API_KEY y la clave secundaria de Groq."
                 else:
                     answer = f"No se pudo verificar la conexión con {provider}. Detalle: {detail or type(exc).__name__}"
@@ -8763,7 +8783,7 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}avatarbot [ambos|comunidad|desarrollador] URL — sincroniza avatares de chat y llamada. [ADMIN]",
                 f"{PREFIX}eliminarmensajes — elimina mensajes enviados por Katherine en esta sala. [ADMIN]",
                 f"{PREFIX}respuestas on|off|estado / respuesta añadir|lista|eliminar — reglas automáticas. [ADMIN]",
-                f"{PREFIX}ia probar / guardian revisar / analista / diagnostico — herramientas de IA. [ADMIN]",
+                f"{PREFIX}ia probar [gemini|groq] / estado / guardian revisar / analista / diagnostico — conexión por proveedor y herramientas de IA. [ADMIN]",
                 "Los comandos administrativos verifican el UID autorizado, no el nickname.",
             ]),
         ]
