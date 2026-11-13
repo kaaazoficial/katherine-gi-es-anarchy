@@ -13,7 +13,7 @@ Esta expansión excluye CREATIVITY AI. La IA es una capa opcional sobre los coma
 - **Astra Admin AI:** explica diagnósticos reales; no ejecuta cambios ni revela secretos.
 
 ## Configuración del proveedor
-No se añade dependencia nueva; usa HTTPX.
+Katherine valida las opciones de proceso con Pydantic Settings. Las credenciales permanecen en variables de entorno y nunca se devuelven en diagnósticos. El reconocimiento aproximado de comandos usa RapidFuzz y solo propone sugerencias; no ejecuta automáticamente una coincidencia. Las métricas Prometheus son agregadas y no incluyen etiquetas de usuario, sala ni contenido.
 
 Variables:
 - \`KATHERINE_AI_API_KEY\`: clave API. También acepta \`OPENAI_API_KEY\`.
@@ -34,7 +34,7 @@ Las solicitudes naturales explícitas se envían al núcleo si hay clave configu
 
 ## Seguridad y límites
 - Los comandos propuestos pasan por allowlist, validación de argumentos y el handler original.
-- No se permiten acciones administrativas, sanciones, pagos, transferencias ni cambios de perfil desde el modelo.
+- No se permiten acciones administrativas, sanciones, pagos, transferencias ni cambios de perfil desde el modelo. El comando `!metricas` sigue siendo exclusivo de UID administradores.
 - El analizador está desactivado por defecto y requiere UID en \`ADMIN_UIDS\`.
 - Solo observa mensajes recibidos mientras está activo; no lee historial antiguo. La activación informa que el contenido se transmite al proveedor cuando se solicita el resumen.
 - No añade reconocimiento de imágenes entrantes ni recepción de audio, no expuestos por la API del bot.

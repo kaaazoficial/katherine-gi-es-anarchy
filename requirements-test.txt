@@ -11,3 +11,6 @@ pytest-cov>=7.1.0,<8.0.0
 respx>=0.23.1,<1.0.0
 hypothesis>=6.170.15,<7.0.0
 pytest-timeout>=2.4.0,<3.0.0
+# Imported production modules that are required by the isolated app tests.
+pydantic-settings>=2.16.2,<3.0.0
+prometheus-client>=0.26.0,<1.0.0
