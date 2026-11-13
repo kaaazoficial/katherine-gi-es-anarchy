@@ -185,16 +185,39 @@ async def test_api_request_uses_store_false_and_structured_output(monkeypatch):
     assert captured["json"]["text"]["format"]["schema"] == ACTION_SCHEMA
 
 @pytest.mark.asyncio
-async def test_task_requests_apply_per_user_cooldown(monkeypatch):
+async def test_rapid_requests_are_queued_not_rejected(monkeypatch):
     monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
     ai = KatherineAI()
+    calls = []
     async def fake_request(method, url, **kwargs):
+        calls.append(kwargs["json"])
         return FakeResponse(response_payload({
             "kind": "answer", "answer": "OK", "command": "", "args": ""
         }))
     assert await ai.translate("inglés", "hola", fake_request, rate_key="room:user") == "OK"
-    with pytest.raises(RuntimeError, match="IA_ENFRIAMIENTO"):
-        await ai.translate("inglés", "adiós", fake_request, rate_key="room:user")
+    assert await ai.translate("inglés", "adiós", fake_request, rate_key="room:user") == "OK"
+    assert len(calls) == 2
+
+
+def test_ai_responses_have_no_artificial_output_token_cap(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+    captured = {}
+    async def fake_request(method, url, **kwargs):
+        captured.update(kwargs["json"])
+        return FakeResponse(response_payload({
+            "kind": "answer", "answer": "A" * 12000, "command": "", "args": ""
+        }))
+    result = pytest.importorskip("asyncio").run(ai.test_connection(fake_request))
+    assert len(result) == 12000
+    assert "max_output_tokens" not in captured
+
+
+def test_provider_retry_header_parser_handles_seconds_and_units():
+    from katherine_ai import _retry_header_seconds
+    assert _retry_header_seconds("2.5") == 2.5
+    assert _retry_header_seconds("1m2.5s") == 62.5
+    assert _retry_header_seconds("250ms") == 0.25
 
 @pytest.mark.asyncio
 async def test_provider_connection_probe(monkeypatch):
