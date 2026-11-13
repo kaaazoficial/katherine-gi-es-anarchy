@@ -350,7 +350,9 @@ async def test_webhook_body_reader_accepts_bounded_stream():
 
 
 @pytest.mark.asyncio
-async def test_avatarbot_updates_and_verifies_both_bot_identities_by_default(monkeypatch):
+async def test_avatarbot_updates_and_verifies_both_bot_identities_by_default(monkeypatch, tmp_path):
+    monkeypatch.setattr(bot_main, "DB_PATH", tmp_path / "avatar-bot-test.sqlite3")
+    bot_main.init_db()
     monkeypatch.setattr(bot_main, "ADMIN_UIDS", {"trusted-admin"})
     calls = []
     sent = []
@@ -397,7 +399,9 @@ def test_admin_bot_target_parser_defaults_to_both_and_accepts_explicit_target():
 
 
 @pytest.mark.asyncio
-async def test_avatarbot_remains_uid_protected(monkeypatch):
+async def test_avatarbot_remains_uid_protected(monkeypatch, tmp_path):
+    monkeypatch.setattr(bot_main, "DB_PATH", tmp_path / "avatar-admin-test.sqlite3")
+    bot_main.init_db()
     monkeypatch.setattr(bot_main, "ADMIN_UIDS", {"trusted-admin"})
     sent = []
 
