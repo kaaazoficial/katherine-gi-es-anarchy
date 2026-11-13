@@ -33,6 +33,11 @@ on:
       - "katherine_ai.py"
       - "katherine_research.py"
       - "katherine_retention.py"
+      - "katherine_config.py"
+      - "katherine_game_queries.py"
+      - "katherine_matching.py"
+      - "katherine_metrics.py"
+      - "katherine_topics.py"
       - ".github/workflows/tests.yml"
   workflow_dispatch:
 

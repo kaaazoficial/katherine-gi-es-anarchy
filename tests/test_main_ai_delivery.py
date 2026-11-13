@@ -321,3 +321,29 @@ async def test_ai_tool_failure_is_not_reported_as_success(monkeypatch):
 def test_webhook_limits_are_explicit():
     assert bot_main.MAX_WEBHOOK_BODY_BYTES == 1_048_576
     assert bot_main.MAX_WEBHOOK_BACKGROUND_TASKS == 100
+
+
+@pytest.mark.asyncio
+async def test_webhook_body_reader_rejects_oversized_stream():
+    class FakeRequest:
+        headers = {}
+
+        async def stream(self):
+            yield b"1234"
+            yield b"5678"
+
+    with pytest.raises(bot_main.HTTPException) as error:
+        await bot_main.read_limited_webhook_body(FakeRequest(), limit=6)
+    assert error.value.status_code == 413
+
+
+@pytest.mark.asyncio
+async def test_webhook_body_reader_accepts_bounded_stream():
+    class FakeRequest:
+        headers = {"content-length": "5"}
+
+        async def stream(self):
+            yield b"he"
+            yield b"llo"
+
+    assert await bot_main.read_limited_webhook_body(FakeRequest(), limit=5) == b"hello"
