@@ -51,7 +51,10 @@ from urllib.parse import urljoin, quote, urlparse
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from katherine_config import SETTINGS
+from katherine_metrics import render_prometheus_metrics
+from katherine_matching import suggest_command
 from katherine_nexus import (
     cleanup_community_events,
     extract_message_id,
@@ -88,14 +91,13 @@ AI_TOOL_SILENT: ContextVar[bool] = ContextVar(
 # ---------------------------------------------------------------------------
 API = "https://api.anarchyapps.org/bot-api/v1"
 GAME_API = "https://genshin-db-api.vercel.app/api/v5"
-PORT = int(os.getenv("PORT", "3000"))
+PORT = SETTINGS.port
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 COMMUNITY_TOKEN = os.getenv("COMMUNITY_BOT_TOKEN", "").strip()
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
 COMMUNITY_SECRET = os.getenv("COMMUNITY_WEBHOOK_SECRET", "").strip()
-PREFIX = os.getenv("COMMAND_PREFIX", "!").strip() or "!"
-if len(PREFIX) > 3 or any(ch.isspace() for ch in PREFIX):
-    PREFIX = "!"
+METRICS_TOKEN = os.getenv("PROMETHEUS_METRICS_TOKEN", "").strip()
+PREFIX = SETTINGS.command_prefix
 COMMAND_PREFIXES = tuple(sorted({PREFIX, "!", "-"}, key=len, reverse=True))
 def parse_admin_uids(value: str | None) -> set[str]:
     """Parse trusted administrator UIDs from comma/semicolon/newline-separated config."""
@@ -106,9 +108,9 @@ def parse_admin_uids(value: str | None) -> set[str]:
     }
 
 
-ADMIN_UIDS = parse_admin_uids(os.getenv("ADMIN_UIDS") or os.getenv("ADMINUIDS") or "")
+ADMIN_UIDS = parse_admin_uids(SETTINGS.admin_uids)
 ADMIN_ONLY_COMMANDS = frozenset({
-    "!estado", "!fuentes", "!saludfuentes", "!autotest",
+    "!estado", "!fuentes", "!saludfuentes", "!metricas", "!autotest",
     "!centro", "!nexus",
     "!admin", "!paneladmin", "!guardian",
     "!respuestas", "!respuesta", "!advertir", "!advertencias",
@@ -150,7 +152,7 @@ app = FastAPI(
 # para conservar datos entre despliegues. Sin disco, Render borra el archivo
 # al reiniciar o desplegar; el bot seguirá funcionando, pero reiniciará datos.
 # ---------------------------------------------------------------------------
-DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
+DATA_DIR = SETTINGS.data_dir
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "katherine.sqlite3"
 
@@ -867,7 +869,7 @@ DJ_ROOMS: dict[str, dict] = {}
 DJ_READY_EVENTS: dict[str, asyncio.Event] = {}
 VOICE_CONNECT_LOCKS: dict[str, asyncio.Lock] = {}
 BOT_IDENTITIES: dict[str, dict] = {}
-TTS_VOICE = os.getenv("TTS_VOICE", "es-CL-CatalinaNeural").strip() or "es-CL-CatalinaNeural"
+TTS_VOICE = SETTINGS.tts_voice
 TTS_VOICE_OPTIONS = {
     "catalina": "es-CL-CatalinaNeural",
     "francisca": "es-CL-CatalinaNeural",
@@ -13450,7 +13452,7 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}respuestas / respuesta — consulta reglas de respuestas automáticas.",
             ]),
             ("ADMINISTRACIÓN · UID AUTORIZADO", [
-                f"{PREFIX}estado / fuentes / saludfuentes / autotest — diagnóstico y pruebas. [ADMIN]",
+                f"{PREFIX}estado / fuentes / saludfuentes / metricas / autotest — diagnóstico, métricas y pruebas. [ADMIN]",
                 f"{PREFIX}centro / nexus / admin / paneladmin / guardian — paneles de control. [ADMIN]",
                 f"{PREFIX}antispam estado|on|off|limite|ventana|repeticiones|enlaces|menciones — protección del chat. [ADMIN]",
                 f"{PREFIX}advertir / advertencias / quitaradvertencia — gestión de advertencias. [ADMIN]",
@@ -15147,6 +15149,42 @@ Uso: !enciclopedia <nombre>""",
         await send_message(thread, answer, source, reply)
         return
 
+    if command == "!metricas":
+        api_requests = int(metrics["api_requests"])
+        avg_latency = (
+            float(metrics["api_latency_total_ms"]) / api_requests
+            if api_requests else 0.0
+        )
+        external_requests = sum(
+            int(item.get("requests", 0))
+            for item in SOURCE_HEALTH.values() if isinstance(item, dict)
+        )
+        external_failures = sum(
+            int(item.get("failures", 0))
+            for item in SOURCE_HEALTH.values() if isinstance(item, dict)
+        )
+        open_circuits = sum(
+            1 for item in SOURCE_HEALTH.values()
+            if isinstance(item, dict)
+            and float(item.get("circuit_open_until", 0) or 0) > time.time()
+        )
+        answer = "\\n".join([
+            "KATHERINE · MÉTRICAS DEL PROCESO",
+            f"Uptime: {format_duration(time.monotonic() - STARTED_MONOTONIC)}",
+            f"Mensajes: {metrics['text_messages_received']} · comandos: {metrics['commands_received']}",
+            f"Respuestas enviadas: {metrics['messages_sent']}",
+            f"API Anarchy: {api_requests} solicitudes · {metrics['api_errors']} errores",
+            f"Latencia API: última {float(metrics['api_latency_last_ms']):.0f} ms · media {avg_latency:.0f} ms · máxima {float(metrics['api_latency_max_ms']):.0f} ms",
+            f"Fuentes externas: {external_requests} solicitudes · {external_failures} fallos · {open_circuits} circuitos abiertos",
+            f"DJ: {metrics['dj_tracks_started']} pistas · {metrics['dj_playback_errors']} errores de reproducción",
+            f"TTS: {metrics['tts_priority_enqueued'] + metrics['tts_regular_enqueued']} mensajes en cola",
+            f"IA: {'activa' if AI_CORE.is_enabled else 'sin credencial'} · {AI_CORE.provider_name if AI_CORE.is_enabled else 'no configurada'} · {AI_CORE.model if AI_CORE.is_enabled else '—'}",
+            "Prometheus: endpoint /metrics (contadores agregados, sin datos de usuarios ni conversaciones).",
+            "Los contadores se reinician cuando Render reinicia el proceso.",
+        ])
+        await send_message(thread, answer, source, reply)
+        return
+
     if command == "!fecha":
         try:
             now = datetime.now(ZoneInfo("America/Santiago"))
@@ -16066,14 +16104,22 @@ Uso: !enciclopedia <nombre>""",
         await send_message(thread, answer, source, reply)
         return
 
-    # Respuesta explícita para comandos inexistentes: nunca dejar al usuario
-    # sin respuesta por haber escrito un nombre no registrado.
-    await send_message(
-        thread,
-        f"No reconozco el comando {command}. Usa !ayuda para consultar los comandos disponibles.",
-        source,
-        reply
-    )
+    # High-confidence spelling suggestions are informational only: never auto-execute.
+    allowed_suggestions = set(AI_PUBLIC_COMMANDS)
+    if is_admin_uid(admin_uid):
+        allowed_suggestions.update(AI_ADMIN_COMMANDS)
+    suggestion = suggest_command(command, allowed_suggestions, score_cutoff=88)
+    if suggestion:
+        suggested_name, score = suggestion
+        response_text = (
+            f"No reconozco {command}. ¿Quizás quisiste decir {PREFIX}{suggested_name}? "
+            f"(coincidencia {score}%). Confirma escribiendo el comando; no lo ejecutaré automáticamente."
+        )
+    else:
+        response_text = (
+            f"No reconozco el comando {command}. Usa {PREFIX}ayuda para consultar los comandos disponibles."
+        )
+    await send_message(thread, response_text, source, reply)
 
 
 # ---------------------------------------------------------------------------
@@ -16695,6 +16741,31 @@ async def health_check():
     }
 
 
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics_endpoint(request: Request):
+    if METRICS_TOKEN:
+        supplied = str(request.headers.get("authorization") or "")
+        expected = f"Bearer {METRICS_TOKEN}"
+        if not hmac.compare_digest(supplied, expected):
+            raise HTTPException(status_code=401, detail="Unauthorized")
+    memory_bytes = None
+    cpu_percent = None
+    if PROCESS is not None:
+        try:
+            memory_bytes = PROCESS.memory_info().rss
+            cpu_percent = PROCESS.cpu_percent(interval=None)
+        except (psutil.Error, OSError):
+            pass
+    payload, content_type = render_prometheus_metrics(
+        dict(metrics),
+        SOURCE_HEALTH,
+        uptime_seconds=time.monotonic() - STARTED_MONOTONIC,
+        memory_bytes=memory_bytes,
+        cpu_percent=cpu_percent,
+    )
+    return Response(content=payload, media_type=content_type)
+
+
 @app.head("/")
 async def health_head():
     return JSONResponse(
@@ -16733,6 +16804,10 @@ async def startup():
             DATA_DIR,
         )
 
+    logging.info(
+        "Configuración validada con Pydantic Settings | prefijo=%s | puerto=%s | UID admin configurados=%s",
+        PREFIX, PORT, len(ADMIN_UIDS)
+    )
     logging.info(
         "Katherine Python iniciando en puerto %s",
         PORT
