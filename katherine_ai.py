@@ -332,6 +332,10 @@ def classify_request_intent(value: str) -> str:
     text = normalize_topic_text(value)
     if not text:
         return "conversation"
+    # Domain takes precedence over generic action words: researching a
+    # Genshin character must stay in the Teyvat domain.
+    if is_genshin_related_request(value):
+        return "genshin"
     research_markers = (
         "investiga", "investigar", "busca informacion", "fuentes sobre",
         "analiza este enlace", "resume este enlace", "lee este articulo",
@@ -339,8 +343,6 @@ def classify_request_intent(value: str) -> str:
     )
     if any(marker in text for marker in research_markers):
         return "research"
-    if is_genshin_related_request(value):
-        return "genshin"
     action_markers = (
         "haz", "hacer", "crea", "crear", "abre", "abrir", "muestra",
         "mostrar", "consulta", "consultar", "busca", "buscar", "pon",
