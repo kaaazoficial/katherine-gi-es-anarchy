@@ -875,6 +875,7 @@ DJ_ROOMS: dict[str, dict] = {}
 DJ_READY_EVENTS: dict[str, asyncio.Event] = {}
 VOICE_CONNECT_LOCKS: dict[str, asyncio.Lock] = {}
 BOT_IDENTITIES: dict[str, dict] = {}
+BOT_SENT_MESSAGE_TTL = 7 * 24 * 60 * 60
 BOT_SENT_MESSAGES: dict[tuple[str, str], deque] = defaultdict(deque)
 TTS_VOICE = SETTINGS.tts_voice
 TTS_VOICE_OPTIONS = {
@@ -1740,7 +1741,11 @@ def sanitize_chat_text(content: Any) -> str:
 async def delete_katherine_messages(thread_id: str, source: str) -> dict[str, int]:
     """Delete only messages whose IDs were returned by our own successful sends."""
     key = (str(source), str(thread_id))
-    tracked = list(BOT_SENT_MESSAGES.get(key, ()))
+    cutoff = time.time() - BOT_SENT_MESSAGE_TTL
+    tracked = [
+        item for item in BOT_SENT_MESSAGES.get(key, ())
+        if float(item.get("created_at", 0)) >= cutoff
+    ]
     deleted = failed = 0
     remaining = deque()
     for item in tracked:
@@ -1883,7 +1888,12 @@ async def send_message(
             if result.get("ok"):
                 sent_message_id = extract_message_id(result.get("data"))
                 if sent_message_id:
-                    BOT_SENT_MESSAGES[(str(source), str(thread_id))].append({
+                    message_key = (str(source), str(thread_id))
+                    message_history = BOT_SENT_MESSAGES[message_key]
+                    cutoff = time.time() - BOT_SENT_MESSAGE_TTL
+                    while message_history and float(message_history[0].get("created_at", 0)) < cutoff:
+                        message_history.popleft()
+                    message_history.append({
                         "message_id": sent_message_id,
                         "created_at": time.time(),
                     })
