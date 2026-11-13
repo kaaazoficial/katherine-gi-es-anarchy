@@ -13521,6 +13521,7 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}antispam estado|on|off|limite|ventana|repeticiones|enlaces|menciones — protección del chat. [ADMIN]",
                 f"{PREFIX}advertir / advertencias / quitaradvertencia — gestión de advertencias. [ADMIN]",
                 f"{PREFIX}perfilbot <nombre> | <estado> / avatarbot <URL> — perfil del bot. [ADMIN]",
+                f"{PREFIX}eliminarmensajes — elimina mensajes enviados por Katherine en esta sala. [ADMIN]",
                 f"{PREFIX}respuestas on|off|estado / respuesta añadir|lista|eliminar — reglas automáticas. [ADMIN]",
                 f"{PREFIX}ia probar / guardian revisar / analista / diagnostico — herramientas de IA. [ADMIN]",
                 "Los comandos administrativos verifican el UID autorizado, no el nickname.",
