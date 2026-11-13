@@ -144,6 +144,8 @@ def interpret_natural_request(value: str) -> str | None:
         (r"^(?:diagnostica) katherine$", "estado"),
         (r"^(?:que fuentes|fuentes disponibles|estado de las fuentes)$", "fuentes"),
         (r"^(?:ejecuta|haz|realiza) (?:un )?(?:autotest|prueba interna)$", "autotest"),
+        (r"^(?:elimina|borra|limpia) (?:todos? )?(?:tus|sus) mensajes$", "eliminarmensajes"),
+        (r"^(?:elimina|borra|limpia) (?:todos? )?los mensajes que (?:enviaste|envio katherine)$", "eliminarmensajes"),
         (r"^(?:pausa|pausar|deten|detener) (?:la )?(?:musica|reproduccion)$", "dj pausa"),
         (r"^(?:reanuda|reanudar|continua|continuar) (?:la )?(?:musica|reproduccion)$", "dj reanudar"),
         (r"^(?:salta|saltar) (?:la )?(?:cancion|pista|tema)$", "dj saltar"),
