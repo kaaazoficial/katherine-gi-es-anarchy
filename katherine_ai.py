@@ -5,6 +5,7 @@ import asyncio
 from contextvars import ContextVar
 import json
 import logging
+import random
 import hashlib
 import secrets
 import os
@@ -15,7 +16,7 @@ from collections import defaultdict, deque
 from typing import Any, Awaitable, Callable
 
 from katherine_topics import is_genshin_related_request, normalize_topic_text
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 RequestFunc = Callable[..., Awaitable[Any]]
 
@@ -222,6 +223,28 @@ ACTION_SCHEMA = {
                 "properties": {
                     "command": {"type": "string"},
                     "args": {"type": "string"},
+                },
+                "required": ["command", "args"],
+            },
+        },
+    },
+    "required": ["kind", "answer", "command", "args", "steps"],
+}
+
+GEMINI_ACTION_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "kind": {"type": "STRING", "enum": ["answer", "command", "plan"]},
+        "answer": {"type": "STRING"},
+        "command": {"type": "STRING"},
+        "args": {"type": "STRING"},
+        "steps": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "command": {"type": "STRING"},
+                    "args": {"type": "STRING"},
                 },
                 "required": ["command", "args"],
             },
@@ -755,7 +778,7 @@ class KatherineAI:
             "key": (os.getenv("GEMINI_API_KEY") or "").strip(),
             "url": (
                 os.getenv("GEMINI_API_URL")
-                or "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+                or "https://generativelanguage.googleapis.com/v1beta"
             ).strip(),
             "model": (os.getenv("GEMINI_MODEL") or "gemini-3.8-flash").strip(),
         }
@@ -832,6 +855,25 @@ class KatherineAI:
     def _active_provider_config(self) -> dict[str, str]:
         return self._provider_override.get() or self._primary_provider_config()
 
+    def _provider_request_url(self) -> str:
+        """Build the native Gemini generateContent URL; keep legacy env values compatible."""
+        configured = self.api_url.strip()
+        if not self.is_gemini:
+            return configured
+        if "{model}" in configured:
+            return configured.format(model=quote(self.model, safe=""))
+        if configured.endswith(":generateContent"):
+            return configured
+        legacy_suffix = "/openai/chat/completions"
+        if configured.endswith(legacy_suffix):
+            configured = configured[:-len(legacy_suffix)]
+        if "/models/" in configured:
+            return configured.rstrip("/")
+        return (
+            f"{configured.rstrip('/')}/models/"
+            f"{quote(self.model, safe='')}:generateContent"
+        )
+
     @property
     def api_key(self) -> str:
         return self._active_provider_config()["key"]
@@ -904,7 +946,7 @@ class KatherineAI:
             ),
             "Memoria contextual: temporal, aislada por usuario y sala (10 min; máximo 6 intercambios).",
             (
-                "Gemini usa Chat Completions compatible; la retención y el uso de datos dependen de la configuración y política de Google."
+                "Gemini usa la API REST nativa generateContent; la retención y el uso de datos dependen de la configuración y política de Google."
                 if primary["name"] == "Google Gemini"
                 else "Groq: no se envía el parámetro store porque este endpoint no lo admite; la retención externa depende de su política."
                 if primary["name"] == "Groq"
@@ -1067,6 +1109,28 @@ class KatherineAI:
         return min(30.0, 1.5 * (2 ** max(0, int(attempt))))
 
     @staticmethod
+    def _transient_retry_delay(response: Any | None, attempt: int) -> float:
+        """Use Retry-After when present; otherwise use jittered 1/2/4-second backoff."""
+        headers = getattr(response, "headers", {}) or {}
+        normalized = {str(key).casefold(): value for key, value in headers.items()}
+        retry_after = _retry_header_seconds(normalized.get("retry-after"))
+        if retry_after is not None:
+            return min(30.0, max(0.5, retry_after))
+        base = min(8.0, 2.0 ** max(0, int(attempt)))
+        return round(base * random.uniform(0.8, 1.2), 2)
+
+    @staticmethod
+    def _is_transient_network_error(exc: Exception) -> bool:
+        """Recognize HTTP client timeouts and temporary connection failures."""
+        name = type(exc).__name__.casefold()
+        return (
+            isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError))
+            or "timeout" in name
+            or "connecterror" in name
+            or "networkerror" in name
+        )
+
+    @staticmethod
     def _daily_quota_reset_delay(response: Any) -> float | None:
         """Return a reset delay only when a 429 clearly indicates a daily quota."""
         headers = getattr(response, "headers", {}) or {}
@@ -1191,6 +1255,22 @@ class KatherineAI:
             ]
             return "\n".join(part for part in chunks if part).strip()
         return ""
+
+    @staticmethod
+    def _extract_gemini_generate_content_text(payload: dict[str, Any]) -> str:
+        """Extract text from the native Gemini GenerateContent response shape."""
+        candidates = payload.get("candidates") or []
+        chunks: list[str] = []
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            content = candidate.get("content") or {}
+            if not isinstance(content, dict):
+                continue
+            for part in content.get("parts", []) or []:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    chunks.append(part["text"])
+        return "\n".join(part for part in chunks if part).strip()
 
     @staticmethod
     def _extract_output_text(payload: dict[str, Any]) -> str:
@@ -1323,25 +1403,19 @@ class KatherineAI:
             if turn.get("role") in {"user", "assistant"}
         ]
         if self.is_gemini:
-            gemini_response_format = (
-                {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": output_format.get("name", "katherine_action"),
-                        "strict": bool(output_format.get("strict", True)),
-                        "schema": output_format.get("schema", ACTION_SCHEMA),
-                    },
-                }
-                if output_format.get("type") == "json_schema"
-                else {"type": "json_object"}
-            )
             body = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": prompt_instructions},
-                    *recent_messages,
+                "systemInstruction": {"parts": [{"text": prompt_instructions}]},
+                "contents": [
+                    {
+                        "role": "model" if turn["role"] == "assistant" else "user",
+                        "parts": [{"text": str(turn["content"])}],
+                    }
+                    for turn in recent_messages
                 ],
-                "response_format": gemini_response_format,
+                "generationConfig": {
+                    "responseMimeType": "application/json",
+                    "responseSchema": GEMINI_ACTION_SCHEMA,
+                },
             }
         else:
             body = {
@@ -1352,6 +1426,16 @@ class KatherineAI:
             }
             if not self.is_groq:
                 body["store"] = False
+
+        request_url = self._provider_request_url()
+        request_headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if self.is_gemini:
+            request_headers["x-goog-api-key"] = self.api_key
+        else:
+            request_headers["Authorization"] = f"Bearer {self.api_key}"
 
         queued_at = time.monotonic()
         async with self._semaphore:
@@ -1379,17 +1463,32 @@ class KatherineAI:
                     )
                     if spacing > 0:
                         await asyncio.sleep(spacing)
-                    response = await request_func(
-                        "POST",
-                        self.api_url,
-                        headers={
-                            "Authorization": f"Bearer {self.api_key}",
-                            "Content-Type": "application/json",
-                            "Accept": "application/json",
-                        },
-                        json=body,
-                        timeout=35,
-                    )
+                    try:
+                        response = await request_func(
+                            "POST",
+                            request_url,
+                            headers=request_headers,
+                            json=body,
+                            timeout=35,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        if attempt + 1 >= max_attempts or not self._is_transient_network_error(exc):
+                            raise
+                        delay = self._transient_retry_delay(None, attempt)
+                        self.metrics["ai_provider_retries"] += 1
+                        logging.warning(
+                            "[AI] %s tuvo un fallo de red transitorio (%s); "
+                            "reintento %s/%s en %.2f s.",
+                            self.provider_name,
+                            type(exc).__name__,
+                            attempt + 1,
+                            max_attempts - 1,
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
                     state["last_request"] = time.monotonic()
                     self._provider_last_request = state["last_request"]
                     self.metrics["ai_provider_requests"] += 1
@@ -1405,19 +1504,9 @@ class KatherineAI:
                     ):
                         fallback_body = dict(body)
                         if self.is_gemini:
-                            fallback_body["response_format"] = {"type": "json_object"}
-                            fallback_body["messages"] = [
-                                {
-                                    "role": "system",
-                                    "content": (
-                                        prompt_instructions
-                                        + "\n\nDevuelve solo JSON válido sin Markdown con las claves "
-                                        + "kind, answer, command, args y steps. steps es una lista de hasta tres "
-                                        + "objetos con command y args."
-                                    ),
-                                },
-                                *recent_messages,
-                            ]
+                            fallback_body["generationConfig"] = {
+                                "responseMimeType": "application/json"
+                            }
                         else:
                             fallback_body["text"] = {"format": {"type": "json_object"}}
                             fallback_body["instructions"] = (
@@ -1434,12 +1523,8 @@ class KatherineAI:
                         self.metrics["ai_provider_schema_fallbacks"] += 1
                         response = await request_func(
                             "POST",
-                            self.api_url,
-                            headers={
-                                "Authorization": f"Bearer {self.api_key}",
-                                "Content-Type": "application/json",
-                                "Accept": "application/json",
-                            },
+                            request_url,
+                            headers=request_headers,
                             json=fallback_body,
                             timeout=35,
                         )
@@ -1458,7 +1543,23 @@ class KatherineAI:
                             self.provider_name,
                         )
                         raise RuntimeError("IA_CUOTA_DIARIA_AGOTADA")
-                    if getattr(response, "status_code", None) != 429:
+                    status_code = getattr(response, "status_code", None)
+                    if status_code in {408, 500, 502, 503, 504}:
+                        if attempt + 1 >= max_attempts:
+                            break
+                        delay = self._transient_retry_delay(response, attempt)
+                        self.metrics["ai_provider_retries"] += 1
+                        logging.warning(
+                            "[AI] %s HTTP %s transitorio; reintento %s/%s en %.2f s.",
+                            self.provider_name,
+                            status_code,
+                            attempt + 1,
+                            max_attempts - 1,
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    if status_code != 429:
                         break
                     self.metrics["ai_provider_429"] += 1
                     daily_reset = self._daily_quota_reset_delay(response)
@@ -1506,12 +1607,24 @@ class KatherineAI:
             payload = response.json()
         except Exception as exc:
             raise RuntimeError("El proveedor IA devolvió una respuesta no JSON.") from exc
-        usage = payload.get("usage", {})
+        usage = (
+            payload.get("usageMetadata", {})
+            if self.is_gemini
+            else payload.get("usage", {})
+        )
         if isinstance(usage, dict):
-            for key, aliases in (
-                ("ai_provider_input_tokens", ("input_tokens", "prompt_tokens")),
-                ("ai_provider_output_tokens", ("output_tokens", "completion_tokens")),
-            ):
+            token_aliases = (
+                (
+                    ("ai_provider_input_tokens", ("promptTokenCount",)),
+                    ("ai_provider_output_tokens", ("candidatesTokenCount",)),
+                )
+                if self.is_gemini
+                else (
+                    ("ai_provider_input_tokens", ("input_tokens", "prompt_tokens")),
+                    ("ai_provider_output_tokens", ("output_tokens", "completion_tokens")),
+                )
+            )
+            for key, aliases in token_aliases:
                 value = next((usage.get(alias) for alias in aliases if usage.get(alias) is not None), 0)
                 try:
                     self.metrics[key] += max(0, int(value or 0))
@@ -1519,7 +1632,7 @@ class KatherineAI:
                     pass
         self.metrics["ai_provider_responses_completed"] += 1
         raw = (
-            self._extract_chat_completion_text(payload)
+            self._extract_gemini_generate_content_text(payload)
             if self.is_gemini
             else self._extract_output_text(payload)
         )
@@ -1952,19 +2065,51 @@ class KatherineAI:
             raise RuntimeError("El proveedor IA no devolvió una respuesta de texto.")
         return result["answer"].strip()
 
-    async def test_connection(
-        self, request_func: RequestFunc, rate_key: str | None = None
+    async def test_provider_connection(
+        self,
+        provider: str,
+        request_func: RequestFunc,
+        rate_key: str | None = None,
     ) -> str:
-        """Make one small, non-stored request to verify real provider connectivity."""
-        result = await self._request_json(
-            "Responde exactamente con OK. No solicites herramientas ni añadas explicaciones.",
-            [{"role": "user", "content": "Prueba técnica de conectividad de Katherine."}],
-            request_func,
-            rate_key=rate_key,
-        )
+        """Probe exactly one provider; a failed primary test must never hide behind fallback."""
+        requested = str(provider or "primary").strip().casefold()
+        if requested in {"primary", "principal", "gemini", "google", "google-gemini"}:
+            config = (
+                self._gemini_provider_config()
+                if requested in {"gemini", "google", "google-gemini"}
+                else self._primary_provider_config()
+            )
+        elif requested in {"groq", "fallback", "secondary", "secundario"}:
+            config = self._groq_provider_config()
+        else:
+            raise ValueError("Proveedor no válido. Usa primary, gemini o groq.")
+
+        if not config["key"] or not config["url"] or not config["model"]:
+            raise RuntimeError(f"IA_{config['name'].upper().replace(' ', '_')}_NO_CONFIGURADA")
+
+        token = self._provider_override.set(config)
+        try:
+            result = await self._request_json_with_provider(
+                "Responde exactamente con OK. No solicites herramientas ni añadas explicaciones.",
+                [{"role": "user", "content": "Prueba técnica de conectividad de Katherine."}],
+                request_func,
+                rate_key=rate_key,
+            )
+            self._last_provider_context.set(dict(config))
+        finally:
+            self._provider_override.reset(token)
+
         if result["kind"] != "answer" or not result["answer"].strip():
             raise RuntimeError("La prueba no recibió una respuesta válida del proveedor.")
         return result["answer"].strip()
+
+    async def test_connection(
+        self, request_func: RequestFunc, rate_key: str | None = None
+    ) -> str:
+        """Verify the configured primary provider directly, without automatic fallback."""
+        return await self.test_provider_connection(
+            "primary", request_func, rate_key=rate_key
+        )
 
     async def summarize_chat(
         self, thread_id: str, request_func: RequestFunc, rate_key: str | None = None
