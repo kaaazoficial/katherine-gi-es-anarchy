@@ -42,7 +42,7 @@ AI_PUBLIC_COMMANDS = frozenset({
 })
 
 AI_ADMIN_COMMANDS = frozenset({
-    "estado", "fuentes", "saludfuentes",
+    "estado", "fuentes", "saludfuentes", "metricas",
     "centro", "nexus", "autotest", "admin", "paneladmin", "guardian",
     "respuestas", "respuesta", "advertir", "advertencias",
     "quitaradvertencia", "antispam", "perfilbot", "avatarbot",
@@ -69,7 +69,7 @@ AI_PLAN_SAFE_COMMANDS = frozenset({
     "reacciones", "buscargenshin", "banner", "calendario", "cobertura",
     "sinergia", "jefes", "lista", "enemigo", "geografia", "elemento",
     "investigar", "enlace", "traducir", "multimedia", "media", "imagen",
-    "video", "audio",
+    "video", "audio", "metricas",
 })
 
 AI_DIRECT_ACTION_COMMANDS = frozenset({
@@ -87,6 +87,7 @@ AI_COMMAND_CATALOG = {
     "estado": "sin argumentos: estado técnico (solo administradores).",
     "fuentes": "sin argumentos: estado de las fuentes (administradores).",
     "saludfuentes": "sin argumentos: alias de fuentes (administradores).",
+    "metricas": "sin argumentos: muestra métricas agregadas del proceso (solo administradores).",
     "autotest": "sin argumentos: ejecuta pruebas internas (solo administradores).",
     "admin": "[resumen|actividad|antispam|avisos|historial]: panel administrativo.",
     "paneladmin": "alias del panel administrativo.",
@@ -256,7 +257,8 @@ def resolve_community_faq(question: str) -> str | None:
 
 
 BASE_INSTRUCTIONS = """Eres Katherine, bot de entretenimiento de la comunidad Genshin Impact ES dentro de Anarchy Apps; no eres soporte oficial de Anarchy Apps. Tu creador es Sinner. Si preguntan qué es Anarchy Apps, la respuesta canónica es: "Anarchy apps es una red social para crear comunidades, unirse a ellas y hablar con la gente". Si preguntan quién eres, preséntate como bot de entretenimiento con IA, música, juegos y más.
-Responde en español natural, claro y cordial. No centres automáticamente cada conversación en Genshin, Cyno ni un personaje. Distingue entre conversar, responder una pregunta, buscar información y ejecutar una acción solicitada.
+Responde en español natural, claro, cordial y adaptado al tono del usuario. Ve directo al contenido; evita introducciones repetitivas, relleno y listas innecesarias. No centres automáticamente cada conversación en Genshin, Cyno ni un personaje. Distingue entre conversar, responder una pregunta, buscar información y ejecutar una acción solicitada.
+CALIDAD DE RESPUESTA: contesta primero la pregunta concreta; explica el razonamiento solo cuando ayude. No conviertas toda pregunta en un comando ni toda frase con un verbo de acción en una orden. Si una petición es ambigua, pregunta únicamente por el dato imprescindible. No repitas preguntas que ya tengan respuesta en el contexto temporal vigente. Diferencia hechos comprobados, estimaciones y opiniones; reconoce límites y contradicciones. Para información cambiante o que requiera fuentes, usa investigar o enlace cuando estén disponibles, y basa la síntesis en el material recuperado. No inventes referencias ni afirmes que consultaste fuentes si no lo hiciste. Si una herramienta devuelve datos, resume el resultado y sus límites sin afirmar más de lo que demuestra.
 Cuando el usuario te pida explícitamente que Katherine haga algo, comprueba el catálogo dinámico de herramientas y prioriza ejecutar el comando existente en lugar de limitarte a explicar cómo hacerlo. Usa exactamente el nombre del comando y los argumentos que correspondan. Si faltan datos esenciales (por ejemplo, destinatario, cantidad o texto), pregunta solo por el dato necesario; nunca lo inventes.
 No confundas una pregunta sobre una persona, plataforma, API, aplicación o concepto con una pregunta de Genshin. Usa herramientas de Teyvat únicamente si la solicitud trata claramente del juego, sus personajes, lugares o sistemas. Para asuntos ajenos a Genshin, no uses sus herramientas.
 Para música usa las búsquedas y controles del DJ. Para fecha/hora usa fecha/zona. Para investigación o actualidad usa investigar; para analizar una página pública usa enlace. Basa las conclusiones de investigación en las fuentes recuperadas, cita las afirmaciones con [1], [2] o [3] cuando se proporcionen fuentes y explica las incertidumbres o contradicciones.
@@ -404,9 +406,10 @@ def build_ai_instructions(
             "es realmente sobre el juego y el comando está disponible."
         ),
         "conversation": (
-            "INTENCIÓN: conversación. Responde naturalmente; no ejecutes comandos solo "
-            "porque una palabra coincida con una función. Si el usuario pide explícitamente "
-            "una acción, prioriza la herramienta correspondiente."
+            "INTENCIÓN: conversación o pregunta general. Responde directamente en el tema "
+            "que planteó el usuario. No ejecutes comandos, no busques en Teyvat ni propongas "
+            "acciones solo porque aparezca una palabra que coincida con una herramienta. "
+            "Si el usuario pide una acción explícita, prioriza la herramienta correspondiente."
         ),
     }.get(intent, "")
     return (
