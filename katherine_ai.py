@@ -69,7 +69,7 @@ AI_PLAN_SAFE_COMMANDS = frozenset({
     "reacciones", "buscargenshin", "banner", "calendario", "cobertura",
     "sinergia", "jefes", "lista", "enemigo", "geografia", "elemento",
     "investigar", "enlace", "traducir", "multimedia", "media", "imagen",
-    "video", "audio", "metricas",
+    "video", "audio",
 })
 
 AI_DIRECT_ACTION_COMMANDS = frozenset({
