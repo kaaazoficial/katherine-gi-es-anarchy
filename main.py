@@ -1851,7 +1851,7 @@ def sanitize_chat_text(content: Any, allow_safe_links: bool = False) -> str:
             preserved_links[marker] = f"[{label}]({target})"
             return marker
         text = re.sub(
-            r"(?i)\\[([^]\\n]{1,160})\\]\\((https://[^)\\s]+)\\)",
+            r"(?i)\[([^\]\n]{1,160})\]\((https://[^)\s]+)\)",
             preserve_safe_link,
             text,
         )
@@ -3613,7 +3613,7 @@ async def enqueue_message_for_speech(event: dict, source: str):
 
 
 async def download_dj_audio(url: str, file_extension: str | None = None) -> Path:
-    """Download a validated catalog track to a temporary local file."""
+    """Stream a catalog track to disk with allowlist, DNS pinning and strict byte caps."""
     parsed = urlparse(str(url))
     if not dj_audio_url_allowed(url):
         raise ValueError("El enlace no pertenece a una fuente musical autorizada.")
@@ -3630,31 +3630,36 @@ async def download_dj_audio(url: str, file_extension: str | None = None) -> Path
     max_bytes = 150 * 1024 * 1024
 
     try:
+        timeout = httpx.Timeout(60.0, connect=20.0)
+        headers = {
+            "User-Agent": "Katherine-AnarchyBot/3.1",
+            "Accept": "audio/*,application/octet-stream;q=0.9,*/*;q=0.5",
+        }
         async with EXTERNAL_GLOBAL_LIMIT:
             async with AsyncExitStack() as download_locks:
-        y:
-                timeout = httpx.Timeout(60.0, connect=20.0)
-                headers = {
-                    "User-Agent": "Katherine-AnarchyBot/3.1",
-                    "Accept": "audio/*,application/octet-stream;q=0.9,*/*;q=0.5"
-                }
-                async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, headers=headers) as client:
+                async with httpx.AsyncClient(
+                    timeout=timeout, follow_redirects=False,
+                    headers=headers, trust_env=False,
+                ) as client:
                     current_url = str(url)
+                    locked_hosts = set()
                     response = None
                     for redirect_count in range(4):
                         if not dj_audio_url_allowed(current_url):
                             raise ValueError("La descarga intentó acceder a un dominio no autorizado.")
-                        current_host = (urlsplit(current_url).hostname or "unknown").lower()
-                    await download_locks.enter_async_context(
-                        EXTERNAL_HOST_LIMITS.setdefault(current_host, asyncio.Semaphore(3))
-                    )
-                    pinned_url, pinned_headers, pinned_extensions = await pin_public_https_url(current_url)
-                    request = client.build_request(
-                        "GET", pinned_url,
-                        headers={**headers, **pinned_headers},
-                        extensions=pinned_extensions,
-                    )
-                    response = await client.send(request, stream=True, follow_redirects=False)
+                        current_host = (urlsplit(current_url).hostname or "").lower()
+                        if current_host not in locked_hosts:
+                            await download_locks.enter_async_context(
+                                EXTERNAL_HOST_LIMITS.setdefault(current_host, asyncio.Semaphore(3))
+                            )
+                            locked_hosts.add(current_host)
+                        pinned_url, pinned_headers, pinned_extensions = await pin_public_https_url(current_url)
+                        request = client.build_request(
+                            "GET", pinned_url,
+                            headers={**headers, **pinned_headers},
+                            extensions=pinned_extensions,
+                        )
+                        response = await client.send(request, stream=True, follow_redirects=False)
                         if response.status_code not in (301, 302, 303, 307, 308):
                             break
                         location = response.headers.get("location")
@@ -3664,17 +3669,18 @@ async def download_dj_audio(url: str, file_extension: str | None = None) -> Path
                         current_url = urljoin(current_url, location)
                         if not dj_audio_url_allowed(current_url):
                             raise ValueError("La descarga redirigió a un dominio no autorizado.")
+
                     if response is None:
                         raise RuntimeError("No se pudo iniciar la descarga musical.")
                     try:
                         if not response.is_success:
                             raise RuntimeError(f"La fuente musical respondió HTTP {response.status_code}.")
-                        if not dj_audio_url_allowed(str(response.url)):
+                        if not dj_audio_url_allowed(current_url):
                             raise ValueError("La descarga terminó en un dominio no autorizado.")
                         content_type = response.headers.get("content-type", "").lower()
                         if "text/html" in content_type or "application/json" in content_type:
                             raise RuntimeError(
-                                f"La fuente {urlparse(str(response.url)).hostname or 'musical'} "
+                                f"La fuente {urlsplit(current_url).hostname or 'musical'} "
                                 "devolvió una página web en vez del audio."
                             )
                         try:
@@ -3696,29 +3702,29 @@ async def download_dj_audio(url: str, file_extension: str | None = None) -> Path
                     finally:
                         await response.aclose()
 
-                if total_bytes < 1024:
-                    raise RuntimeError("El archivo descargado está vacío o incompleto.")
+        if total_bytes < 1024:
+            raise RuntimeError("El archivo descargado está vacío o incompleto.")
 
-                container = pyav.open(str(temp_path), mode="r")
-                try:
-                    audio_stream = next(
-                        (stream for stream in container.streams if stream.type == "audio"),
-                        None
-                    )
-                    if audio_stream is None:
-                        raise RuntimeError("El archivo descargado no contiene una pista de audio.")
-                    first_frame = next(container.decode(audio_stream), None)
-                    if first_frame is None:
-                        raise RuntimeError("La pista no contiene frames de audio decodificables.")
-                finally:
-                    container.close()
+        container = pyav.open(str(temp_path), mode="r")
+        try:
+            audio_stream = next(
+                (stream for stream in container.streams if stream.type == "audio"),
+                None
+            )
+            if audio_stream is None:
+                raise RuntimeError("El archivo descargado no contiene una pista de audio.")
+            first_frame = next(container.decode(audio_stream), None)
+            if first_frame is None:
+                raise RuntimeError("La pista no contiene frames de audio decodificables.")
+        finally:
+            container.close()
 
-                logging.info(
-                    "[DJ] Audio descargado y validado | %.2f MB | %s",
-                    total_bytes / (1024 * 1024),
-                    suffix
-                )
-                return temp_path
+        logging.info(
+            "[DJ] Audio descargado y validado | %.2f MB | %s",
+            total_bytes / (1024 * 1024),
+            suffix
+        )
+        return temp_path
 
     except Exception:
         if fd >= 0:
@@ -3731,6 +3737,7 @@ async def download_dj_audio(url: str, file_extension: str | None = None) -> Path
         except OSError:
             pass
         raise
+
 
 
 async def _dj_play_single(thread_id: str, path: Path, state: dict) -> bool:
