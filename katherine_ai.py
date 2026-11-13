@@ -19,7 +19,7 @@ RequestFunc = Callable[..., Awaitable[Any]]
 AI_PUBLIC_COMMANDS = frozenset({
     # Ayuda, consulta e investigación
     "ayuda", "comandos", "menu",
-    "fecha", "zona", "perfil", "puntos", "ranking", "actividad", "economia",
+    "fecha", "zona", "miuid", "perfil", "puntos", "ranking", "actividad", "economia",
     "investigar", "enlace", "traducir", "multimedia", "media", "imagen",
     "video", "audio",
     # Comunidad y perfiles propios
@@ -99,6 +99,7 @@ AI_COMMAND_CATALOG = {
     "antispam": "[estado|on|off|limite N|ventana N|repeticiones N|enlaces N|menciones N] (administradores).",
     "perfilbot": "nombre | estado: actualiza el perfil del bot (administradores).",
     "avatarbot": "URL HTTPS: actualiza el avatar del bot (administradores).",
+    "miuid": "sin argumentos: muestra tu UID de Anarchy Apps.",
     "fecha": "sin argumentos: fecha y hora local.",
     "zona": "Area/Ciudad: hora de otra zona horaria.",
     "perfil": "[@usuario]: consulta tu perfil o el de otra persona.",
@@ -477,7 +478,7 @@ def validate_ai_tool_call(
     elif name in {
         "enciclopedia", "archivo", "teyvat", "guia", "equipos", "rotacion",
         "materiales", "reacciones", "buscargenshin", "cobertura", "sinergia",
-        "enemigo", "geografia", "elemento",
+        "enemigo", "geografia", "elemento", "lista",
     } and not args:
         return None
     elif name in {"zona", "menu", "menú", "ayuda", "comandos", "estado",
