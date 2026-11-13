@@ -197,9 +197,9 @@ def test_genshin_entity_names_still_route_to_teyvat():
         ("Katherine, dónde está Fontaine en Genshin", "geografia Fontaine"),
         ("Katherine, qué es el elemento Dendro", "elemento Dendro"),
         ("Katherine, qué es Pyro en Genshin Impact", "elemento Pyro"),
-        ("Katherine, quién es Mualani en Genshin Impact", "enciclopedia Mualani"),
-        ("Katherine, qué materiales necesita Mualani Genshin Impact", "materiales Mualani"),
-        ("Katherine, qué armas usa Mualani", "guia Mualani"),
+        ("Katherine, quién es Mualani en Genshin Impact", "enciclopedia mualani"),
+        ("Katherine, qué materiales necesita Mualani Genshin Impact", "materiales mualani"),
+        ("Katherine, qué armas usa Mualani", "guia mualani"),
         ("Katherine, qué materiales necesita mi laptop", "asistente qué materiales necesita mi laptop"),
     ],
 )
