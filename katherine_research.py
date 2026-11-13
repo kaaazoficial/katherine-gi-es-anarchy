@@ -312,6 +312,49 @@ async def search_fandom_wikis(
     return results[:max(1, min(4, int(limit)))]
 
 
+async def search_wikipedia(
+    query: str, request_func: RequestFunc, limit: int = 2
+) -> list[dict[str, str]]:
+    """Search Spanish and English Wikipedia through the official MediaWiki API."""
+    search_text = re.sub(r"\s+", " ", str(query or "")).strip()
+    if not 3 <= len(search_text) <= 160:
+        return []
+    results: list[dict[str, str]] = []
+    for language in ("es", "en"):
+        try:
+            response = await request_func(
+                "GET", f"https://{language}.wikipedia.org/w/api.php",
+                params={
+                    "action": "query", "list": "search", "srsearch": search_text,
+                    "srnamespace": 0, "srlimit": 2, "format": "json",
+                    "utf8": 1,
+                },
+                headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+                timeout=10, follow_redirects=False,
+            )
+            if not getattr(response, "is_success", False):
+                continue
+            payload = response.json()
+            hits = payload.get("query", {}).get("search", []) if isinstance(payload, dict) else []
+            for hit in hits[:2]:
+                title = _plain(str(hit.get("title") or ""), 180)
+                snippet = _plain(str(hit.get("snippet") or ""), 1200)
+                if not title:
+                    continue
+                results.append({
+                    "title": title,
+                    "url": f"https://{language}.wikipedia.org/wiki/{quote(title.replace(' ', '_'))}",
+                    "domain": f"{language}.wikipedia.org",
+                    "snippet": snippet,
+                    "excerpt": snippet,
+                    "source_type": "wikipedia",
+                    "attribution": "Wikipedia; content may be reused under the license stated on the article.",
+                })
+        except Exception:
+            continue
+    return results[:max(1, min(4, int(limit)))]
+
+
 async def search_web(
     query: str, request_func: RequestFunc, limit: int = 5
 ) -> list[dict[str, str]]:
@@ -331,11 +374,13 @@ async def search_web(
     sources = parse_search_results(
         str(getattr(response, "text", "") or ""), limit=max(3, min(8, limit))
     )
-    fandom_task = search_fandom_wikis(search_text, request_func, limit=2)
-    fandom_sources = await fandom_task
+    fandom_sources, wikipedia_sources = await asyncio.gather(
+        search_fandom_wikis(search_text, request_func, limit=2),
+        search_wikipedia(search_text, request_func, limit=2),
+    )
     combined = []
     seen_domains = set()
-    for source in [*fandom_sources, *sources]:
+    for source in [*wikipedia_sources, *fandom_sources, *sources]:
         domain = (source.get("domain") or "").casefold()
         if not domain or domain in seen_domains:
             continue
