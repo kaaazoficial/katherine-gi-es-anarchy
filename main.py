@@ -66,13 +66,18 @@ from katherine_astra import (
     resolve_music_mood,
 )
 from katherine_ai import (
+    AI_ADMIN_COMMANDS, AI_PLAN_SAFE_COMMANDS, AI_PUBLIC_COMMANDS,
     KatherineAI, build_ai_session_key, is_bot_author, validate_ai_tool_call
 )
 from katherine_research import search_web, fetch_public_page, build_source_context
+from katherine_retention import cleanup_database_retention
 
 AI_CORE = KatherineAI()
 AI_TOOL_OUTPUT_CAPTURE: ContextVar[list[str] | None] = ContextVar(
     "katherine_ai_tool_output_capture", default=None
+)
+AI_TOOL_SILENT: ContextVar[bool] = ContextVar(
+    "katherine_ai_tool_silent", default=False
 )
 
 # ---------------------------------------------------------------------------
@@ -191,7 +196,8 @@ def init_db():
             points INTEGER NOT NULL DEFAULT 0,
             message_count INTEGER NOT NULL DEFAULT 0,
             created_at REAL NOT NULL,
-            last_seen REAL NOT NULL
+            last_seen REAL NOT NULL,
+            profile_updated_at REAL
         )""")
         db.execute("""CREATE TABLE IF NOT EXISTS affinities (
             uid TEXT NOT NULL,
@@ -243,6 +249,12 @@ def init_db():
                 # Compatibilidad con SQLite antiguo: deja el campo vacío y sin uso.
                 db.execute("UPDATE users SET genshin_uid=''")
 
+        user_columns = {row["name"] for row in db.execute("PRAGMA table_info(users)").fetchall()}
+        if "profile_updated_at" not in user_columns:
+            db.execute("ALTER TABLE users ADD COLUMN profile_updated_at REAL")
+            db.execute("UPDATE users SET profile_updated_at=last_seen WHERE bio<>'' OR status<>''")
+
+        db.execute("CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_gifts_target ON gifts(target_uid, id DESC)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_users_points ON users(points DESC)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_users_activity ON users(message_count DESC)")
@@ -672,10 +684,7 @@ def check_antispam_message(event: dict, source: str):
         automatic=True
     )
     metrics["antispam_blocked"] += 1
-    logging.warning(
-        "[MODERACION] Antispam | sala=%s | usuario=%s | advertencia=%s",
-        thread_id, nickname, warning_id
-    )
+    logging.warning("[MODERACION] Antispam automático | advertencia=%s", warning_id)
     return True, {"warning_id": warning_id, "nickname": nickname}
 
 
@@ -711,7 +720,10 @@ def update_user_field(uid: str, field: str, value: str):
     if field not in allowed:
         return
     with db_session() as db:
-        db.execute(f"UPDATE users SET {field}=? WHERE uid=?", (value, uid))
+        db.execute(
+            f"UPDATE users SET {field}=?, profile_updated_at=? WHERE uid=?",
+            (str(value)[:240], time.time(), uid)
+        )
 
 
 def add_points(uid: str, amount: int):
@@ -1065,6 +1077,57 @@ def cleanup_expired_state():
             BUTTON_ACTIONS.pop(key, None)
     cleanup_community_events(COMMUNITY_EVENTS, now=now)
     AI_CORE.cleanup(now=now)
+
+    # Expire process-local catalogs, user favorites and transient identifiers.
+    for store in (DJ_ARCHIVE_CACHE, DJ_SOURCE_CACHE):
+        for key, item in list(store.items()):
+            if not isinstance(item, dict) or float(item.get("expires", 0) or 0) <= now:
+                store.pop(key, None)
+    for key, item in list(DJ_SEARCH_RESULTS.items()):
+        if not isinstance(item, dict) or float(item.get("expires", 0) or 0) <= now:
+            DJ_SEARCH_RESULTS.pop(key, None)
+    for key, favorites in list(DJ_FAVORITES.items()):
+        retained = [
+            item for item in favorites
+            if isinstance(item, dict) and float(item.get("expires", 0) or 0) > now
+        ]
+        if retained:
+            DJ_FAVORITES[key] = retained[-50:]
+        else:
+            DJ_FAVORITES.pop(key, None)
+
+    monotonic_now = time.monotonic()
+    for store in (AUTO_REPLY_CHAT_COOLDOWN, AUTO_REPLY_USER_COOLDOWN, USER_SPAM_WARNED_UNTIL):
+        for key, expiry in list(store.items()):
+            if float(expiry or 0) <= now:
+                store.pop(key, None)
+    for key, activity in list(USER_MESSAGE_ACTIVITY.items()):
+        while activity and activity[0][0] < now - 60:
+            activity.popleft()
+        if not activity:
+            USER_MESSAGE_ACTIVITY.pop(key, None)
+
+    while send_history_bot and send_history_bot[0] < monotonic_now - 3600:
+        send_history_bot.popleft()
+    for key, state in list(SOURCE_HEALTH.items()):
+        last_seen = float(state.get("last_seen_at", 0) or 0)
+        if last_seen and last_seen < now - 21600:
+            SOURCE_HEALTH.pop(key, None)
+            EXTERNAL_HOST_LIMITS.pop(key, None)
+
+    # Durable data is operational/gameplay state only; conversation text is never stored here.
+    try:
+        with db_session() as db:
+            retention_counts = cleanup_database_retention(
+                db,
+                now=now,
+                today=datetime.now(ZoneInfo("America/Santiago")).date(),
+            )
+        expired_total = sum(retention_counts.values())
+        if expired_total:
+            logging.info("[PRIVACY] Retención aplicada: %s registros caducados/anónimos", expired_total)
+    except (sqlite3.Error, OSError, ValueError):
+        logging.exception("[PRIVACY] Falló la limpieza de retención; se reintentará.")
     active_poll_ids = set(polls)
     for button_key, poll_id in list(poll_button_map.items()):
         if poll_id not in active_poll_ids:
@@ -1268,8 +1331,10 @@ async def external_request(method: str, url: str, **kwargs):
         "requests": 0, "successes": 0, "failures": 0,
         "last_status": None, "last_latency_ms": 0.0,
         "last_success_at": None, "last_error": None,
-        "consecutive_failures": 0, "circuit_open_until": 0.0
+        "consecutive_failures": 0, "circuit_open_until": 0.0,
+        "last_seen_at": time.time()
     })
+    host_state["last_seen_at"] = time.time()
     if float(host_state.get("circuit_open_until", 0) or 0) > time.time():
         metrics["external_circuit_open"] += 1
         raise RuntimeError(f"Fuente {host} temporalmente aislada por fallos consecutivos.")
@@ -1296,6 +1361,7 @@ async def external_request(method: str, url: str, **kwargs):
                         "last_success_at": None, "last_error": None
                     })
                     state["requests"] += 1
+                    state["last_seen_at"] = time.time()
                     state["last_status"] = response.status_code
                     state["last_latency_ms"] = elapsed_ms
 
@@ -1340,6 +1406,7 @@ async def external_request(method: str, url: str, **kwargs):
                         "last_success_at": None, "last_error": None
                     })
                     state["requests"] += 1
+                    state["last_seen_at"] = time.time()
                     state["failures"] += 1
                     state["last_latency_ms"] = (time.perf_counter() - started) * 1000
                     state["last_error"] = type(exc).__name__
@@ -1673,6 +1740,19 @@ async def send_message(
         return None
 
     content = sanitize_chat_text(content)
+    capture = AI_TOOL_OUTPUT_CAPTURE.get()
+    if AI_TOOL_SILENT.get():
+        if capture is not None and content:
+            normalized_capture = content.strip()
+            is_progress = (
+                normalized_capture.endswith("…")
+                or normalized_capture.lower().startswith(
+                    ("preparando ", "buscando ", "procesando ")
+                )
+            )
+            if normalized_capture and not is_progress and len(capture) < 8:
+                capture.append(normalized_capture[:2000])
+        return {"ok": True, "silent": True, "data": {"content": content[:2000]}}
     parts = split_message_content(content, 1800)
     if not parts:
         return None
@@ -1769,8 +1849,7 @@ async def send_message(
             else:
                 if is_not_in_chat_response(result.get("status"), result.get("data")):
                     logging.info(
-                        "[ANARCHY] Envío omitido en %s: Katherine ya no pertenece a ese chat.",
-                        thread_id,
+                        "[ANARCHY] Envío omitido: Katherine ya no pertenece al chat."
                     )
                 else:
                     logging.error(
@@ -12597,9 +12676,10 @@ async def send_admin_panel(
 
 
 async def execute_ai_tool(
-    event: dict, source: str, session_key: str, invocation: str
-) -> None:
-    """Run an approved existing command and save its visible result to AI context."""
+    event: dict, source: str, session_key: str, invocation: str,
+    *, silent: bool = False,
+) -> dict:
+    """Execute one allowlisted command and return only its captured output."""
     message = event.get("message") or {}
     routed_event = dict(event)
     routed_message = dict(message)
@@ -12607,15 +12687,77 @@ async def execute_ai_tool(
     routed_event["message"] = routed_message
 
     captured: list[str] = []
-    token = AI_TOOL_OUTPUT_CAPTURE.set(captured)
+    capture_token = AI_TOOL_OUTPUT_CAPTURE.set(captured)
+    silent_token = AI_TOOL_SILENT.set(bool(silent))
     try:
         await handle_command(routed_event, source)
+    except Exception as exc:
+        logging.warning("[AI] Falló herramienta %s: %s", invocation.split()[0], type(exc).__name__)
+        captured.append(f"La herramienta terminó con un error ({type(exc).__name__}).")
     finally:
-        AI_TOOL_OUTPUT_CAPTURE.reset(token)
+        AI_TOOL_SILENT.reset(silent_token)
+        AI_TOOL_OUTPUT_CAPTURE.reset(capture_token)
 
-    AI_CORE.remember_tool_result(
-        session_key, invocation, "\n".join(captured)[:1500]
-    )
+    output = "\n".join(captured)[:3000]
+    AI_CORE.remember_tool_result(session_key, invocation, output or "La herramienta no devolvió una salida verificable.")
+    return {
+        "command": invocation,
+        "output": output,
+        "success": bool(output),
+        "interactive": not silent,
+    }
+
+
+async def execute_ai_plan(
+    event: dict, source: str, session_key: str, steps: list,
+    request_text: str = "",
+) -> bool:
+    """Validate every step, execute read-only tools silently and synthesize once."""
+    if not isinstance(steps, list) or not 1 <= len(steps) <= 3:
+        return False
+    validated = []
+    for step in steps:
+        if not isinstance(step, str):
+            return False
+        parts = step.split(maxsplit=1)
+        invocation = validate_ai_tool_call(
+            parts[0] if parts else "", parts[1] if len(parts) > 1 else "",
+            allowed_commands=AI_PLAN_SAFE_COMMANDS,
+        )
+        if not invocation:
+            return False
+        validated.append(invocation)
+
+    results = []
+    for invocation in validated:
+        result = await execute_ai_tool(
+            event, source, session_key, invocation, silent=True
+        )
+        results.append(result)
+        if not result.get("success"):
+            # Stop dependent or subsequent work when a tool has no verifiable output.
+            break
+
+    thread = str(event.get("threadId") or "")
+    message = event.get("message") or {}
+    reply_id = message.get("messageId")
+    if not results:
+        return False
+    try:
+        answer = await AI_CORE.synthesize_tool_results(
+            request_text or "Solicitud de varias acciones",
+            results,
+            external_request,
+            rate_key=None,
+        )
+    except Exception as exc:
+        logging.warning("[AI] No se pudo sintetizar el plan: %s", type(exc).__name__)
+        answer = "\n\n".join(
+            f"{item['command']}: {item['output'] or 'Sin resultado verificable.'}"
+            for item in results
+        )
+    await send_message(thread, answer, source, reply_id)
+    return True
 
 
 async def execute_ai_plan(
@@ -12695,12 +12837,7 @@ async def handle_command(event: dict, source: str):
         )
         return
 
-    logging.info(
-        "[COMANDO] %s | %s | %s",
-        command,
-        nickname,
-        thread
-    )
+    logging.info("[COMANDO] %s", command)
 
     # Identificador de la cuenta que envió el comando. Solo se devuelve al
     # propio usuario para que pueda configurarse como administrador en Render.
@@ -12726,10 +12863,16 @@ async def handle_command(event: dict, source: str):
 
     if command == "!asistente":
         request_text = query.strip()
-        if request_text and await maybe_send_auto_reply(thread, raw_uid, nickname, request_text):
-            return
+        # Explicitly addressed requests must reach the AI/router first; automatic
+        # keyword replies must never intercept a requested action.
         session_key = build_ai_session_key(source, thread, author, message_id)
-        ai_result = await AI_CORE.assist(request_text, session_key, external_request)
+        allowed_ai_commands = set(AI_PUBLIC_COMMANDS)
+        if is_admin_uid(admin_uid):
+            allowed_ai_commands.update(AI_ADMIN_COMMANDS)
+        ai_result = await AI_CORE.assist(
+            request_text, session_key, external_request,
+            allowed_commands=allowed_ai_commands,
+        )
         fallback_command = str(event.get("_nexus_fallback_command") or "").strip()
         has_deterministic_fallback = bool(
             fallback_command and not fallback_command.startswith("asistente ")
@@ -12741,7 +12884,10 @@ async def handle_command(event: dict, source: str):
             await execute_ai_tool(event, source, session_key, fallback_command)
             return
         if ai_result.get("kind") == "plan":
-            if await execute_ai_plan(event, source, session_key, ai_result.get("steps") or []):
+            if await execute_ai_plan(
+                event, source, session_key, ai_result.get("steps") or [],
+                request_text=request_text,
+            ):
                 return
             await send_message(
                 thread,
@@ -12755,7 +12901,38 @@ async def handle_command(event: dict, source: str):
             )
             if invocation:
                 logging.info("[AI] Herramienta permitida: %s", invocation.split()[0])
-                await execute_ai_tool(event, source, session_key, invocation)
+                command_name = invocation.split(maxsplit=1)[0]
+                interactive_commands = {
+                    "menu", "centro", "nexus", "interaccion", "evento",
+                    "trivia", "adivina", "encuesta", "elige", "duelo",
+                    "join", "playlist", "tts", "dj", "reproducir",
+                }
+                tool_result = await execute_ai_tool(
+                    event, source, session_key, invocation,
+                    silent=command_name not in interactive_commands,
+                )
+                if command_name not in interactive_commands:
+                    try:
+                        answer = await AI_CORE.synthesize_tool_results(
+                            request_text, [tool_result],
+                            external_request, rate_key=None,
+                        )
+                        await send_message(thread, answer, source, reply)
+                    except Exception as exc:
+                        logging.warning(
+                            "[AI] No se pudo sintetizar la herramienta: %s",
+                            type(exc).__name__,
+                        )
+                        if tool_result.get("output"):
+                            await send_message(
+                                thread, tool_result["output"], source, reply
+                            )
+                        else:
+                            await send_message(
+                                thread,
+                                "La acción se intentó, pero no recibí un resultado verificable.",
+                                source, reply,
+                            )
                 return
             if has_deterministic_fallback:
                 logging.warning(
@@ -12878,9 +13055,18 @@ async def handle_command(event: dict, source: str):
                 await send_message(thread, "Uso: !ia preguntar <consulta>.", source, reply)
                 return
             prompt = ("Consulta de Genshin Impact. Usa la enciclopedia o guías existentes para verificar. " if sub == "genshin" else "") + rest
-            result = await AI_CORE.assist(prompt, session_key, external_request)
+            allowed_ai_commands = set(AI_PUBLIC_COMMANDS)
+            if is_admin_uid(admin_uid):
+                allowed_ai_commands.update(AI_ADMIN_COMMANDS)
+            result = await AI_CORE.assist(
+                prompt, session_key, external_request,
+                allowed_commands=allowed_ai_commands,
+            )
             if result.get("kind") == "plan":
-                if await execute_ai_plan(event, source, session_key, result.get("steps") or []):
+                if await execute_ai_plan(
+                    event, source, session_key, result.get("steps") or [],
+                    request_text=rest,
+                ):
                     return
                 await send_message(
                     thread,
@@ -12889,9 +13075,31 @@ async def handle_command(event: dict, source: str):
                 )
                 return
             if result.get("kind") == "command":
-                invocation = validate_ai_tool_call(result.get("command", ""), result.get("args", ""))
+                invocation = validate_ai_tool_call(
+                    result.get("command", ""), result.get("args", ""),
+                    allowed_commands=allowed_ai_commands,
+                )
                 if invocation:
-                    await execute_ai_tool(event, source, session_key, invocation)
+                    command_name = invocation.split(maxsplit=1)[0]
+                    interactive_commands = {
+                        "menu", "centro", "nexus", "interaccion", "evento",
+                        "trivia", "adivina", "encuesta", "elige", "duelo",
+                        "join", "playlist", "tts", "dj", "reproducir",
+                    }
+                    tool_result = await execute_ai_tool(
+                        event, source, session_key, invocation,
+                        silent=command_name not in interactive_commands,
+                    )
+                    if command_name not in interactive_commands:
+                        try:
+                            answer = await AI_CORE.synthesize_tool_results(
+                                rest, [tool_result], external_request, rate_key=None
+                            )
+                        except Exception:
+                            answer = tool_result.get("output") or (
+                                "La acción se intentó, pero no recibí un resultado verificable."
+                            )
+                        await send_message(thread, answer, source, reply)
                     return
             await send_message(thread, result.get("answer") or "No pude responder.", source, reply)
             return
@@ -16283,11 +16491,11 @@ async def dispatch(event: dict, source: str):
                 ready.set()
         elif kind in ("room.end", "room.kicked"):
             await stop_dj_room(thread_id, request_leave=False)
-        logging.info("[SALA] %s | %s", kind, thread_id)
+        logging.info("[SALA] Evento de sala: %s", kind)
 
     elif kind in ("thread.added", "thread.removed", "message.edited", "message.deleted"):
         metrics[f"event_{kind}"] += 1
-        logging.info("[EVENTO] %s | %s", kind, event.get("threadId"))
+        logging.info("[EVENTO] %s", kind)
 
     else:
         logging.info("[EVENTO] Ignorado: %s", kind)
