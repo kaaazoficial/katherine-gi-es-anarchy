@@ -224,12 +224,49 @@ ACTION_SCHEMA = {
                 },
                 "required": ["command", "args"],
             },
-            "maxItems": 3,
         },
     },
     "required": ["kind", "answer", "command", "args", "steps"],
 }
 
+
+def sanitize_ai_trace_text(value: Any, limit: int = 2400) -> str:
+    """Redact obvious credentials and personal identifiers before temporary diagnostics."""
+    text = str(value or "")
+    text = re.sub(r"(?i)\\b(?:gsk_[A-Za-z0-9_-]{12,}|sk-proj-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{20,})\\b", "[secreto]", text)
+    text = re.sub(r"(?i)\\bBearer\\s+[^\\s,;]+", "Bearer [secreto]", text)
+    text = re.sub(r"(?i)\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b", "[correo]", text)
+    text = re.sub(r"(?<![\\w])@[A-Za-z0-9_.-]{2,64}\\b", "@[usuario]", text)
+    text = re.sub(r"(?<!\\w)\\d{7,}(?!\\w)", "[identificador]", text)
+    text = re.sub(r"[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f]", " ", text)
+    text = re.sub(r"\\s+", " ", text).strip()
+    maximum = max(80, min(4000, int(limit)))
+    return text if len(text) <= maximum else text[:maximum] + "…[recortado]"
+
+def _provider_error_fields(response: Any) -> tuple[str, str, str]:
+    """Extract bounded, non-secret provider error metadata for diagnostics."""
+    code = error_type = message = ""
+    try:
+        payload = response.json()
+        error_data = payload.get("error", {}) if isinstance(payload, dict) else {}
+        if isinstance(error_data, dict):
+            code = str(error_data.get("code") or "")[:80]
+            error_type = str(error_data.get("type") or "")[:80]
+            message = str(error_data.get("message") or "")[:240]
+    except Exception:
+        pass
+    return code, error_type, message
+
+def _is_structured_output_rejection(response: Any) -> bool:
+    """Identify 400 responses that specifically reject the JSON schema format."""
+    if getattr(response, "status_code", None) != 400:
+        return False
+    code, error_type, message = _provider_error_fields(response)
+    detail = " ".join((code, error_type, message)).casefold()
+    return any(marker in detail for marker in (
+        "json_schema", "response_format", "structured output",
+        "json schema", "schema validation", "invalid schema",
+    ))
 
 def _retry_header_seconds(value: Any) -> float | None:
     """Parse Groq retry/reset headers: seconds, HTTP date, or 1m2.5s."""
