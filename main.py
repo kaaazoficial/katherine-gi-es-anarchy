@@ -13113,12 +13113,6 @@ async def handle_command(event: dict, source: str):
         )
         fallback_command = str(event.get("_nexus_fallback_command") or "").strip()
         provider_failed = bool(ai_result.get("fallback"))
-        if ai_result.get("kind") == "answer":
-            log_ai_conversation_trace(
-                request_text,
-                ai_result.get("answer") or "No pude completar tu solicitud.",
-                "!asistente",
-            )
         if provider_failed:
             metrics["ai_errors"] += 1
         has_deterministic_fallback = should_execute_deterministic_fallback(
@@ -13366,10 +13360,6 @@ async def handle_command(event: dict, source: str):
             )
             if result.get("fallback"):
                 metrics["ai_errors"] += 1
-            if result.get("kind") == "answer":
-                log_ai_conversation_trace(
-                    rest, result.get("answer") or "No pude responder.", "!ia preguntar"
-                )
             if result.get("kind") == "plan":
                 if await execute_ai_plan(
                     event, source, session_key, result.get("steps") or [],
