@@ -1598,12 +1598,40 @@ class KatherineAI:
         source_context: str,
         request_func: RequestFunc,
         rate_key: str | None = None,
+        mode: str = "general",
     ) -> str:
         """Synthesize only the bounded source extracts retrieved for this query."""
         if not str(source_context or "").strip():
             raise ValueError("No hay fuentes para sintetizar.")
+        mode_instructions = {
+            "general": "Entrega un informe integral y equilibrado.",
+            "comparar": (
+                "MODO COMPARACIÓN: compara explícitamente las fuentes y posturas; "
+                "presenta coincidencias, diferencias, evidencia que respalda cada versión, "
+                "calidad metodológica y qué explicación resulta mejor sustentada. "
+                "No fuerces una conclusión si las fuentes no son comparables."
+            ),
+            "verificar": (
+                "MODO VERIFICACIÓN: descompón la consulta en afirmaciones verificables; "
+                "clasifica cada una como respaldada, contradicha, parcialmente respaldada "
+                "o no verificable con el material disponible. Justifica cada clasificación "
+                "con citas [n] y señala qué evidencia primaria falta."
+            ),
+            "cronologia": (
+                "MODO CRONOLOGÍA: ordena únicamente acontecimientos con fechas explícitas "
+                "y respaldadas por fuentes. Distingue fecha del hecho, fecha de publicación "
+                "y fecha de actualización; marca discrepancias y no inventes fechas."
+            ),
+            "informe": (
+                "MODO INFORME EXHAUSTIVO: organiza antecedentes, contexto, hallazgos, "
+                "comparación de evidencia, implicaciones, limitaciones y conclusiones. "
+                "Desarrolla los puntos relevantes sin abreviar artificialmente."
+            ),
+        }
+        mode_instruction = mode_instructions.get(str(mode or "general").casefold(), mode_instructions["general"])
         instructions = (
-            "Eres el CENTRO DE INVESTIGACIÓN AVANZADA de Katherine. Responde en español "
+            "Eres el CENTRO DE INVESTIGACIÓN AVANZADA de Katherine. "
+            + mode_instruction + " Responde en español "
             "con análisis sustancial, preciso y legible, sin imponer un límite artificial "
             "de brevedad. Usa exclusivamente las evidencias proporcionadas; no completes "
             "vacíos con conocimiento externo ni inventes fechas, autores, citas o enlaces. "
