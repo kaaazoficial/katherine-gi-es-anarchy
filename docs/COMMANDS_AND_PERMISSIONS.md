@@ -39,3 +39,10 @@ Los eventos se crean libremente; solo su creador o un UID administrador puede ce
 - Si el evento no contiene un UID real, se deniega cualquier comando privilegiado aunque el nickname coincida con un UID configurado.
 - Las comprobaciones del panel interactivo vuelven a validar el UID al pulsar botones.
 - Los UID configurados se comparan como cadenas exactas y no se aceptan valores vacíos.
+
+
+### Limpieza de mensajes propios
+
+- `!eliminarmensajes` o «Katherine, elimina tus mensajes»: elimina únicamente mensajes de Katherine cuyos identificadores fueron confirmados por Anarchy Apps durante la ejecución actual del proceso.
+- Requiere UID administrador configurado en `ADMIN_UIDS`. Los identificadores se mantienen solo en memoria RAM; no se guardan contenidos ni se crea historial persistente.
+- Tras un reinicio o despliegue, los identificadores temporales anteriores ya no están disponibles. Los mensajes antiguos no se eliminan si no pueden identificarse con seguridad.
