@@ -77,6 +77,8 @@ def test_translation_routes_to_existing_translation_command():
 
 @pytest.mark.parametrize(("payload", "expected"), [
     ({"messageId": "abc"}, "abc"),
+    ({"id": "top-level-id"}, "top-level-id"),
+    ({"data": {"id": "data-id"}}, "data-id"),
     ({"message": {"id": "xyz"}}, "xyz"),
     ({"data": {"message": {"messageId": "nested"}}}, "nested"),
 ])
@@ -244,3 +246,9 @@ def test_provider_failure_can_use_existing_deterministic_fallback():
     assert not should_execute_deterministic_fallback(
         "Katherine, hola", "asistente hola", provider_failed=True,
     )
+
+
+
+def test_natural_language_own_message_cleanup_routes_to_admin_command():
+    assert interpret_natural_request("Katherine, elimina tus mensajes") == "eliminarmensajes"
+    assert interpret_natural_request("Katherine elima tus mensajes") == "eliminarmensajes"

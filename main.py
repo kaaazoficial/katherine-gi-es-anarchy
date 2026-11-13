@@ -120,6 +120,7 @@ ADMIN_ONLY_COMMANDS = frozenset({
     "!admin", "!paneladmin", "!guardian",
     "!respuestas", "!respuesta", "!advertir", "!advertencias",
     "!quitaradvertencia", "!antispam", "!perfilbot", "!avatarbot",
+    "!eliminarmensajes",
 })
 STARTED = time.time()
 STARTED_MONOTONIC = time.monotonic()
@@ -874,6 +875,8 @@ DJ_ROOMS: dict[str, dict] = {}
 DJ_READY_EVENTS: dict[str, asyncio.Event] = {}
 VOICE_CONNECT_LOCKS: dict[str, asyncio.Lock] = {}
 BOT_IDENTITIES: dict[str, dict] = {}
+BOT_SENT_MESSAGE_TTL = 7 * 24 * 60 * 60
+BOT_SENT_MESSAGES: dict[tuple[str, str], deque] = defaultdict(deque)
 TTS_VOICE = SETTINGS.tts_voice
 TTS_VOICE_OPTIONS = {
     "catalina": "es-CL-CatalinaNeural",
@@ -1084,6 +1087,11 @@ def cleanup_expired_state():
         if action.get("expires", now + 1) <= now:
             BUTTON_ACTIONS.pop(key, None)
     cleanup_community_events(COMMUNITY_EVENTS, now=now)
+    for key, messages in list(BOT_SENT_MESSAGES.items()):
+        while messages and float(messages[0].get("created_at", 0)) < now - BOT_SENT_MESSAGE_TTL:
+            messages.popleft()
+        if not messages:
+            BOT_SENT_MESSAGES.pop(key, None)
     AI_CORE.cleanup(now=now)
 
     # Expire process-local catalogs, user favorites and transient identifiers.
@@ -1602,7 +1610,7 @@ def utf16_prefix_length(value: str, limit: int) -> int:
     return len(value)
 
 
-def split_message_content(content: str, limit: int = 1800) -> list[str]:
+def split_message_content(content: str, limit: int = 2000) -> list[str]:
     """Split outgoing messages below the API cap, counting UTF-16 code units."""
     if limit < 1:
         raise ValueError("El límite de mensaje debe ser positivo.")
@@ -1735,6 +1743,41 @@ def sanitize_chat_text(content: Any) -> str:
     return text.strip()
 
 
+async def delete_katherine_messages(thread_id: str, source: str) -> dict[str, int]:
+    """Delete only messages whose IDs were returned by our own successful sends."""
+    key = (str(source), str(thread_id))
+    cutoff = time.time() - BOT_SENT_MESSAGE_TTL
+    tracked = [
+        item for item in BOT_SENT_MESSAGES.get(key, ())
+        if float(item.get("created_at", 0)) >= cutoff
+    ]
+    deleted = failed = 0
+    remaining = deque()
+    for item in tracked:
+        message_id = str(item.get("message_id") or "").strip()
+        if not message_id:
+            continue
+        result = await api(
+            "DELETE",
+            f"/threads/{thread_id}/messages/{message_id}",
+            source,
+        )
+        if result.get("ok") or result.get("status") == 404:
+            deleted += 1
+        else:
+            failed += 1
+            remaining.append(item)
+            logging.warning(
+                "[ANARCHY] No se pudo eliminar un mensaje propio (HTTP %s).",
+                result.get("status"),
+            )
+    if remaining:
+        BOT_SENT_MESSAGES[key] = remaining
+    else:
+        BOT_SENT_MESSAGES.pop(key, None)
+    return {"attempted": len(tracked), "deleted": deleted, "failed": failed}
+
+
 async def send_message(
     thread_id: str,
     content: str,
@@ -1759,9 +1802,9 @@ async def send_message(
                 )
             )
             if normalized_capture and not is_progress and len(capture) < 8:
-                capture.append(normalized_capture[:2000])
-        return {"ok": True, "silent": True, "data": {"content": content[:2000]}}
-    parts = split_message_content(content, 1800)
+                capture.append(normalized_capture)
+        return {"ok": True, "silent": True, "data": {"content": content}}
+    parts = split_message_content(content, 2000)
     if not parts:
         return None
 
@@ -1848,6 +1891,21 @@ async def send_message(
             last_result = result
 
             if result.get("ok"):
+                sent_message_id = extract_message_id(result.get("data"))
+                if sent_message_id:
+                    message_key = (str(source), str(thread_id))
+                    message_history = BOT_SENT_MESSAGES[message_key]
+                    cutoff = time.time() - BOT_SENT_MESSAGE_TTL
+                    while message_history and float(message_history[0].get("created_at", 0)) < cutoff:
+                        message_history.popleft()
+                    message_history.append({
+                        "message_id": sent_message_id,
+                        "created_at": time.time(),
+                    })
+                else:
+                    logging.warning(
+                        "[ANARCHY] Mensaje enviado sin ID recuperable; no podrá incluirse en la limpieza."
+                    )
                 metrics["messages_sent"] += 1
                 now = time.monotonic()
                 last_bot_send = now
@@ -12862,6 +12920,23 @@ async def handle_command(event: dict, source: str):
 
 
 
+    if command == "!eliminarmensajes":
+        result = await delete_katherine_messages(thread, source)
+        if result["attempted"] == 0:
+            answer = (
+                "No tengo identificadores temporales de mensajes propios en esta sala. "
+                "Solo puedo eliminar mensajes enviados desde que esta instancia está activa."
+            )
+        elif result["failed"]:
+            answer = (
+                f"Limpieza parcial: {result['deleted']} mensajes eliminados; "
+                f"{result['failed']} no se pudieron eliminar. Puedes volver a intentarlo."
+            )
+        else:
+            answer = f"He eliminado {result['deleted']} mensajes propios de esta sala."
+        await send_message(thread, answer, source, reply)
+        return
+
     if command == "!asistente":
         request_text = query.strip()
         # Explicitly addressed requests must reach the AI/router first; automatic
@@ -13461,6 +13536,7 @@ async def handle_command(event: dict, source: str):
                 f"{PREFIX}antispam estado|on|off|limite|ventana|repeticiones|enlaces|menciones — protección del chat. [ADMIN]",
                 f"{PREFIX}advertir / advertencias / quitaradvertencia — gestión de advertencias. [ADMIN]",
                 f"{PREFIX}perfilbot <nombre> | <estado> / avatarbot <URL> — perfil del bot. [ADMIN]",
+                f"{PREFIX}eliminarmensajes — elimina mensajes enviados por Katherine en esta sala. [ADMIN]",
                 f"{PREFIX}respuestas on|off|estado / respuesta añadir|lista|eliminar — reglas automáticas. [ADMIN]",
                 f"{PREFIX}ia probar / guardian revisar / analista / diagnostico — herramientas de IA. [ADMIN]",
                 "Los comandos administrativos verifican el UID autorizado, no el nickname.",
@@ -16537,7 +16613,7 @@ async def dispatch(event: dict, source: str):
             if routed_command:
                 routed_event = dict(event)
                 routed_message = dict(message_data)
-                if AI_CORE.is_enabled:
+                if AI_CORE.is_enabled and not routed_command.startswith("eliminarmensajes"):
                     routed_event["_nexus_fallback_command"] = routed_command
                     routed_message["content"] = f"{PREFIX}asistente {incoming_text}"
                     logging.info("[AI] Solicitud explícita enviada al núcleo conversacional")
