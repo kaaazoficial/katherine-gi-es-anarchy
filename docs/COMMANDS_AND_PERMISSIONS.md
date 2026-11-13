@@ -18,7 +18,7 @@ En Render, configura la variable `ADMIN_UIDS` con uno o más UID. Se aceptan sep
 
 ## Comandos privilegiados
 
-- `!estado`, `!fuentes`, `!saludfuentes`, `!autotest`
+- `!estado`, `!fuentes`, `!saludfuentes`, `!metricas`, `!autotest`
 - `!centro`, `!nexus`
 - `!admin`, `!paneladmin`, `!guardian`
 - `!antispam`, `!advertir`, `!advertencias`, `!quitaradvertencia`
@@ -27,6 +27,12 @@ En Render, configura la variable `ADMIN_UIDS` con uno o más UID. Se aceptan sep
 - `!ia probar`, `!ia guardian`, `!ia analista`, `!ia diagnostico`
 
 Los eventos se crean libremente; solo su creador o un UID administrador puede cerrarlos. Los comandos generales de fecha, zona horaria, menú, economía, traducción y multimedia siguen disponibles para todos.
+
+### Métricas y sugerencias de comandos
+
+- `!metricas` muestra solo métricas agregadas del proceso y requiere UID administrador.
+- `GET /metrics` expone métricas Prometheus sin etiquetas de usuario, sala o mensaje. Puede protegerse configurando `PROMETHEUS_METRICS_TOKEN` en Render; cuando se configura, requiere `Authorization: Bearer <token>`.
+- Si se escribe mal un comando, Katherine puede sugerir una coincidencia de alta confianza. La sugerencia nunca ejecuta el comando automáticamente.
 
 ## Protección adicional
 
