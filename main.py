@@ -75,6 +75,9 @@ AI_CORE = KatherineAI()
 AI_TOOL_OUTPUT_CAPTURE: ContextVar[list[str] | None] = ContextVar(
     "katherine_ai_tool_output_capture", default=None
 )
+AI_TOOL_SILENT: ContextVar[bool] = ContextVar(
+    "katherine_ai_tool_silent", default=False
+)
 
 # ---------------------------------------------------------------------------
 # CONFIGURACION
@@ -1736,6 +1739,19 @@ async def send_message(
         return None
 
     content = sanitize_chat_text(content)
+    capture = AI_TOOL_OUTPUT_CAPTURE.get()
+    if AI_TOOL_SILENT.get():
+        if capture is not None and content:
+            normalized_capture = content.strip()
+            is_progress = (
+                normalized_capture.endswith("…")
+                or normalized_capture.lower().startswith(
+                    ("preparando ", "buscando ", "procesando ")
+                )
+            )
+            if normalized_capture and not is_progress and len(capture) < 8:
+                capture.append(normalized_capture[:2000])
+        return {"ok": True, "silent": True, "data": {"content": content[:2000]}}
     parts = split_message_content(content, 1800)
     if not parts:
         return None
@@ -12659,9 +12675,10 @@ async def send_admin_panel(
 
 
 async def execute_ai_tool(
-    event: dict, source: str, session_key: str, invocation: str
-) -> None:
-    """Run an approved existing command and save its visible result to AI context."""
+    event: dict, source: str, session_key: str, invocation: str,
+    *, silent: bool = False,
+) -> dict:
+    """Execute one allowlisted command and return only its captured output."""
     message = event.get("message") or {}
     routed_event = dict(event)
     routed_message = dict(message)
@@ -12669,15 +12686,77 @@ async def execute_ai_tool(
     routed_event["message"] = routed_message
 
     captured: list[str] = []
-    token = AI_TOOL_OUTPUT_CAPTURE.set(captured)
+    capture_token = AI_TOOL_OUTPUT_CAPTURE.set(captured)
+    silent_token = AI_TOOL_SILENT.set(bool(silent))
     try:
         await handle_command(routed_event, source)
+    except Exception as exc:
+        logging.warning("[AI] Falló herramienta %s: %s", invocation.split()[0], type(exc).__name__)
+        captured.append(f"La herramienta terminó con un error ({type(exc).__name__}).")
     finally:
-        AI_TOOL_OUTPUT_CAPTURE.reset(token)
+        AI_TOOL_SILENT.reset(silent_token)
+        AI_TOOL_OUTPUT_CAPTURE.reset(capture_token)
 
-    AI_CORE.remember_tool_result(
-        session_key, invocation, "\n".join(captured)[:1500]
-    )
+    output = "\n".join(captured)[:3000]
+    AI_CORE.remember_tool_result(session_key, invocation, output or "La herramienta no devolvió una salida verificable.")
+    return {
+        "command": invocation,
+        "output": output,
+        "success": bool(output),
+        "interactive": not silent,
+    }
+
+
+async def execute_ai_plan(
+    event: dict, source: str, session_key: str, steps: list,
+    request_text: str = "",
+) -> bool:
+    """Validate every step, execute read-only tools silently and synthesize once."""
+    if not isinstance(steps, list) or not 1 <= len(steps) <= 3:
+        return False
+    validated = []
+    for step in steps:
+        if not isinstance(step, str):
+            return False
+        parts = step.split(maxsplit=1)
+        invocation = validate_ai_tool_call(
+            parts[0] if parts else "", parts[1] if len(parts) > 1 else "",
+            allowed_commands=AI_PLAN_SAFE_COMMANDS,
+        )
+        if not invocation:
+            return False
+        validated.append(invocation)
+
+    results = []
+    for invocation in validated:
+        result = await execute_ai_tool(
+            event, source, session_key, invocation, silent=True
+        )
+        results.append(result)
+        if not result.get("success"):
+            # Stop dependent or subsequent work when a tool has no verifiable output.
+            break
+
+    thread = str(event.get("threadId") or "")
+    message = event.get("message") or {}
+    reply_id = message.get("messageId")
+    if not results:
+        return False
+    try:
+        answer = await AI_CORE.synthesize_tool_results(
+            request_text or "Solicitud de varias acciones",
+            results,
+            external_request,
+            rate_key=None,
+        )
+    except Exception as exc:
+        logging.warning("[AI] No se pudo sintetizar el plan: %s", type(exc).__name__)
+        answer = "\n\n".join(
+            f"{item['command']}: {item['output'] or 'Sin resultado verificable.'}"
+            for item in results
+        )
+    await send_message(thread, answer, source, reply_id)
+    return True
 
 
 async def execute_ai_plan(
@@ -12786,7 +12865,13 @@ async def handle_command(event: dict, source: str):
         if request_text and await maybe_send_auto_reply(thread, raw_uid, nickname, request_text):
             return
         session_key = build_ai_session_key(source, thread, author, message_id)
-        ai_result = await AI_CORE.assist(request_text, session_key, external_request)
+        allowed_ai_commands = set(AI_PUBLIC_COMMANDS)
+        if is_admin_uid(admin_uid):
+            allowed_ai_commands.update(AI_ADMIN_COMMANDS)
+        ai_result = await AI_CORE.assist(
+            request_text, session_key, external_request,
+            allowed_commands=allowed_ai_commands,
+        )
         fallback_command = str(event.get("_nexus_fallback_command") or "").strip()
         has_deterministic_fallback = bool(
             fallback_command and not fallback_command.startswith("asistente ")
@@ -12798,7 +12883,10 @@ async def handle_command(event: dict, source: str):
             await execute_ai_tool(event, source, session_key, fallback_command)
             return
         if ai_result.get("kind") == "plan":
-            if await execute_ai_plan(event, source, session_key, ai_result.get("steps") or []):
+            if await execute_ai_plan(
+                event, source, session_key, ai_result.get("steps") or [],
+                request_text=request_text,
+            ):
                 return
             await send_message(
                 thread,
@@ -12812,7 +12900,30 @@ async def handle_command(event: dict, source: str):
             )
             if invocation:
                 logging.info("[AI] Herramienta permitida: %s", invocation.split()[0])
-                await execute_ai_tool(event, source, session_key, invocation)
+                command_name = invocation.split(maxsplit=1)[0]
+                interactive_commands = {
+                    "menu", "centro", "nexus", "interaccion", "evento",
+                    "trivia", "adivina", "encuesta", "elige", "duelo",
+                    "join", "playlist", "tts", "dj", "reproducir",
+                }
+                await execute_ai_tool(
+                    event, source, session_key, invocation,
+                    silent=command_name not in interactive_commands,
+                )
+                if command_name not in interactive_commands:
+                    try:
+                        # One final response is produced from the actual command output.
+                        tool_context = AI_CORE._history(session_key)
+                        captured = str(tool_context[-1].get("content") or "") if tool_context else ""
+                        output = captured.split("Resultado de herramienta:",1)[-1].strip()
+                        if output:
+                            answer = await AI_CORE.synthesize_tool_results(
+                                request_text, [{"command":invocation,"output":output}],
+                                external_request, rate_key=None,
+                            )
+                            await send_message(thread, answer, source, reply)
+                    except Exception:
+                        pass
                 return
             if has_deterministic_fallback:
                 logging.warning(
@@ -12935,9 +13046,18 @@ async def handle_command(event: dict, source: str):
                 await send_message(thread, "Uso: !ia preguntar <consulta>.", source, reply)
                 return
             prompt = ("Consulta de Genshin Impact. Usa la enciclopedia o guías existentes para verificar. " if sub == "genshin" else "") + rest
-            result = await AI_CORE.assist(prompt, session_key, external_request)
+            allowed_ai_commands = set(AI_PUBLIC_COMMANDS)
+            if is_admin_uid(admin_uid):
+                allowed_ai_commands.update(AI_ADMIN_COMMANDS)
+            result = await AI_CORE.assist(
+                prompt, session_key, external_request,
+                allowed_commands=allowed_ai_commands,
+            )
             if result.get("kind") == "plan":
-                if await execute_ai_plan(event, source, session_key, result.get("steps") or []):
+                if await execute_ai_plan(
+                    event, source, session_key, result.get("steps") or [],
+                    request_text=rest,
+                ):
                     return
                 await send_message(
                     thread,
