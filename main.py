@@ -1742,6 +1742,7 @@ async def delete_katherine_messages(thread_id: str, source: str) -> dict[str, in
     key = (str(source), str(thread_id))
     tracked = list(BOT_SENT_MESSAGES.get(key, ()))
     deleted = failed = 0
+    remaining = deque()
     for item in tracked:
         message_id = str(item.get("message_id") or "").strip()
         if not message_id:
@@ -1755,19 +1756,15 @@ async def delete_katherine_messages(thread_id: str, source: str) -> dict[str, in
             deleted += 1
         else:
             failed += 1
+            remaining.append(item)
             logging.warning(
                 "[ANARCHY] No se pudo eliminar un mensaje propio (HTTP %s).",
                 result.get("status"),
             )
-    if failed == 0:
-        BOT_SENT_MESSAGES.pop(key, None)
-    else:
-        # Keep only IDs that could not be deleted, so a later retry can finish.
-        remaining = deque(
-            item for item in tracked
-            if item.get("message_id")
-        )
+    if remaining:
         BOT_SENT_MESSAGES[key] = remaining
+    else:
+        BOT_SENT_MESSAGES.pop(key, None)
     return {"attempted": len(tracked), "deleted": deleted, "failed": failed}
 
 
