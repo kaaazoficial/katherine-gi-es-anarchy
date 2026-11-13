@@ -13250,11 +13250,20 @@ async def handle_command(event: dict, source: str):
                     summary = "No pude generar una síntesis con IA; estos son los extractos recuperados para que puedas revisarlos."
                 refs = ["FUENTES CONSULTADAS"]
                 for index, item in enumerate(sources[:8], 1):
-                    refs.append(f"[{index}] {item.get('title') or 'Página sin título'} · {item.get('domain') or 'dominio desconocido'}")
+                    publication_date = (
+                        item.get("publication_date") or item.get("published_at")
+                        or item.get("date") or item.get("year") or "fecha no indicada"
+                    )
+                    source_type = item.get("source_type") or "public_web"
+                    refs.append(
+                        f"[{index}] {item.get('title') or 'Página sin título'} · "
+                        f"{item.get('domain') or 'dominio desconocido'} · "
+                        f"{source_type} · {publication_date}"
+                    )
                     excerpt = item.get("excerpt") or item.get("snippet") or ""
                     if excerpt:
                         refs.append("   " + excerpt[:420])
-                answer = "INVESTIGACIÓN · " + research_query + "\n\n" + summary + "\n\n" + "\n".join(refs) + "\n\nLa búsqueda puede omitir páginas bloqueadas o no indexadas; verifica los datos importantes en las fuentes originales."
+                answer = "CENTRO DE INVESTIGACIÓN AVANZADA · " + research_query + "\n\n" + summary + "\n\n" + "\n".join(refs) + "\n\nAlcance: se analizaron hasta ocho resultados y sus extractos recuperados; no implica lectura íntegra de cada documento. La búsqueda puede omitir páginas bloqueadas o no indexadas. Verifica los datos críticos en los documentos originales."
         except Exception as exc:
             logging.warning("[RESEARCH] Falló investigación pública: %s", type(exc).__name__)
             answer = "No pude completar la investigación web en este momento. Los comandos clásicos siguen disponibles."
