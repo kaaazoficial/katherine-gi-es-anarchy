@@ -457,7 +457,7 @@ async def test_new_general_topic_drops_stale_genshin_context(monkeypatch):
         fake_request,
     )
     assert result["kind"] == "answer"
-    sent = "\\n".join(item["content"] for item in captured["json"]["input"])
+    sent = "\n".join(item["content"] for item in captured["json"]["input"])
     assert "Nahida" not in sent
     assert "Teyvat" not in sent
 
@@ -504,7 +504,7 @@ async def test_persistent_domain_drift_uses_neutral_recovery_not_teyvat_rejectio
         return responses.pop(0)
 
     result = await ai.assist(
-        "Katherine, necesito ayuda con un tema",
+        "Katherine, ¿puedes explicarme qué es un capacitor?",
         "room:user",
         fake_request,
     )
