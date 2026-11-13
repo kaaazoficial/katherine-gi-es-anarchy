@@ -76,6 +76,9 @@ def test_explicit_user_actions_are_available_but_plans_stay_read_only():
     assert "evento" not in AI_PLAN_SAFE_COMMANDS
     assert classify_request_intent("Katherine, transfiere 100 puntos a Ana") == "action"
     assert classify_request_intent("Katherine, investiga novedades de Python") == "research"
+    assert classify_request_intent(
+        "Katherine, investiga cambios de Python y analiza este artículo"
+    ) == "multi_action"
     assert classify_request_intent("Katherine, investiga Python y consulta la guía de Cyno") == "genshin"
     public_prompt = build_ai_instructions(AI_PUBLIC_COMMANDS, "action")
     admin_prompt = build_ai_instructions(AI_PUBLIC_COMMANDS | AI_ADMIN_COMMANDS, "action")
@@ -376,6 +379,168 @@ def test_groq_status_does_not_claim_store_disabled(monkeypatch):
 
 
 
+def test_open_topic_request_is_recognized_as_missing_subject():
+    from katherine_ai import clarification_for_unspecified_topic
+    assert clarification_for_unspecified_topic(
+        "Katherine Necesito ayuda para saber de un tema"
+    ) == (
+        "¡Claro! ¿Sobre qué tema necesitas información? Dime el nombre del tema "
+        "o qué te gustaría entender y te ayudo."
+    )
+    assert clarification_for_unspecified_topic(
+        "Oye Katherine, quiero saber sobre algún tema"
+    )
+    assert clarification_for_unspecified_topic(
+        "Katherine: necesito ayuda con un tema"
+    )
+    assert clarification_for_unspecified_topic("Katherine, necesito ayuda")
+    assert clarification_for_unspecified_topic("Oye Katherine, ¿puedes ayudarme?")
+    assert clarification_for_unspecified_topic("Katherine tengo una pregunta")
+    assert clarification_for_unspecified_topic(
+        "Katherine, necesito ayuda para saber de electricidad"
+    ) is None
+
+
+def test_contextual_genshin_followups_require_a_recent_genshin_question():
+    from katherine_ai import (
+        is_contextual_followup_request, is_contextual_genshin_followup,
+    )
+    history = [{"role": "user", "content": "¿Quién es Nahida?"}]
+    assert is_contextual_followup_request("Katherine, ¿y qué armas le sirven?")
+    assert is_contextual_genshin_followup(
+        "Katherine, ¿y qué armas le sirven?", history
+    )
+    assert not is_contextual_genshin_followup(
+        "Katherine, explícame circuitos eléctricos", history
+    )
+    assert not is_contextual_genshin_followup(
+        "Katherine, dime la fecha", history
+    )
+    assert is_contextual_genshin_followup(
+        "Katherine, explícame sus constelaciones", history
+    )
+    assert not is_contextual_genshin_followup(
+        "Katherine, cambiando de tema, ¿y qué armas compro?", history
+    )
+
+
+@pytest.mark.asyncio
+async def test_canonical_faq_drops_previous_genshin_context(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+    ai._append_history("room:user", "user", "¿Quién es Nahida?")
+    ai._append_history("room:user", "assistant", "Nahida es una arconte.")
+    result = await ai.assist(
+        "Katherine, ¿qué es Anarchy Apps?",
+        "room:user",
+        lambda *args, **kwargs: None,
+    )
+    assert result["kind"] == "answer"
+    assert "Anarchy apps es una red social" in result["answer"]
+    assert "Nahida" not in str(ai._history("room:user"))
+
+
+@pytest.mark.asyncio
+async def test_open_topic_request_asks_for_subject_without_calling_provider(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+    ai._append_history("room:user", "user", "¿Quién es Cyno?")
+    ai._append_history("room:user", "assistant", "Cyno es un personaje de Genshin.")
+    calls = []
+
+    async def unexpected_request(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("Una solicitud sin tema debe pedir aclaración localmente.")
+
+    result = await ai.assist(
+        "Katherine Necesito ayuda para saber de un tema",
+        "room:user",
+        unexpected_request,
+    )
+    assert result["kind"] == "answer"
+    assert "¿Sobre qué tema" in result["answer"]
+    assert calls == []
+    assert "Cyno" not in str(ai._history("room:user"))
+    assert ai._history("room:user")[-1]["content"] == result["answer"]
+
+
+@pytest.mark.asyncio
+async def test_new_general_topic_drops_stale_genshin_context(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+    ai._append_history("room:user", "user", "¿Quién es Nahida?")
+    ai._append_history("room:user", "assistant", "Nahida es una arconte.")
+    captured = {}
+
+    async def fake_request(method, url, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse(response_payload({
+            "kind": "answer", "answer": "Los circuitos eléctricos tienen componentes.",
+            "command": "", "args": "",
+        }))
+
+    result = await ai.assist(
+        "Katherine, explícame circuitos eléctricos",
+        "room:user",
+        fake_request,
+    )
+    assert result["kind"] == "answer"
+    sent = "\n".join(item["content"] for item in captured["json"]["input"])
+    assert "Nahida" not in sent
+    assert "Teyvat" not in sent
+
+
+@pytest.mark.asyncio
+async def test_genshin_followup_keeps_only_clear_recent_game_context(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+    ai._append_history("room:user", "user", "¿Quién es Nahida?")
+    ai._append_history("room:user", "assistant", "Nahida es un personaje de Genshin.")
+    captured = {}
+
+    async def fake_request(method, url, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse(response_payload({
+            "kind": "answer", "answer": "Puede usar catalizador y armas de apoyo.",
+            "command": "", "args": "",
+        }))
+
+    result = await ai.assist("Katherine, ¿y qué armas le sirven?", "room:user", fake_request)
+    assert result["kind"] == "answer"
+    assert "Nahida" in captured["json"]["input"][0]["content"]
+    assert "INTENCIÓN: Genshin Impact" in captured["json"]["instructions"]
+
+
+@pytest.mark.asyncio
+async def test_persistent_domain_drift_uses_neutral_recovery_not_teyvat_rejection(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+    responses = [
+        FakeResponse(response_payload({
+            "kind": "answer",
+            "answer": "Ese asunto se relaciona con Genshin Impact y Teyvat.",
+            "command": "", "args": "",
+        })),
+        FakeResponse(response_payload({
+            "kind": "answer",
+            "answer": "La consulta continúa sin tema suficiente en Genshin Impact y Teyvat.",
+            "command": "", "args": "",
+        })),
+    ]
+
+    async def fake_request(method, url, **kwargs):
+        return responses.pop(0)
+
+    result = await ai.assist(
+        "Katherine, ¿puedes explicarme qué es un capacitor?",
+        "room:user",
+        fake_request,
+    )
+    assert result["kind"] == "answer"
+    assert "Me desvié de tu pregunta" in result["answer"]
+    assert "enciclopedia de Teyvat" not in result["answer"]
+
+
 @pytest.mark.asyncio
 async def test_unrelated_question_cannot_execute_genshin_tool(monkeypatch):
     monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
@@ -401,7 +566,11 @@ async def test_unrelated_question_cannot_execute_genshin_tool(monkeypatch):
     assert result["kind"] == "answer"
     assert "anarchy apps" in result["answer"].casefold()
     assert len(requests) == 2
-    assert "No invoques ninguna herramienta de Genshin" in requests[1]["json"]["instructions"]
+    assert "No ejecutes herramientas" in requests[1]["json"]["instructions"]
+    assert "- enciclopedia:" not in requests[1]["json"]["instructions"]
+    assert requests[1]["json"]["input"] == [
+        {"role": "user", "content": "qué ofrece el ecosistema comunitario de esta aplicación"}
+    ]
 
 
 @pytest.mark.asyncio

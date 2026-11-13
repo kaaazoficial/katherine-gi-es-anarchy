@@ -12763,26 +12763,6 @@ async def execute_ai_plan(
     return True
 
 
-async def execute_ai_plan(
-    event: dict, source: str, session_key: str, steps: list
-) -> bool:
-    """Validate the entire bounded plan before executing any step in order."""
-    if not isinstance(steps, list) or not 1 <= len(steps) <= 3:
-        return False
-    validated = []
-    for step in steps:
-        if not isinstance(step, str):
-            return False
-        parts = step.split(maxsplit=1)
-        invocation = validate_ai_tool_call(
-            parts[0] if parts else "", parts[1] if len(parts) > 1 else ""
-        )
-        if not invocation:
-            return False
-        validated.append(invocation)
-    for invocation in validated:
-        await execute_ai_tool(event, source, session_key, invocation)
-    return True
 
 
 async def handle_command(event: dict, source: str):

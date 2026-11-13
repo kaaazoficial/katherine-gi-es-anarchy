@@ -32,6 +32,13 @@ Sin clave, la IA informa que no está conectada y los comandos clásicos siguen 
 
 Las solicitudes naturales explícitas se envían al núcleo si hay clave configurada; si no, conservan el enrutador determinista. Las herramientas de Teyvat solo se seleccionan cuando la consulta menciona Genshin/Teyvat o una entidad reconocible del juego; preguntas generales sobre Anarchy Apps, Katherine, bots, APIs o programación nunca se derivan a la enciclopedia. La mención aislada «Katherine» nunca activa el bot.
 
+## Conversación general y control de contexto
+
+- Una petición que solicite ayuda sobre «un tema» sin identificarlo pide el tema antes de consultar al proveedor; no se adivina Genshin ni otro dominio.
+- El contexto de Genshin solo se conserva para referencias breves que parezcan una continuación del último turno de Genshin. Una pregunta con tema distinto descarta ese contexto temporal.
+- Si el modelo genera una herramienta o respuesta de Genshin para una consulta ajena, se hace un único reintento sin herramientas y sin historial anterior. Si vuelve a desviarse, Katherine reconoce el error y pide concretar la consulta, sin rechazarla por no ser de Teyvat.
+- Los planes solo se aceptan cuando la petición contiene varias acciones explícitas y todos los pasos son herramientas de solo lectura validadas. La ejecución vuelve a comprobar esa lista segura y se realiza en silencio para entregar un único resultado.
+
 ## Seguridad y límites
 - Los comandos propuestos pasan por allowlist, validación de argumentos y el handler original.
 - No se permiten acciones administrativas, sanciones, pagos, transferencias ni cambios de perfil desde el modelo. El comando `!metricas` sigue siendo exclusivo de UID administradores.

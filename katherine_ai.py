@@ -256,7 +256,94 @@ def resolve_community_faq(question: str) -> str | None:
     return None
 
 
-BASE_INSTRUCTIONS = """Eres Katherine, bot de entretenimiento de la comunidad Genshin Impact ES dentro de Anarchy Apps; no eres soporte oficial de Anarchy Apps. Tu creador es Sinner. Si preguntan qué es Anarchy Apps, la respuesta canónica es: "Anarchy apps es una red social para crear comunidades, unirse a ellas y hablar con la gente". Si preguntan quién eres, preséntate como bot de entretenimiento con IA, música, juegos y más.
+def _normalize_ai_request(value: str) -> str:
+    """Normalize an addressed utterance for intent and clarification checks."""
+    text = normalize_topic_text(value)
+    return re.sub(r"^(?:oye )?katherine\s+", "", text).strip()
+
+
+def clarification_for_unspecified_topic(value: str) -> str | None:
+    """Ask for the missing subject instead of inventing one or guessing a domain."""
+    text = _normalize_ai_request(value)
+    patterns = (
+        r"^(?:necesito|quiero|quisiera|busco) ayuda para (?:saber|aprender|conocer) (?:de|sobre) (?:un|algun) tema$",
+        r"^(?:necesito|quiero|quisiera|busco) ayuda (?:con|sobre) (?:un|algun) tema$",
+        r"^(?:quiero|quisiera|necesito) saber (?:de|sobre|acerca de) (?:un|algun) tema$",
+        r"^(?:podrias|puedes) ayudarme (?:a|para) (?:saber|aprender|conocer) (?:de|sobre) (?:un|algun) tema$",
+        r"^(?:quiero|quisiera) aprender (?:de|sobre) (?:un|algun) tema$",
+        r"^(?:tengo|me surgio) (?:una )?duda (?:sobre|de) (?:un|algun) tema$",
+        r"^(?:necesito ayuda|quiero ayuda|ayudame|ayuda por favor)$",
+        r"^(?:puedes|podrias) ayudarme$",
+        r"^(?:me puedes|me podrias) ayudar$",
+        r"^(?:necesito|quiero) saber algo$",
+        r"^(?:tengo) (?:una )?(?:duda|pregunta)$",
+    )
+    if any(re.fullmatch(pattern, text) for pattern in patterns):
+        return (
+            "¡Claro! ¿Sobre qué tema necesitas información? Dime el nombre del tema "
+            "o qué te gustaría entender y te ayudo."
+        )
+    return None
+
+
+def is_contextual_followup_request(value: str) -> bool:
+    """Recognize short references that depend on the immediately previous turn."""
+    text = _normalize_ai_request(value)
+    if not text:
+        return False
+    topic_change_markers = (
+        "otra cosa", "otro tema", "cambiando de tema", "tema distinto",
+        "algo diferente", "nada que ver", "ahora quiero hablar de",
+        "ahora necesito saber sobre", "por cierto",
+    )
+    if any(marker in text for marker in topic_change_markers):
+        return False
+    pronoun_reference = re.search(
+        r"\b(?:ella|ellas|ellos|eso|ese|esa|lo anterior|la anterior|el anterior|"
+        r"la misma|el mismo|a ella|con ella|para ella|sobre ella|de ella|"
+        r"le sirve|le sirven|le conviene|le queda|su historia|sus armas|sus talentos|sus constelaciones|sus habilidades|sus artefactos)\b",
+        text,
+    )
+    game_followup_subject = re.search(
+        r"\b(?:arma|armas|build|artefactos?|talentos?|equipos?|materiales|"
+        r"rotacion|constelaciones?|elemento|personajes?|habilidades?|ascensiones?)\b",
+        text,
+    )
+    return bool(
+        (pronoun_reference and len(text.split()) <= 18)
+        or (
+            game_followup_subject
+            and re.match(r"^(?:que|cual|como|y que|y cual|y como)\b", text)
+        )
+        or re.match(r"^y (?:que|cual|como|con|para|sobre|la|respecto a)\b", text)
+    )
+
+
+def is_contextual_genshin_followup(
+    value: str, history: list[dict[str, str]]
+) -> bool:
+    """Keep the Genshin domain only for a clear follow-up to the immediately previous user turn."""
+    if is_genshin_related_request(value) or not is_contextual_followup_request(value):
+        return False
+    last_user_turn = next(
+        (turn for turn in reversed(history) if turn.get("role") == "user"),
+        None,
+    )
+    return bool(
+        last_user_turn
+        and is_genshin_related_request(str(last_user_turn.get("content") or ""))
+    )
+
+
+def build_domain_drift_recovery() -> str:
+    """User-facing recovery when the model keeps drifting after a guarded retry."""
+    return (
+        "Me desvié de tu pregunta y no quiero darte información incorrecta. "
+        "¿Puedes concretar qué necesitas saber o qué aspecto del tema te interesa?"
+    )
+
+
+BASE_INSTRUCTIONS = """Eres Katherine, un bot de entretenimiento y asistente conversacional de una comunidad de Anarchy Apps centrada en Genshin Impact ES; no eres soporte oficial de Anarchy Apps. Tu creador es Sinner. Aunque la comunidad tenga ese enfoque, puedes conversar y ayudar con temas generales: nunca supongas que una pregunta trata de Genshin si el usuario no lo indica. Si preguntan qué es Anarchy Apps, la respuesta canónica es: "Anarchy apps es una red social para crear comunidades, unirse a ellas y hablar con la gente". Si preguntan quién eres, preséntate como bot de entretenimiento con IA, música, juegos y más.
 Responde en español natural, claro, cordial y adaptado al tono del usuario. Ve directo al contenido; evita introducciones repetitivas, relleno y listas innecesarias. No centres automáticamente cada conversación en Genshin, Cyno ni un personaje. Distingue entre conversar, responder una pregunta, buscar información y ejecutar una acción solicitada.
 CALIDAD DE RESPUESTA: contesta primero la pregunta concreta; explica el razonamiento solo cuando ayude. No conviertas toda pregunta en un comando ni toda frase con un verbo de acción en una orden. Si una petición es ambigua, pregunta únicamente por el dato imprescindible. No repitas preguntas que ya tengan respuesta en el contexto temporal vigente. Diferencia hechos comprobados, estimaciones y opiniones; reconoce límites y contradicciones. Para información cambiante o que requiera fuentes, usa investigar o enlace cuando estén disponibles, y basa la síntesis en el material recuperado. No inventes referencias ni afirmes que consultaste fuentes si no lo hiciste. Si una herramienta devuelve datos, resume el resultado y sus límites sin afirmar más de lo que demuestra.
 Cuando el usuario te pida explícitamente que Katherine haga algo, comprueba el catálogo dinámico de herramientas y prioriza ejecutar el comando existente en lugar de limitarte a explicar cómo hacerlo. Usa exactamente el nombre del comando y los argumentos que correspondan. Si faltan datos esenciales (por ejemplo, destinatario, cantidad o texto), pregunta solo por el dato necesario; nunca lo inventes.
@@ -330,23 +417,24 @@ def is_bot_author(author: dict[str, Any] | None, bot_uid: str | None) -> bool:
     return bool(incoming_uid and expected_uid and incoming_uid == expected_uid)
 
 
-def classify_request_intent(value: str) -> str:
-    """Classify the user's intent without letting topic words trigger tools."""
-    text = normalize_topic_text(value)
-    text = re.sub(r"^(?:oye[, ]+)?katherine(?:[, :]+|$)\s*", "", text).strip()
+def classify_request_intent(
+    value: str, *, contextual_genshin: bool = False
+) -> str:
+    """Classify intent using the current request and a narrowly scoped follow-up."""
+    text = _normalize_ai_request(value)
     if not text:
         return "conversation"
-    # Domain takes precedence over generic action words: researching a
-    # Genshin character must stay in the Teyvat domain.
-    if is_genshin_related_request(value):
+    # Domain takes precedence only for explicit game references or a clear
+    # follow-up to the immediately preceding Genshin-related user request.
+    if is_genshin_related_request(value) or contextual_genshin:
         return "genshin"
+    if text in {"ayuda", "comandos disponibles", "que puedes hacer", "que sabes hacer"}:
+        return "action"
     research_markers = (
         "investiga", "investigar", "busca informacion", "fuentes sobre",
         "analiza este enlace", "resume este enlace", "lee este articulo",
         "consulta fuentes", "que ha pasado recientemente",
     )
-    if any(marker in text for marker in research_markers):
-        return "research"
     conversational_question_markers = (
         "que opinas", "que piensas", "por que", "explicame", "explica ",
         "cuentame", "hablame de", "que significa", "como funciona",
@@ -362,13 +450,21 @@ def classify_request_intent(value: str) -> str:
         "enviar", "regala", "regalar", "actualiza", "cambia", "borra",
         "elimina", "reinicia", "transfiere", "paga", "lanza", "tira",
         "juega", "inicia", "activa", "desactiva", "conecta", "entra",
-        "unete", "lee", "deja de leer", "resume",
+        "unete", "lee", "deja de leer", "resume", "investiga",
+        "investigar", "analiza", "analizar", "revisa",
     )
-    action_count = sum(1 for marker in action_markers if re.search(rf"\b{re.escape(marker)}\b", text))
+    action_count = sum(
+        1 for marker in action_markers
+        if re.search(rf"\b{re.escape(marker)}\b", text)
+    )
     connectors = (" y ", " despues ", " luego ", " tambien ", " ademas ")
-    has_multiple_actions = action_count >= 2 and any(item in f" {text} " for item in connectors)
+    has_multiple_actions = action_count >= 2 and any(
+        item in f" {text} " for item in connectors
+    )
     if has_multiple_actions:
         return "multi_action"
+    if any(marker in text for marker in research_markers):
+        return "research"
     if action_count:
         return "action"
     return "conversation"
@@ -945,13 +1041,57 @@ class KatherineAI:
         allowed = AI_ALLOWED_COMMANDS if allowed_commands is None else frozenset(
             str(item).strip().lstrip("!").casefold() for item in allowed_commands
         )
-        intent = classify_request_intent(text)
-        instructions = build_ai_instructions(allowed, intent)
+        history = self._history(key)
         faq_answer = resolve_community_faq(text)
         if faq_answer:
+            last_user_turn = next(
+                (turn for turn in reversed(history) if turn.get("role") == "user"),
+                None,
+            )
+            if (
+                last_user_turn
+                and is_genshin_related_request(str(last_user_turn.get("content") or ""))
+                and not is_genshin_related_request(text)
+            ):
+                # Canonical FAQ answers are domain-independent; don't carry a
+                # stale Genshin conversation through this early-return path.
+                self._memory.pop(key, None)
             self._append_history(key, "user", text[:1200])
             self._append_history(key, "assistant", faq_answer[:1800])
             return {"kind": "answer", "answer": faq_answer, "command": "", "args": ""}
+
+        clarification = clarification_for_unspecified_topic(text)
+        if clarification:
+            # An unspecified subject is a new topic, not a Genshin follow-up.
+            self._memory.pop(key, None)
+            self._append_history(key, "user", text[:1200])
+            self._append_history(key, "assistant", clarification[:1800])
+            return {
+                "kind": "answer", "answer": clarification, "command": "", "args": ""
+            }
+
+        contextual_genshin = is_contextual_genshin_followup(text, history)
+        last_user_turn = next(
+            (turn for turn in reversed(history) if turn.get("role") == "user"),
+            None,
+        )
+        last_user_was_genshin = bool(
+            last_user_turn
+            and is_genshin_related_request(str(last_user_turn.get("content") or ""))
+        )
+        if last_user_was_genshin and not contextual_genshin:
+            # A new non-referential request changes topic; discard stale domain
+            # context before generating a general-purpose answer.
+            self._memory.pop(key, None)
+            history = []
+
+        request_is_genshin = (
+            is_genshin_related_request(text) or contextual_genshin
+        )
+        intent = classify_request_intent(
+            text, contextual_genshin=contextual_genshin
+        )
+        instructions = build_ai_instructions(allowed, intent)
         if not self.is_enabled:
             return {
                 "kind": "answer",
@@ -964,7 +1104,6 @@ class KatherineAI:
                 "args": "",
                 "fallback": True,
             }
-        history = self._history(key)
         messages = [*history, {"role": "user", "content": text[:1200]}]
         try:
             result = await self._request_json(
@@ -998,6 +1137,17 @@ class KatherineAI:
             if result["kind"] == "command" else None
         )
         if result["kind"] == "plan":
+            if intent != "multi_action":
+                self._append_history(key, "user", text[:1200])
+                safe_answer = (
+                    "No necesitas encadenar acciones para esta consulta. "
+                    "Dime qué aspecto quieres conocer y te responderé directamente."
+                )
+                self._append_history(key, "assistant", safe_answer)
+                return {
+                    "kind": "answer", "answer": safe_answer,
+                    "command": "", "args": "", "fallback": True,
+                }
             raw_steps = result.get("steps") or []
             validated_steps = []
             if not isinstance(raw_steps, list) or not 1 <= len(raw_steps) <= 3:
@@ -1018,7 +1168,7 @@ class KatherineAI:
                     break
                 validated_steps.append(invocation_step)
             if validated_steps:
-                if not is_genshin_related_request(text) and any(
+                if not request_is_genshin and any(
                     item.split(maxsplit=1)[0] in GENSHIN_ONLY_TOOL_COMMANDS
                     for item in validated_steps
                 ):
@@ -1044,7 +1194,7 @@ class KatherineAI:
         result_answer = str(result.get("answer") or "").strip()
         result_tool_name = invocation.split(maxsplit=1)[0] if invocation else ""
         unrelated_genshin_output = (
-            not is_genshin_related_request(text)
+            not request_is_genshin
             and (
                 result_tool_name in GENSHIN_ONLY_TOOL_COMMANDS
                 or (
@@ -1056,22 +1206,26 @@ class KatherineAI:
         if unrelated_genshin_output:
             # Guard both wrong tool calls and direct answers that drift into
             # Genshin when the user's request is about an unrelated subject.
+            # Retry as a clean, answer-only request: exclude stale turns and
+            # expose no tools so conversation history cannot pull the model back
+            # into Genshin or produce another speculative command.
             retry_instructions = (
-                instructions
-                + "\n\nREGLA DE DOMINIO: esta petición no contiene contexto "
-                "de Genshin Impact ni Teyvat. No invoques ninguna herramienta de "
-                "Genshin ni respondas sobre el juego. Responde directamente a la "
-                "pregunta general con la información que realmente conozcas; si no "
-                "puedes verificarla, reconoce esa limitación."
+                build_ai_instructions(frozenset(), "conversation")
+                + "\n\nRESPONDE SOLO A LA PREGUNTA ACTUAL. Devuelve kind=answer, "
+                "deja command, args y steps vacíos. No ejecutes herramientas ni "
+                "menciones Genshin/Teyvat salvo que el usuario lo haya pedido. "
+                "Si falta el tema o el contexto, formula una pregunta breve para aclararlo."
             )
+            retry_messages = [{"role": "user", "content": text[:1200]}]
             try:
                 retry = await self._request_json(
                     retry_instructions,
-                    messages,
+                    retry_messages,
                     request_func,
                     rate_key=None,
                     cooldown=0,
                     max_output_tokens=650,
+                    max_input_messages=1,
                 )
             except Exception:
                 retry = {"kind": "answer", "answer": ""}
@@ -1088,26 +1242,19 @@ class KatherineAI:
                     "command": "", "args": "",
                 }
 
-            retry_invocation = (
-                validate_ai_tool_call(
-                    retry.get("command", ""), retry.get("args", ""), allowed
-                )
-                if retry.get("kind") == "command" else None
-            )
-            if retry_invocation and retry_invocation.split(maxsplit=1)[0] not in GENSHIN_ONLY_TOOL_COMMANDS:
-                self._append_history(key, "user", text[:1200])
-                return {
-                    "kind": "command",
-                    "answer": "",
-                    "command": retry.get("command", ""),
-                    "args": retry.get("args", ""),
-                }
+            self._append_history(key, "user", text[:1200])
+            safe_answer = build_domain_drift_recovery()
+            self._append_history(key, "assistant", safe_answer)
+            return {
+                "kind": "answer", "answer": safe_answer,
+                "command": "", "args": "", "fallback": True,
+            }
 
+        if result["kind"] == "command" and intent == "conversation":
+            # A tool call must never turn a general question into an action.
             self._append_history(key, "user", text[:1200])
             safe_answer = (
-                "Esa consulta no parece relacionada con Genshin Impact, así que "
-                "no consultaré la enciclopedia de Teyvat. No tengo suficiente "
-                "información verificada para responderla con precisión."
+                "Puedo responderte directamente. ¿Qué aspecto del tema te gustaría conocer?"
             )
             self._append_history(key, "assistant", safe_answer)
             return {
