@@ -1415,6 +1415,7 @@ class KatherineAI:
                 "generationConfig": {
                     "responseMimeType": "application/json",
                     "responseSchema": GEMINI_ACTION_SCHEMA,
+                    "thinkingConfig": {"thinkingLevel": "LOW"},
                 },
             }
         else:
@@ -1449,7 +1450,7 @@ class KatherineAI:
 
                 base_interval = 3.1 if self.is_gemini else 2.1 if self.is_groq else 0.65
                 response = None
-                max_attempts = 4
+                max_attempts = 2
                 for attempt in range(max_attempts):
                     now = time.monotonic()
                     min_interval = max(
@@ -1469,12 +1470,17 @@ class KatherineAI:
                             request_url,
                             headers=request_headers,
                             json=body,
-                            timeout=35,
+                            timeout=12,
                         )
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:
-                        if attempt + 1 >= max_attempts or not self._is_transient_network_error(exc):
+                        if (
+                            attempt + 1 >= max_attempts
+                            or not self._is_transient_network_error(exc)
+                            # A read timeout already consumed the latency budget.
+                            or "timeout" in type(exc).__name__.casefold()
+                        ):
                             raise
                         delay = self._transient_retry_delay(None, attempt)
                         self.metrics["ai_provider_retries"] += 1
@@ -1526,7 +1532,7 @@ class KatherineAI:
                             request_url,
                             headers=request_headers,
                             json=fallback_body,
-                            timeout=35,
+                            timeout=12,
                         )
                         state["last_request"] = time.monotonic()
                         self._provider_last_request = state["last_request"]
@@ -1548,6 +1554,12 @@ class KatherineAI:
                         if attempt + 1 >= max_attempts:
                             break
                         delay = self._transient_retry_delay(response, attempt)
+                        if delay > 2.0:
+                            logging.warning(
+                                "[AI] %s pidió esperar %.2f s; se omite el reintento y se activa el respaldo.",
+                                self.provider_name, delay,
+                            )
+                            break
                         self.metrics["ai_provider_retries"] += 1
                         logging.warning(
                             "[AI] %s HTTP %s transitorio; reintento %s/%s en %.2f s.",
@@ -1575,6 +1587,12 @@ class KatherineAI:
                     if attempt + 1 >= max_attempts:
                         break
                     delay = self._provider_retry_delay(response, attempt)
+                    if delay > 2.0:
+                        logging.warning(
+                            "[AI] %s pidió esperar %.2f s por límite de solicitudes; se omite la espera larga.",
+                            self.provider_name, delay,
+                        )
+                        break
                     self.metrics["ai_provider_retries"] += 1
                     logging.warning(
                         "[AI] %s HTTP 429; reintento %s/%s en %.2f s.",

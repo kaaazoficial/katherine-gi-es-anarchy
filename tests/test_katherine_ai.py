@@ -983,6 +983,8 @@ async def test_gemini_is_primary_and_uses_native_generate_content(monkeypatch):
     assert "Authorization" not in calls[0][1]["headers"]
     assert "systemInstruction" in calls[0][1]["json"]
     assert calls[0][1]["json"]["generationConfig"]["responseMimeType"] == "application/json"
+    assert calls[0][1]["json"]["generationConfig"]["thinkingConfig"]["thinkingLevel"] == "LOW"
+    assert calls[0][1]["timeout"] == 12
     assert calls[0][1]["json"]["contents"][0]["role"] == "user"
     assert ai.last_provider_name == "Google Gemini"
     assert ai.last_model == "gemini-3.8-flash"
@@ -1021,16 +1023,47 @@ async def test_gemini_failure_falls_back_to_groq(monkeypatch):
     assert result["answer"] == "Groq respondió."
     assert [item[0] for item in calls] == [
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
-    ] * 4 + [
+    ] * 2 + [
         "https://api.groq.com/openai/v1/responses",
     ]
     assert calls[0][1]["headers"]["x-goog-api-key"] == "gemini-test-key"
-    assert calls[4][1]["headers"]["Authorization"] == "Bearer groq-test-key"
+    assert calls[2][1]["headers"]["Authorization"] == "Bearer groq-test-key"
     assert calls[0][1]["json"]["systemInstruction"]["parts"][0]["text"]
     assert ai.last_provider_name == "Groq"
     assert ai.last_model == "openai/gpt-oss-20b"
     assert ai.metrics["ai_provider_failovers"] == 1
-    assert ai.metrics["ai_provider_retries"] == 3
+    assert ai.metrics["ai_provider_retries"] == 1
+
+
+@pytest.mark.asyncio
+async def test_gemini_read_timeout_fails_over_without_waiting_for_more_retries(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_PRIMARY_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
+    monkeypatch.delenv("KATHERINE_AI_API_URL", raising=False)
+    ai = KatherineAI()
+    calls = []
+
+    async def fake_request(method, url, **kwargs):
+        calls.append((url, kwargs))
+        if "generativelanguage.googleapis.com" in url:
+            raise TimeoutError("Gemini read timed out")
+        return FakeResponse(response_payload({
+            "kind": "answer", "answer": "Groq respondió rápido.", "command": "", "args": ""
+        }))
+
+    result = await ai._request_json(
+        "Responde brevemente.",
+        [{"role": "user", "content": "Hola"}],
+        fake_request,
+    )
+    assert result["answer"] == "Groq respondió rápido."
+    assert len(calls) == 2
+    assert "generativelanguage.googleapis.com" in calls[0][0]
+    assert calls[0][1]["timeout"] == 12
+    assert "api.groq.com" in calls[1][0]
+    assert ai.metrics["ai_provider_retries"] == 0
+    assert ai.metrics["ai_provider_failovers"] == 1
 
 
 @pytest.mark.asyncio
@@ -1053,7 +1086,7 @@ async def test_direct_gemini_probe_does_not_fall_back_to_groq(monkeypatch):
         await ai.test_provider_connection("gemini", fake_request)
     assert calls == [
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
-    ] * 4
+    ] * 2
 
 
 @pytest.mark.asyncio
