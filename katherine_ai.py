@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 import json
 import logging
 import hashlib
@@ -732,45 +733,135 @@ class KatherineAI:
         self._analyst: dict[str, deque] = {}
         self._semaphore: asyncio.Semaphore | None = None
         self._provider_lock = asyncio.Lock()
+        # Legacy scalar metrics remain for compatibility; active pacing/quota state
+        # is isolated per provider so Gemini limits never block Groq failover.
         self._provider_last_request = 0.0
         self._provider_min_interval = 0.0
         self._provider_token_interval = 0.0
         self._provider_cooldown_until = 0.0
         self._daily_quota_reset_at = 0.0
+        self._provider_runtime_state: dict[str, dict[str, float]] = {}
+        self._provider_override: ContextVar[dict[str, str] | None] = ContextVar(
+            f"katherine_ai_provider_override_{id(self)}", default=None
+        )
+        self._last_provider_context: ContextVar[dict[str, str] | None] = ContextVar(
+            f"katherine_ai_last_provider_{id(self)}", default=None
+        )
         self.metrics: dict[str, float] = defaultdict(float)
 
-    @property
-    def api_key(self) -> str:
-        return (os.getenv("KATHERINE_AI_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
+    def _gemini_provider_config(self) -> dict[str, str]:
+        return {
+            "name": "Google Gemini",
+            "key": (os.getenv("GEMINI_API_KEY") or "").strip(),
+            "url": (
+                os.getenv("GEMINI_API_URL")
+                or "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+            ).strip(),
+            "model": (os.getenv("GEMINI_MODEL") or "gemini-3.8-flash").strip(),
+        }
 
-    @property
-    def api_url(self) -> str:
-        return (
+    def _groq_provider_config(self) -> dict[str, str]:
+        legacy_url = (os.getenv("KATHERINE_AI_API_URL") or "").strip()
+        if (urlsplit(legacy_url).hostname or "").casefold() in {"api.groq.com", "api.groq.ai"}:
+            default_url = legacy_url
+        else:
+            default_url = "https://api.groq.com/openai/v1/responses"
+        return {
+            "name": "Groq",
+            "key": (
+                os.getenv("GROQ_API_KEY")
+                or os.getenv("KATHERINE_AI_API_KEY")
+                or ""
+            ).strip(),
+            "url": (os.getenv("GROQ_API_URL") or default_url).strip(),
+            "model": (
+                os.getenv("GROQ_MODEL")
+                or (
+                    os.getenv("KATHERINE_AI_MODEL")
+                    if str(os.getenv("KATHERINE_AI_MODEL") or "").startswith("openai/")
+                    else ""
+                )
+                or "openai/gpt-oss-20b"
+            ).strip(),
+        }
+
+    def _primary_provider_config(self) -> dict[str, str]:
+        primary_setting = (
+            os.getenv("KATHERINE_AI_PRIMARY_PROVIDER") or ""
+        ).strip().casefold()
+        gemini_key = (os.getenv("GEMINI_API_KEY") or "").strip()
+        if primary_setting in {"gemini", "google", "google-gemini"} or gemini_key:
+            return self._gemini_provider_config()
+
+        # Backward compatibility for existing deployments/tests using one
+        # KATHERINE_AI_* provider before the Gemini -> Groq chain is enabled.
+        legacy_url = (
             os.getenv("KATHERINE_AI_API_URL")
             or "https://api.openai.com/v1/responses"
         ).strip()
+        legacy_key = (
+            os.getenv("KATHERINE_AI_API_KEY")
+            or os.getenv("OPENAI_API_KEY")
+            or ""
+        ).strip()
+        host = (urlsplit(legacy_url).hostname or "").casefold()
+        if host == "generativelanguage.googleapis.com":
+            config = self._gemini_provider_config()
+            config["key"] = gemini_key or legacy_key
+            return config
+        if host == "api.groq.com" or host == "api.groq.ai" or host.endswith(".groq.com"):
+            return {
+                "name": "Groq",
+                "key": legacy_key,
+                "url": legacy_url,
+                "model": (os.getenv("KATHERINE_AI_MODEL") or "openai/gpt-oss-20b").strip(),
+            }
+        return {
+            "name": "OpenAI" if host == "api.openai.com" or host.endswith(".openai.com") else "proveedor configurado",
+            "key": legacy_key,
+            "url": legacy_url,
+            "model": (os.getenv("KATHERINE_AI_MODEL") or "gpt-5.4-mini").strip(),
+        }
+
+    def _fallback_provider_config(self) -> dict[str, str] | None:
+        if self._primary_provider_config()["name"] != "Google Gemini":
+            return None
+        fallback = self._groq_provider_config()
+        return fallback if fallback["key"] and fallback["url"] and fallback["model"] else None
+
+    def _active_provider_config(self) -> dict[str, str]:
+        return self._provider_override.get() or self._primary_provider_config()
+
+    @property
+    def api_key(self) -> str:
+        return self._active_provider_config()["key"]
+
+    @property
+    def api_url(self) -> str:
+        return self._active_provider_config()["url"]
 
     @property
     def model(self) -> str:
-        configured = (os.getenv("KATHERINE_AI_MODEL") or "").strip()
-        if configured:
-            return configured
-        # Use a model available on Groq when the endpoint is Groq; never
-        # send OpenAI-only model IDs to a different provider by default.
-        return "openai/gpt-oss-20b" if self.is_groq else "gpt-5.4-mini"
+        return self._active_provider_config()["model"]
 
     @property
     def provider_name(self) -> str:
         host = (urlsplit(self.api_url).hostname or "").casefold()
-        if host == "api.groq.com" or host.endswith(".groq.com"):
+        if host == "api.groq.com" or host.endswith(".groq.com") or host == "api.groq.ai":
             return "Groq"
+        if host == "generativelanguage.googleapis.com":
+            return "Google Gemini"
         if host == "api.openai.com" or host.endswith(".openai.com"):
             return "OpenAI"
-        return "proveedor configurado"
+        return self._active_provider_config()["name"]
 
     @property
     def is_groq(self) -> bool:
         return self.provider_name == "Groq"
+
+    @property
+    def is_gemini(self) -> bool:
+        return self.provider_name == "Google Gemini"
 
     @property
     def uses_groq_strict_schema(self) -> bool:
@@ -778,34 +869,68 @@ class KatherineAI:
 
     @property
     def is_enabled(self) -> bool:
-        return bool(self.api_key and self.api_url and self.model)
+        primary = self._primary_provider_config()
+        fallback = self._fallback_provider_config()
+        return bool(
+            (primary["key"] and primary["url"] and primary["model"])
+            or (fallback and fallback["key"] and fallback["url"] and fallback["model"])
+        )
+
+    @property
+    def last_provider_name(self) -> str:
+        last = self._last_provider_context.get()
+        return str(last.get("name")) if last else self._primary_provider_config()["name"]
+
+    @property
+    def last_model(self) -> str:
+        last = self._last_provider_context.get()
+        return str(last.get("model")) if last else self._primary_provider_config()["model"]
 
     def status(self, thread_id: str | None = None) -> str:
-        configured = self.is_enabled
+        primary = self._primary_provider_config()
+        fallback = self._fallback_provider_config()
+        primary_configured = bool(primary["key"])
+        fallback_configured = bool(fallback and fallback["key"])
         lines = [
             "KATHERINE AI · ESTADO",
-            f"Credencial API: {'detectada' if configured else 'no detectada'}",
-            f"Proveedor: {self.provider_name if configured else 'sin configurar'}.",
-            f"Conexión con {self.provider_name}: no comprobada (usa !ia probar).",
-            f"Modelo: {self.model if configured else 'no conectado'}",
-            "Memoria contextual: temporal, aislada por usuario y sala (10 min; máximo 6 turnos).",
+            f"Proveedor principal: {primary['name']}.",
+            f"Credencial principal: {'detectada' if primary_configured else 'no detectada'}.",
+            f"Modelo principal: {primary['model']}.",
+            f"Proveedor secundario: Groq ({'configurado' if fallback_configured else 'sin credencial'}).",
             (
-                "Solicitud a OpenAI: se envía store=false; revisa también la política de retención del proveedor."
-                if self.provider_name == "OpenAI"
+                f"Último proveedor utilizado: {self.last_provider_name} · {self.last_model}."
+                if self._last_provider_context.get()
+                else "Conexión no comprobada (usa !ia probar)."
+            ),
+            "Memoria contextual: temporal, aislada por usuario y sala (10 min; máximo 6 intercambios).",
+            (
+                "Gemini usa Chat Completions compatible; la retención y el uso de datos dependen de la configuración y política de Google."
+                if primary["name"] == "Google Gemini"
                 else "Groq: no se envía el parámetro store porque este endpoint no lo admite; la retención externa depende de su política."
-                if self.provider_name == "Groq"
-                else "Solicitud al proveedor compatible: se envía store=false; el soporte y la retención dependen de ese servicio."
+                if primary["name"] == "Groq"
+                else "La retención externa depende de la política del proveedor configurado."
             ),
             f"Analizador de chat: {'ACTIVO' if thread_id and str(thread_id) in self._analyst_enabled else 'INACTIVO'} en esta sala.",
             "Módulos: Teyvat, Guardian, Chat Analyst, Eclipse, Language y Admin.",
             "CREATIVITY AI: no incluido.",
         ]
-        if not configured:
-            lines.append(
-                "Para activar IA real configura KATHERINE_AI_API_KEY en Render. "
-                "Opcionales: KATHERINE_AI_MODEL y KATHERINE_AI_API_URL."
-            )
+        if not primary_configured and fallback_configured:
+            lines.append("Gemini no tiene credencial; las solicitudes se atenderán mediante Groq hasta configurarla.")
+        elif not primary_configured:
+            lines.append("Configura GEMINI_API_KEY para Gemini y GROQ_API_KEY para el respaldo.")
         return "\n".join(lines)
+
+    def _provider_state(self) -> dict[str, float]:
+        return self._provider_runtime_state.setdefault(
+            self.provider_name,
+            {
+                "last_request": 0.0,
+                "min_interval": 0.0,
+                "token_interval": 0.0,
+                "cooldown_until": 0.0,
+                "daily_quota_reset_at": 0.0,
+            },
+        )
 
     def _history(self, key: str) -> list[dict[str, str]]:
         now = time.time()
@@ -977,9 +1102,10 @@ class KatherineAI:
         return None
 
     def _update_provider_limits(self, response: Any) -> None:
-        """Adapt request pacing using aggregate rate-limit headers, when present."""
+        """Adapt Groq request pacing using provider headers, per provider."""
         if not self.is_groq:
             return
+        state = self._provider_state()
         headers = getattr(response, "headers", {}) or {}
         normalized = {str(key).casefold(): value for key, value in headers.items()}
         try:
@@ -987,11 +1113,10 @@ class KatherineAI:
         except (TypeError, ValueError):
             request_limit = 0.0
         if request_limit > 0:
-            self._provider_min_interval = max(
-                0.1, min(10.0, 60.0 / request_limit * 1.05)
-            )
+            self._provider_min_interval = max(0.1, min(10.0, 60.0 / request_limit * 1.05))
         else:
             self._provider_min_interval = self._provider_min_interval or 2.1
+        state["min_interval"] = self._provider_min_interval
 
         try:
             token_limit = float(normalized.get("x-ratelimit-limit-tokens") or 0)
@@ -1028,25 +1153,44 @@ class KatherineAI:
                     self._provider_token_interval = max(
                         0.1, min(10.0, 60.0 * used_tokens / token_limit * 1.05)
                     )
+                    state["token_interval"] = self._provider_token_interval
 
         if remaining_requests == 0 or remaining_tokens == 0:
             reset_delays = [
                 parsed
-                for name in (
-                    "x-ratelimit-reset-requests",
-                    "x-ratelimit-reset-tokens",
-                )
+                for name in ("x-ratelimit-reset-requests", "x-ratelimit-reset-tokens")
                 if (parsed := _retry_header_seconds(normalized.get(name))) is not None
             ]
             if reset_delays:
                 reset = max(reset_delays)
                 if reset > 3600:
                     self._daily_quota_reset_at = time.monotonic() + reset
+                    state["daily_quota_reset_at"] = self._daily_quota_reset_at
                 else:
                     self._provider_cooldown_until = max(
                         self._provider_cooldown_until,
                         time.monotonic() + reset,
                     )
+                    state["cooldown_until"] = self._provider_cooldown_until
+
+    @staticmethod
+    def _extract_chat_completion_text(payload: dict[str, Any]) -> str:
+        """Extract assistant content from an OpenAI-compatible Chat Completions response."""
+        choices = payload.get("choices") or []
+        if not choices or not isinstance(choices[0], dict):
+            return ""
+        message = choices[0].get("message") or {}
+        content = message.get("content", "")
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            chunks = [
+                str(item.get("text") or "")
+                for item in content
+                if isinstance(item, dict) and item.get("type") in {"text", "output_text"}
+            ]
+            return "\n".join(part for part in chunks if part).strip()
+        return ""
 
     @staticmethod
     def _extract_output_text(payload: dict[str, Any]) -> str:
@@ -1065,6 +1209,75 @@ class KatherineAI:
         return "\n".join(chunks).strip()
 
     async def _request_json(
+        self,
+        instructions: str,
+        messages: list[dict[str, str]],
+        request_func: RequestFunc,
+        rate_key: str | None = None,
+        max_input_messages: int | None = None,
+    ) -> dict[str, str]:
+        primary = self._primary_provider_config()
+        fallback = self._fallback_provider_config()
+        providers: list[dict[str, str]] = []
+        if primary["key"] and primary["url"] and primary["model"]:
+            providers.append(primary)
+        if (
+            fallback
+            and fallback["key"]
+            and fallback["url"]
+            and fallback["model"]
+            and fallback["name"] not in {item["name"] for item in providers}
+        ):
+            providers.append(fallback)
+        if not providers:
+            raise RuntimeError(
+                "IA_NO_CONFIGURADA: configura GEMINI_API_KEY y, como respaldo, GROQ_API_KEY."
+            )
+
+        last_error: Exception | None = None
+        for index, config in enumerate(providers):
+            token = self._provider_override.set(config)
+            try:
+                result = await self._request_json_with_provider(
+                    instructions,
+                    messages,
+                    request_func,
+                    rate_key=rate_key,
+                    max_input_messages=max_input_messages,
+                )
+                self._last_provider_context.set(dict(config))
+                if index > 0:
+                    self.metrics["ai_provider_failovers"] += 1
+                    logging.warning(
+                        "[AI] Conmutación completada | principal=%s | proveedor_activo=%s | modelo=%s",
+                        primary["name"], config["name"], config["model"],
+                    )
+                elif config["name"] != primary["name"]:
+                    logging.warning(
+                        "[AI] Proveedor principal sin credencial; se utilizó el respaldo %s.",
+                        config["name"],
+                    )
+                return result
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                if index + 1 < len(providers):
+                    self.metrics["ai_provider_primary_failures"] += 1
+                    logging.warning(
+                        "[AI] Falló el proveedor %s; se intentará %s. Motivo=%s",
+                        config["name"],
+                        providers[index + 1]["name"],
+                        sanitize_ai_trace_text(str(exc), 180) or type(exc).__name__,
+                    )
+                    continue
+                raise
+            finally:
+                self._provider_override.reset(token)
+
+        raise RuntimeError("No hay proveedores de IA disponibles.") from last_error
+
+    async def _request_json_with_provider(
         self,
         instructions: str,
         messages: list[dict[str, str]],
@@ -1100,24 +1313,45 @@ class KatherineAI:
             if not self.is_groq or self.uses_groq_strict_schema
             else {"type": "json_object"}
         )
-        body = {
-            "model": self.model,
-            "instructions": prompt_instructions,
-            "input": [
-                {"role": turn["role"], "content": str(turn["content"])}
-                for turn in messages[-(
-                    max(1, min(100, int(max_input_messages)))
-                    if max_input_messages is not None
-                    else self.memory_turns * 2 + 1
-                ):]
-                if turn.get("role") in {"user", "assistant"}
-            ],
-            "text": {"format": output_format},
-        }
-        # Groq's Responses API currently rejects the "store" request parameter.
-        # Its API is stateless; omit it there. OpenAI receives store=False explicitly.
-        if not self.is_groq:
-            body["store"] = False
+        recent_messages = [
+            {"role": turn["role"], "content": str(turn["content"])}
+            for turn in messages[-(
+                max(1, min(100, int(max_input_messages)))
+                if max_input_messages is not None
+                else self.memory_turns * 2 + 1
+            ):]
+            if turn.get("role") in {"user", "assistant"}
+        ]
+        if self.is_gemini:
+            gemini_response_format = (
+                {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": output_format.get("name", "katherine_action"),
+                        "strict": bool(output_format.get("strict", True)),
+                        "schema": output_format.get("schema", ACTION_SCHEMA),
+                    },
+                }
+                if output_format.get("type") == "json_schema"
+                else {"type": "json_object"}
+            )
+            body = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": prompt_instructions},
+                    *recent_messages,
+                ],
+                "response_format": gemini_response_format,
+            }
+        else:
+            body = {
+                "model": self.model,
+                "instructions": prompt_instructions,
+                "input": recent_messages,
+                "text": {"format": output_format},
+            }
+            if not self.is_groq:
+                body["store"] = False
 
         queued_at = time.monotonic()
         async with self._semaphore:
@@ -1125,22 +1359,23 @@ class KatherineAI:
                 self.metrics["ai_provider_queue_wait_seconds"] += max(
                     0.0, time.monotonic() - queued_at
                 )
-                if self._daily_quota_reset_at > time.monotonic():
+                state = self._provider_state()
+                if state["daily_quota_reset_at"] > time.monotonic():
                     raise RuntimeError("IA_CUOTA_DIARIA_AGOTADA")
 
-                base_interval = 2.1 if self.is_groq else 0.65
+                base_interval = 3.1 if self.is_gemini else 2.1 if self.is_groq else 0.65
                 response = None
                 max_attempts = 4
                 for attempt in range(max_attempts):
                     now = time.monotonic()
                     min_interval = max(
                         base_interval,
-                        self._provider_min_interval,
-                        self._provider_token_interval,
+                        state["min_interval"],
+                        state["token_interval"],
                     )
                     spacing = max(
-                        min_interval - (now - self._provider_last_request),
-                        self._provider_cooldown_until - now,
+                        min_interval - (now - state["last_request"]),
+                        state["cooldown_until"] - now,
                     )
                     if spacing > 0:
                         await asyncio.sleep(spacing)
@@ -1155,7 +1390,8 @@ class KatherineAI:
                         json=body,
                         timeout=35,
                     )
-                    self._provider_last_request = time.monotonic()
+                    state["last_request"] = time.monotonic()
+                    self._provider_last_request = state["last_request"]
                     self.metrics["ai_provider_requests"] += 1
                     self._update_provider_limits(response)
 
@@ -1163,18 +1399,33 @@ class KatherineAI:
                     # rejects response_format/schema. Application validation below
                     # still enforces the complete action contract and step limits.
                     if (
-                        self.is_groq
+                        (self.is_groq or self.is_gemini)
                         and output_format.get("type") == "json_schema"
                         and _is_structured_output_rejection(response)
                     ):
                         fallback_body = dict(body)
-                        fallback_body["text"] = {"format": {"type": "json_object"}}
-                        fallback_body["instructions"] = (
-                            prompt_instructions
-                            + "\n\nDevuelve solo JSON válido sin Markdown. "
-                            + "Incluye kind, answer, command, args y steps. "
-                            + "steps debe ser una lista de cero a tres objetos con command y args."
-                        )
+                        if self.is_gemini:
+                            fallback_body["response_format"] = {"type": "json_object"}
+                            fallback_body["messages"] = [
+                                {
+                                    "role": "system",
+                                    "content": (
+                                        prompt_instructions
+                                        + "\n\nDevuelve solo JSON válido sin Markdown con las claves "
+                                        + "kind, answer, command, args y steps. steps es una lista de hasta tres "
+                                        + "objetos con command y args."
+                                    ),
+                                },
+                                *recent_messages,
+                            ]
+                        else:
+                            fallback_body["text"] = {"format": {"type": "json_object"}}
+                            fallback_body["instructions"] = (
+                                prompt_instructions
+                                + "\n\nDevuelve solo JSON válido sin Markdown. "
+                                + "Incluye kind, answer, command, args y steps. "
+                                + "steps debe ser una lista de cero a tres objetos con command y args."
+                            )
                         logging.warning(
                             "[AI] %s rechazó el esquema estructurado (HTTP 400); "
                             "se reintenta una vez con JSON object.",
@@ -1192,7 +1443,8 @@ class KatherineAI:
                             json=fallback_body,
                             timeout=35,
                         )
-                        self._provider_last_request = time.monotonic()
+                        state["last_request"] = time.monotonic()
+                        self._provider_last_request = state["last_request"]
                         self.metrics["ai_provider_requests"] += 1
                         self._update_provider_limits(response)
 
@@ -1212,6 +1464,7 @@ class KatherineAI:
                     daily_reset = self._daily_quota_reset_delay(response)
                     if daily_reset is not None:
                         self._daily_quota_reset_at = time.monotonic() + daily_reset
+                        state["daily_quota_reset_at"] = self._daily_quota_reset_at
                         self.metrics["ai_provider_daily_quota_hits"] += 1
                         logging.warning(
                             "[AI] %s alcanzó una cuota diaria; no se harán reintentos prematuros.",
@@ -1265,7 +1518,11 @@ class KatherineAI:
                 except (TypeError, ValueError):
                     pass
         self.metrics["ai_provider_responses_completed"] += 1
-        raw = self._extract_output_text(payload)
+        raw = (
+            self._extract_chat_completion_text(payload)
+            if self.is_gemini
+            else self._extract_output_text(payload)
+        )
         if not raw:
             raise RuntimeError("El proveedor IA no devolvió texto de salida.")
         try:

@@ -942,3 +942,86 @@ def test_provider_token_pacing_works_when_remaining_request_header_is_absent(mon
 
     ai._update_provider_limits(PartialHeadersResponse())
     assert ai._provider_token_interval == pytest.approx(1.05)
+
+
+def chat_completion_payload(result):
+    return {
+        "choices": [{
+            "message": {"role": "assistant", "content": json.dumps(result)}
+        }],
+        "usage": {"prompt_tokens": 12, "completion_tokens": 8},
+    }
+
+
+@pytest.mark.asyncio
+async def test_gemini_is_primary_and_uses_chat_completions(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_PRIMARY_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
+    monkeypatch.delenv("KATHERINE_AI_API_URL", raising=False)
+    ai = KatherineAI()
+    calls = []
+
+    async def fake_request(method, url, **kwargs):
+        calls.append((url, kwargs))
+        return FakeResponse(chat_completion_payload({
+            "kind": "answer", "answer": "OK", "command": "", "args": ""
+        }))
+
+    assert await ai.test_connection(fake_request) == "OK"
+    assert calls[0][0] == "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    assert calls[0][1]["headers"]["Authorization"] == "Bearer gemini-test-key"
+    assert calls[0][1]["json"]["model"] == "gemini-3.8-flash"
+    assert "messages" in calls[0][1]["json"]
+    assert "input" not in calls[0][1]["json"]
+    assert ai.last_provider_name == "Google Gemini"
+    assert ai.last_model == "gemini-3.8-flash"
+
+
+@pytest.mark.asyncio
+async def test_gemini_failure_falls_back_to_groq(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_PRIMARY_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
+    monkeypatch.delenv("KATHERINE_AI_API_URL", raising=False)
+    ai = KatherineAI()
+    calls = []
+
+    async def fake_request(method, url, **kwargs):
+        calls.append((url, kwargs))
+        if "generativelanguage.googleapis.com" in url:
+            return FakeResponse(
+                {"error": {"message": "temporary upstream failure"}},
+                status_code=503,
+            )
+        return FakeResponse(response_payload({
+            "kind": "answer", "answer": "Groq respondió.", "command": "", "args": ""
+        }))
+
+    result = await ai._request_json(
+        "Devuelve una respuesta de prueba.",
+        [{"role": "user", "content": "Prueba"}],
+        fake_request,
+    )
+    assert result["answer"] == "Groq respondió."
+    assert [item[0] for item in calls] == [
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "https://api.groq.com/openai/v1/responses",
+    ]
+    assert calls[0][1]["headers"]["Authorization"] == "Bearer gemini-test-key"
+    assert calls[1][1]["headers"]["Authorization"] == "Bearer groq-test-key"
+    assert ai.last_provider_name == "Groq"
+    assert ai.last_model == "openai/gpt-oss-20b"
+    assert ai.metrics["ai_provider_failovers"] == 1
+
+
+def test_ai_status_exposes_primary_and_secondary_without_secrets(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_PRIMARY_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-secret")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-secret")
+    ai = KatherineAI()
+    status = ai.status()
+    assert "Proveedor principal: Google Gemini" in status
+    assert "Proveedor secundario: Groq (configurado)" in status
+    assert "gemini-test-secret" not in status
+    assert "groq-test-secret" not in status
