@@ -12863,8 +12863,8 @@ async def handle_command(event: dict, source: str):
 
     if command == "!asistente":
         request_text = query.strip()
-        if request_text and await maybe_send_auto_reply(thread, raw_uid, nickname, request_text):
-            return
+        # Explicitly addressed requests must reach the AI/router first; automatic
+        # keyword replies must never intercept a requested action.
         session_key = build_ai_session_key(source, thread, author, message_id)
         allowed_ai_commands = set(AI_PUBLIC_COMMANDS)
         if is_admin_uid(admin_uid):
