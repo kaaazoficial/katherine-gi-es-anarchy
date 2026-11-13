@@ -19,6 +19,13 @@ _COUNTERS = (
     ("katherine_api_errors", "api_errors", "Anarchy API request errors recorded by this process."),
     ("katherine_dj_tracks_started", "dj_tracks_started", "DJ tracks started by this process."),
     ("katherine_dj_playback_errors", "dj_playback_errors", "DJ playback errors recorded by this process."),
+    ("katherine_message_send_retries", "message_send_retries", "Rate-limited outgoing message retries."),
+    ("katherine_message_send_429", "message_send_429", "Outgoing message rate-limit responses."),
+    ("katherine_message_send_failures", "message_send_failures", "Outgoing message blocks that could not be delivered."),
+    ("katherine_message_send_recovered", "message_send_recovered", "Outgoing message blocks recovered from a definitive rate limit."),
+    ("katherine_message_send_pending_queued", "message_send_pending_queued", "Outgoing message blocks temporarily queued in process memory."),
+    ("katherine_message_send_pending_expired", "message_send_pending_expired", "Pending message blocks that expired before delivery."),
+    ("katherine_message_send_pending_abandoned", "message_send_pending_abandoned", "Pending message blocks abandoned after a non-rate-limit error."),
 )
 
 
@@ -51,6 +58,30 @@ def render_prometheus_metrics(
             continue
         external_requests += _finite_number(item.get("requests", 0))
         external_failures += _finite_number(item.get("failures", 0))
+
+    for metric_name, key, description in (
+        ("katherine_ai_provider_requests", "ai_provider_requests", "AI provider requests made by this process."),
+        ("katherine_ai_provider_429", "ai_provider_429", "AI provider rate-limit responses."),
+        ("katherine_ai_provider_retries", "ai_provider_retries", "AI provider retries after rate limits."),
+        ("katherine_ai_provider_daily_quota_hits", "ai_provider_daily_quota_hits", "AI daily quota exhaustion events."),
+        ("katherine_ai_provider_input_tokens", "ai_provider_input_tokens", "Input tokens reported by the AI provider."),
+        ("katherine_ai_provider_output_tokens", "ai_provider_output_tokens", "Output tokens reported by the AI provider."),
+        ("katherine_ai_provider_responses_completed", "ai_provider_responses_completed", "Structured AI responses completed."),
+    ):
+        Counter(metric_name, description, registry=registry).inc(
+            _finite_number(counters.get(key, 0))
+        )
+
+    Gauge(
+        "katherine_ai_provider_queue_wait_seconds",
+        "Cumulative seconds AI requests waited for provider capacity.",
+        registry=registry,
+    ).set(_finite_number(counters.get("ai_provider_queue_wait_seconds", 0)))
+    Gauge(
+        "katherine_message_send_retry_wait_seconds",
+        "Cumulative seconds spent waiting before outgoing message retries.",
+        registry=registry,
+    ).set(_finite_number(counters.get("message_send_retry_wait_seconds", 0)))
 
     Counter(
         "katherine_external_requests",

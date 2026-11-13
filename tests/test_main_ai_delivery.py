@@ -188,3 +188,117 @@ def test_periodic_cleanup_removes_expired_own_message_ids():
     bot_main.BOT_SENT_MESSAGES[key].append({"message_id": "expired", "created_at": 1})
     bot_main.cleanup_expired_state()
     assert key not in bot_main.BOT_SENT_MESSAGES
+
+
+@pytest.mark.asyncio
+async def test_send_message_retries_429_until_block_is_accepted(monkeypatch):
+    calls = []
+
+    async def no_wait(_seconds):
+        return None
+
+    async def rate_limited_then_success(method, path, source="developer", body=None):
+        calls.append((method, path, body))
+        if len(calls) == 1:
+            return {"ok": False, "status": 429, "retry_after": "0.5", "data": {}}
+        return {"ok": True, "status": 200, "data": {"messageId": "retry-success"}}
+
+    monkeypatch.setattr(bot_main.asyncio, "sleep", no_wait)
+    monkeypatch.setattr(bot_main, "api", rate_limited_then_success)
+    monkeypatch.setattr(bot_main, "last_bot_send", 0.0)
+    monkeypatch.setitem(bot_main.last_chat_send, "developer:retry-room", 0.0)
+    key = ("developer", "retry-room")
+    bot_main.BOT_SENT_MESSAGES.pop(key, None)
+
+    result = await bot_main.send_message("retry-room", "Respuesta recuperable")
+
+    assert result["ok"] is True
+    assert len(calls) == 2
+    assert bot_main.metrics["message_send_429"] >= 1
+    assert bot_main.metrics["message_send_retries"] >= 1
+    assert bot_main.BOT_SENT_MESSAGES[key][-1]["message_id"] == "retry-success"
+    bot_main.BOT_SENT_MESSAGES.pop(key, None)
+
+
+@pytest.mark.asyncio
+async def test_pending_delivery_retries_only_definitive_429(monkeypatch):
+    calls = []
+
+    async def no_wait(_seconds):
+        return None
+
+    async def rate_limited_then_success(method, path, source="developer", body=None):
+        calls.append((method, path, body))
+        if len(calls) == 1:
+            return {"ok": False, "status": 429, "retry_after": "0.5", "data": {}}
+        return {"ok": True, "status": 200, "data": {"messageId": "pending-success"}}
+
+    monkeypatch.setattr(bot_main.asyncio, "sleep", no_wait)
+    monkeypatch.setattr(bot_main, "api", rate_limited_then_success)
+    monkeypatch.setattr(bot_main, "last_bot_send", 0.0)
+    monkeypatch.setitem(bot_main.last_chat_send, "developer:pending-room", 0.0)
+    key = ("developer", "pending-room")
+    bot_main.BOT_SENT_MESSAGES.pop(key, None)
+
+    await bot_main.retry_pending_delivery(
+        "pending-room", "developer", [{"content": "Bloque pendiente"}], expires_in=60
+    )
+
+    assert len(calls) == 2
+    assert calls[0][2] == {"content": "Bloque pendiente"}
+    assert bot_main.metrics["message_send_recovered"] >= 1
+    assert bot_main.BOT_SENT_MESSAGES[key][-1]["message_id"] == "pending-success"
+    bot_main.BOT_SENT_MESSAGES.pop(key, None)
+
+
+@pytest.mark.asyncio
+async def test_pending_delivery_does_not_retry_ambiguous_server_errors(monkeypatch):
+    calls = []
+
+    async def no_wait(_seconds):
+        return None
+
+    async def server_error(method, path, source="developer", body=None):
+        calls.append(method)
+        return {"ok": False, "status": 500, "data": {"error": "server"}}
+
+    monkeypatch.setattr(bot_main.asyncio, "sleep", no_wait)
+    monkeypatch.setattr(bot_main, "api", server_error)
+
+    await bot_main.retry_pending_delivery(
+        "pending-ambiguous-room", "developer", [{"content": "No duplicar"}], expires_in=60
+    )
+
+    assert calls == ["POST"]
+    assert bot_main.metrics["message_send_pending_abandoned"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_response_is_marked_queued_to_prevent_fallback_duplicates(monkeypatch):
+    calls = []
+    scheduled = []
+
+    async def no_wait(_seconds):
+        return None
+
+    async def always_rate_limited(method, path, source="developer", body=None):
+        calls.append((method, path, body))
+        return {"ok": False, "status": 429, "retry_after": "0.5", "data": {}}
+
+    def capture_schedule(thread_id, source, pending_bodies):
+        scheduled.append((thread_id, source, pending_bodies))
+        return True
+
+    monkeypatch.setattr(bot_main.asyncio, "sleep", no_wait)
+    monkeypatch.setattr(bot_main, "api", always_rate_limited)
+    monkeypatch.setattr(bot_main, "schedule_pending_delivery", capture_schedule)
+    monkeypatch.setattr(bot_main, "last_bot_send", 0.0)
+    monkeypatch.setitem(bot_main.last_chat_send, "developer:queued-room", 0.0)
+
+    result = await bot_main.send_message("queued-room", "Se recuperará")
+
+    assert result["ok"] is True
+    assert result["queued"] is True
+    assert result["data"]["queuedBlocks"] == 1
+    assert len(calls) == 4
+    assert len(scheduled) == 1

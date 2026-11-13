@@ -73,3 +73,13 @@ El núcleo de IA puede devolver un plan de hasta tres herramientas. Katherine va
 - Los planes admiten hasta tres acciones de consulta/investigación independientes, validadas por completo antes de ejecutarse. No se incluyen pagos, cambios de perfil, moderación, creación/cierre de eventos ni otras acciones con efectos.
 - La ejecución silenciosa captura el resultado real del comando y genera una única respuesta final. Si no hay salida verificable, Katherine informa que no pudo confirmar el resultado. Los comandos interactivos mantienen sus botones y controles nativos.
 - Una mención aislada de «Katherine» sigue sin activar el bot; una petición explícita no puede ser interceptada por las respuestas automáticas por palabras clave.
+
+
+## Protección de cuotas y entrega de respuestas
+
+- El control de solicitudes de Groq adapta el intervalo de salida a las cabeceras de límite de solicitudes y tokens cuando el proveedor las entrega; conserva un intervalo prudente como respaldo.
+- Los HTTP 429 se reintentan respetando `Retry-After` y los encabezados de reinicio. Cuando el error o las cabeceras indican agotamiento de cuota diaria, Katherine deja de reintentar en bucle y comunica que la IA volverá a estar disponible tras el reinicio.
+- Los bloques de mensajes rechazados explícitamente con HTTP 429 se pueden recuperar en una tarea temporal de RAM. La cola admite hasta 100 tareas concurrentes, conserva los bloques pendientes durante un máximo de 10 minutos y se pierde al reiniciar el proceso. Los errores distintos de 429 no se reenvían automáticamente para evitar duplicados cuando el resultado del primer envío es incierto.
+- Los mensajes largos mantienen el límite de transporte de 2000 unidades UTF-16 por bloque; no se recorta el contenido generado. Si un bloque no puede entregarse, los posteriores esperan a la recuperación para conservar el orden.
+- `!metricas` y `/metrics` exponen contadores agregados de solicitudes, límites 429, reintentos, tokens informados por el proveedor, espera de cola y recuperación de bloques. No incluyen UID, salas, nombres ni contenido de mensajes.
+- Las colas de entrega contienen temporalmente solo los bloques que el proveedor de chat rechazó con HTTP 429. No se escriben en SQLite ni se conservan tras reinicios; su expiración máxima es de 10 minutos.

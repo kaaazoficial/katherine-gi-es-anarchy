@@ -1778,6 +1778,114 @@ async def delete_katherine_messages(thread_id: str, source: str) -> dict[str, in
     return {"attempted": len(tracked), "deleted": deleted, "failed": failed}
 
 
+async def retry_pending_delivery(
+    thread_id: str,
+    source: str,
+    pending_bodies: list[dict],
+    *,
+    expires_in: int = 600,
+) -> None:
+    """Retry only definitive 429 responses; keep pending text in RAM for at most 10 minutes."""
+    global last_bot_send
+    deadline = time.monotonic() + expires_in
+    await asyncio.sleep(5)
+    async with send_lock:
+        for body in pending_bodies:
+            delivered = False
+            while time.monotonic() < deadline and not delivered:
+                now = time.monotonic()
+                wait = max(
+                    0.0,
+                    1.05 - (now - last_bot_send),
+                    2.05 - (now - last_chat_send[f"{source}:{thread_id}"]),
+                )
+                while send_history_bot and send_history_bot[0] < now - 3600:
+                    send_history_bot.popleft()
+                history = send_history_chat[f"{source}:{thread_id}"]
+                while history and history[0] < now - 600:
+                    history.popleft()
+                if len(send_history_bot) >= 300:
+                    wait = max(wait, send_history_bot[0] + 3600 - now)
+                if len(history) >= 60:
+                    wait = max(wait, history[0] + 600 - now)
+                if wait > 0:
+                    await asyncio.sleep(min(wait, max(0.0, deadline - time.monotonic())))
+                if time.monotonic() >= deadline:
+                    break
+                result = await api(
+                    "POST",
+                    f"/threads/{thread_id}/messages",
+                    source,
+                    body,
+                )
+                if result.get("ok"):
+                    delivered = True
+                    metrics["message_send_recovered"] += 1
+                    metrics["messages_sent"] += 1
+                    sent_message_id = extract_message_id(result.get("data"))
+                    if sent_message_id:
+                        key = (str(source), str(thread_id))
+                        history = BOT_SENT_MESSAGES[key]
+                        cutoff = time.time() - BOT_SENT_MESSAGE_TTL
+                        while history and float(history[0].get("created_at", 0)) < cutoff:
+                            history.popleft()
+                        history.append({
+                            "message_id": sent_message_id,
+                            "created_at": time.time(),
+                        })
+                    now = time.monotonic()
+                    last_bot_send = now
+                    last_chat_send[f"{source}:{thread_id}"] = now
+                    send_history_bot.append(now)
+                    send_history_chat[f"{source}:{thread_id}"].append(now)
+                    break
+                if result.get("status") != 429:
+                    metrics["message_send_pending_abandoned"] += 1
+                    logging.error(
+                        "[ANARCHY] Se detuvo la recuperación de un bloque pendiente (HTTP %s).",
+                        result.get("status"),
+                    )
+                    return
+                metrics["message_send_429"] += 1
+                retry_value = result.get("retry_after")
+                try:
+                    delay = max(0.5, min(float(retry_value), 600.0))
+                except (TypeError, ValueError):
+                    delay = 2.0
+                metrics["message_send_retries"] += 1
+                metrics["message_send_retry_wait_seconds"] += delay
+                await asyncio.sleep(min(delay, max(0.0, deadline - time.monotonic())))
+            if not delivered:
+                metrics["message_send_pending_expired"] += 1
+                logging.error(
+                    "[ANARCHY] Un bloque pendiente expiró sin poder entregarse; no se guardó en disco."
+                )
+                return
+
+
+def schedule_pending_delivery(
+    thread_id: str,
+    source: str,
+    pending_bodies: list[dict],
+) -> bool:
+    """Schedule a bounded, process-local retry task for blocks rejected with HTTP 429."""
+    active = sum(
+        1 for task in background_tasks
+        if not task.done() and task.get_name().startswith("katherine-pending-delivery:")
+    )
+    if active >= 100 or not pending_bodies:
+        metrics["message_send_pending_rejected"] += 1
+        return False
+    task = asyncio.create_task(
+        retry_pending_delivery(thread_id, source, pending_bodies),
+        name=f"katherine-pending-delivery:{source}:{thread_id}",
+    )
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
+    metrics["message_send_pending_queued"] += len(pending_bodies)
+    return True
+
+
 async def send_message(
     thread_id: str,
     content: str,
@@ -1858,35 +1966,38 @@ async def send_message(
             if buttons and index == len(parts) - 1:
                 body["buttons"] = buttons
 
-            result = await api(
-                "POST",
-                f"/threads/{thread_id}/messages",
-                source,
-                body
-            )
-
-            if result.get("status") == 429:
-                error_data = result.get("data") or {}
-                if not isinstance(error_data, dict):
-                    error_data = {}
-
-                retry = (
-                    result.get("retry_after")
-                    or error_data.get("retryAfter")
-                    or 2
-                )
-
-                try:
-                    await asyncio.sleep(min(float(retry), 60))
-                except (ValueError, TypeError):
-                    await asyncio.sleep(2)
-
+            result = None
+            max_send_attempts = 4
+            for attempt in range(max_send_attempts):
                 result = await api(
                     "POST",
                     f"/threads/{thread_id}/messages",
                     source,
                     body
                 )
+                if result.get("status") != 429:
+                    break
+                metrics["message_send_429"] += 1
+                if attempt + 1 >= max_send_attempts:
+                    break
+
+                retry_value = result.get("retry_after")
+                try:
+                    retry_seconds = float(retry_value)
+                except (TypeError, ValueError):
+                    retry_seconds = 2.0
+                retry_seconds = max(0.5, min(retry_seconds, 600.0))
+                metrics["message_send_retries"] += 1
+                metrics["message_send_retry_wait_seconds"] += retry_seconds
+                logging.warning(
+                    "[ANARCHY] HTTP 429 al enviar bloque %s/%s; reintento %s/%s en %.2f s.",
+                    index + 1, len(parts), attempt + 1, max_send_attempts - 1,
+                    retry_seconds,
+                )
+                await asyncio.sleep(retry_seconds)
+
+            if result is None:
+                result = {"ok": False, "status": 500, "data": {"error": "No response"}}
 
             last_result = result
 
@@ -1913,16 +2024,39 @@ async def send_message(
                 send_history_bot.append(now)
                 send_history_chat[f"{source}:{thread_id}"].append(now)
             else:
+                metrics["message_send_failures"] += 1
+                if result.get("status") == 429:
+                    pending_bodies = []
+                    for pending_index in range(index, len(parts)):
+                        pending_body = {"content": parts[pending_index]}
+                        if reply_id and pending_index == 0:
+                            pending_body["replyMessageId"] = str(reply_id)
+                        if buttons and pending_index == len(parts) - 1:
+                            pending_body["buttons"] = buttons
+                        pending_bodies.append(pending_body)
+                    queued = schedule_pending_delivery(thread_id, source, pending_bodies)
+                    if queued:
+                        logging.warning(
+                            "[ANARCHY] %s bloque(s) quedaron en recuperación temporal en RAM.",
+                            len(pending_bodies),
+                        )
+                        return {
+                            "ok": True,
+                            "queued": True,
+                            "status": 429,
+                            "data": {"queuedBlocks": len(pending_bodies)},
+                        }
                 if is_not_in_chat_response(result.get("status"), result.get("data")):
                     logging.info(
                         "[ANARCHY] Envío omitido: Katherine ya no pertenece al chat."
                     )
                 else:
                     logging.error(
-                        "No se pudo enviar el bloque %s/%s: %s",
+                        "No se pudo enviar el bloque %s/%s: HTTP %s. "
+                        "Los bloques posteriores no se enviaron para conservar el orden.",
                         index + 1,
                         len(parts),
-                        result
+                        result.get("status"),
                     )
                 return result
 
@@ -15277,6 +15411,10 @@ Uso: !enciclopedia <nombre>""",
             f"TTS: {metrics['tts_priority_enqueued'] + metrics['tts_regular_enqueued']} mensajes en cola",
             f"IA: {metrics['ai_requests']} solicitudes · {metrics['ai_errors']} fallos/respaldo",
             f"Proveedor IA: {'activo' if AI_CORE.is_enabled else 'sin credencial'} · {AI_CORE.provider_name if AI_CORE.is_enabled else 'no configurada'} · {AI_CORE.model if AI_CORE.is_enabled else '—'}",
+            f"IA proveedor: {int(AI_CORE.metrics.get('ai_provider_requests', 0))} solicitudes · {int(AI_CORE.metrics.get('ai_provider_429', 0))} límites 429 · {int(AI_CORE.metrics.get('ai_provider_retries', 0))} reintentos",
+            f"IA tokens: {int(AI_CORE.metrics.get('ai_provider_input_tokens', 0))} entrada · {int(AI_CORE.metrics.get('ai_provider_output_tokens', 0))} salida · {AI_CORE.metrics.get('ai_provider_queue_wait_seconds', 0):.1f} s de espera acumulada",
+            f"Mensajería: {int(metrics['message_send_retries'])} reintentos 429 · {int(metrics['message_send_recovered'])} bloques recuperados · {int(metrics['message_send_failures'])} bloques fallidos",
+            f"Pendientes: {int(metrics['message_send_pending_queued'])} bloques encolados · {int(metrics['message_send_pending_expired'])} expirados · {int(metrics['message_send_pending_abandoned'])} abandonados",
             "Prometheus: endpoint /metrics (contadores agregados, sin datos de usuarios ni conversaciones).",
             "Los contadores se reinician cuando Render reinicia el proceso.",
         ])

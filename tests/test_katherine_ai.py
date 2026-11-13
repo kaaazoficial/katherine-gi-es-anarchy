@@ -12,6 +12,7 @@ class FakeResponse:
         self._payload = payload
         self.status_code = status_code
         self.is_success = status_code < 400
+        self.headers = {}
     def json(self):
         return self._payload
 
@@ -851,3 +852,52 @@ async def test_provider_does_not_retry_non_429_errors(monkeypatch):
     with pytest.raises(RuntimeError, match="HTTP 400"):
         await ai.test_connection(fake_request)
     assert len(calls) == 1
+
+
+def test_provider_adapts_request_and_token_pacing_from_headers(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    monkeypatch.setenv("KATHERINE_AI_API_URL", "https://api.groq.com/openai/v1/responses")
+    ai = KatherineAI()
+
+    class LimitedHeadersResponse(FakeResponse):
+        def __init__(self):
+            super().__init__({"usage": {"input_tokens": 100, "output_tokens": 50}})
+            self.headers = {
+                "x-ratelimit-limit-requests": "60",
+                "x-ratelimit-limit-tokens": "6000",
+                "x-ratelimit-remaining-requests": "50",
+                "x-ratelimit-remaining-tokens": "5000",
+            }
+
+    ai._update_provider_limits(LimitedHeadersResponse())
+    assert ai._provider_min_interval == pytest.approx(1.05)
+    assert ai._provider_token_interval == pytest.approx(1.575)
+
+
+def test_provider_detects_daily_quota_and_uses_reset_window(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+
+    class DailyQuotaResponse(FakeResponse):
+        def __init__(self):
+            super().__init__({
+                "error": {"code": "rate_limit_exceeded", "message": "Daily token limit reached"}
+            }, status_code=429)
+            self.headers = {"x-ratelimit-reset-tokens": "1d"}
+
+    delay = ai._daily_quota_reset_delay(DailyQuotaResponse())
+    assert delay == pytest.approx(86400)
+
+
+def test_provider_token_pacing_works_when_remaining_request_header_is_absent(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    monkeypatch.setenv("KATHERINE_AI_API_URL", "https://api.groq.com/openai/v1/responses")
+    ai = KatherineAI()
+
+    class PartialHeadersResponse(FakeResponse):
+        def __init__(self):
+            super().__init__({"usage": {"input_tokens": 80, "output_tokens": 20}})
+            self.headers = {"x-ratelimit-limit-tokens": "6000"}
+
+    ai._update_provider_limits(PartialHeadersResponse())
+    assert ai._provider_token_interval == pytest.approx(1.05)
