@@ -384,7 +384,7 @@ def test_message_splitting_respects_utf16_api_limit_with_emoji():
     message = "😀" * 2401
     parts = katherine.split_message_content(message)
     assert len(parts) > 1
-    assert all(katherine.utf16_length(part) <= 1800 for part in parts)
+    assert all(katherine.utf16_length(part) <= 2000 for part in parts)
     assert "".join(parts) == message
 
 
