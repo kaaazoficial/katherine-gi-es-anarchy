@@ -61,5 +61,5 @@ jobs:
       - name: Compile bot source
         run: python -m py_compile main.py katherine_nexus.py katherine_astra.py katherine_ai.py katherine_research.py katherine_retention.py
 
-      - name: Run automated tests
-        run: python -m pytest -q
+      - name: Run automated tests with coverage
+        run: python -m pytest -q --cov=main --cov=katherine_ai --cov=katherine_nexus --cov=katherine_astra --cov=katherine_research --cov=katherine_retention --cov-report=term-missing --timeout=120
