@@ -953,8 +953,17 @@ def chat_completion_payload(result):
     }
 
 
+def gemini_generate_content_payload(result):
+    return {
+        "candidates": [{
+            "content": {"role": "model", "parts": [{"text": json.dumps(result)}]}
+        }],
+        "usageMetadata": {"promptTokenCount": 12, "candidatesTokenCount": 8},
+    }
+
+
 @pytest.mark.asyncio
-async def test_gemini_is_primary_and_uses_chat_completions(monkeypatch):
+async def test_gemini_is_primary_and_uses_native_generate_content(monkeypatch):
     monkeypatch.setenv("KATHERINE_AI_PRIMARY_PROVIDER", "gemini")
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
     monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
@@ -964,16 +973,17 @@ async def test_gemini_is_primary_and_uses_chat_completions(monkeypatch):
 
     async def fake_request(method, url, **kwargs):
         calls.append((url, kwargs))
-        return FakeResponse(chat_completion_payload({
-            "kind": "answer", "answer": "OK", "command": "", "args": ""
+        return FakeResponse(gemini_generate_content_payload({
+            "kind": "answer", "answer": "OK", "command": "", "args": "", "steps": []
         }))
 
     assert await ai.test_connection(fake_request) == "OK"
-    assert calls[0][0] == "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-    assert calls[0][1]["headers"]["Authorization"] == "Bearer gemini-test-key"
-    assert calls[0][1]["json"]["model"] == "gemini-3.8-flash"
-    assert "messages" in calls[0][1]["json"]
-    assert "input" not in calls[0][1]["json"]
+    assert calls[0][0] == "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
+    assert calls[0][1]["headers"]["x-goog-api-key"] == "gemini-test-key"
+    assert "Authorization" not in calls[0][1]["headers"]
+    assert "systemInstruction" in calls[0][1]["json"]
+    assert calls[0][1]["json"]["generationConfig"]["responseMimeType"] == "application/json"
+    assert calls[0][1]["json"]["contents"][0]["role"] == "user"
     assert ai.last_provider_name == "Google Gemini"
     assert ai.last_model == "gemini-3.8-flash"
 
@@ -986,6 +996,11 @@ async def test_gemini_failure_falls_back_to_groq(monkeypatch):
     monkeypatch.delenv("KATHERINE_AI_API_URL", raising=False)
     ai = KatherineAI()
     calls = []
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr("katherine_ai.asyncio.sleep", no_sleep)
 
     async def fake_request(method, url, **kwargs):
         calls.append((url, kwargs))
@@ -1005,14 +1020,60 @@ async def test_gemini_failure_falls_back_to_groq(monkeypatch):
     )
     assert result["answer"] == "Groq respondió."
     assert [item[0] for item in calls] == [
-        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
+    ] * 4 + [
         "https://api.groq.com/openai/v1/responses",
     ]
-    assert calls[0][1]["headers"]["Authorization"] == "Bearer gemini-test-key"
-    assert calls[1][1]["headers"]["Authorization"] == "Bearer groq-test-key"
+    assert calls[0][1]["headers"]["x-goog-api-key"] == "gemini-test-key"
+    assert calls[4][1]["headers"]["Authorization"] == "Bearer groq-test-key"
+    assert calls[0][1]["json"]["systemInstruction"]["parts"][0]["text"]
     assert ai.last_provider_name == "Groq"
     assert ai.last_model == "openai/gpt-oss-20b"
     assert ai.metrics["ai_provider_failovers"] == 1
+    assert ai.metrics["ai_provider_retries"] == 3
+
+
+@pytest.mark.asyncio
+async def test_direct_gemini_probe_does_not_fall_back_to_groq(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_PRIMARY_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
+    monkeypatch.delenv("KATHERINE_AI_API_URL", raising=False)
+    async def no_sleep(_delay):
+        return None
+    monkeypatch.setattr("katherine_ai.asyncio.sleep", no_sleep)
+    ai = KatherineAI()
+    calls = []
+
+    async def fake_request(method, url, **kwargs):
+        calls.append(url)
+        return FakeResponse({"error": {"message": "still overloaded"}}, status_code=503)
+
+    with pytest.raises(RuntimeError, match="HTTP 503"):
+        await ai.test_provider_connection("gemini", fake_request)
+    assert calls == [
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
+    ] * 4
+
+
+@pytest.mark.asyncio
+async def test_direct_groq_probe_targets_groq_only(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_PRIMARY_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
+    ai = KatherineAI()
+    calls = []
+
+    async def fake_request(method, url, **kwargs):
+        calls.append((url, kwargs))
+        return FakeResponse(response_payload({
+            "kind": "answer", "answer": "OK", "command": "", "args": ""
+        }))
+
+    assert await ai.test_provider_connection("groq", fake_request) == "OK"
+    assert len(calls) == 1
+    assert calls[0][0] == "https://api.groq.com/openai/v1/responses"
+    assert calls[0][1]["headers"]["Authorization"] == "Bearer groq-test-key"
 
 
 def test_ai_status_exposes_primary_and_secondary_without_secrets(monkeypatch):
