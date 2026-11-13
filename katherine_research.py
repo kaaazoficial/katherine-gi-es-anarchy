@@ -999,6 +999,7 @@ def parse_research_mode(query: str) -> tuple[str, str]:
         r"^(comparar|comparación|comparacion|verificar|verificación|verificacion|"
         r"cronología|cronologia|línea de tiempo|linea de tiempo|informe|completo)"
         r"\s*(?::|\||sobre|de)?\s*(.*)$",
+        raw,
         flags=re.IGNORECASE,
     )
     if not match:
