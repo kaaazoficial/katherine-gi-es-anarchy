@@ -15168,7 +15168,7 @@ Uso: !enciclopedia <nombre>""",
             if isinstance(item, dict)
             and float(item.get("circuit_open_until", 0) or 0) > time.time()
         )
-        answer = "\\n".join([
+        answer = "\n".join([
             "KATHERINE · MÉTRICAS DEL PROCESO",
             f"Uptime: {format_duration(time.monotonic() - STARTED_MONOTONIC)}",
             f"Mensajes: {metrics['text_messages_received']} · comandos: {metrics['commands_received']}",
