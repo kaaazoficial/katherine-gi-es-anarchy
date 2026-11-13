@@ -211,7 +211,7 @@ def test_ai_responses_have_no_artificial_output_token_cap(monkeypatch):
         }))
     result = pytest.importorskip("asyncio").run(ai.test_connection(fake_request))
     assert len(result) == 12000
-    assert captured["max_output_tokens"] == 512
+    assert "max_output_tokens" not in captured
 
 
 def test_provider_retry_header_parser_handles_seconds_and_units():
@@ -980,7 +980,7 @@ async def test_gemini_is_primary_and_uses_native_generate_content(monkeypatch):
     assert "systemInstruction" in calls[0][1]["json"]
     assert calls[0][1]["json"]["generationConfig"]["responseMimeType"] == "application/json"
     assert calls[0][1]["json"]["generationConfig"]["thinkingConfig"]["thinkingLevel"] == "minimal"
-    assert calls[0][1]["json"]["generationConfig"]["maxOutputTokens"] == 512
+    assert "maxOutputTokens" not in calls[0][1]["json"]["generationConfig"]
     assert calls[0][1]["timeout"] == 8
     assert calls[0][1]["json"]["contents"][0]["role"] == "user"
     assert ai.last_provider_name == "Google Gemini"
@@ -1164,7 +1164,7 @@ async def test_groq_uses_low_reasoning_and_output_cap(monkeypatch):
 
     assert await ai.test_provider_connection("groq", fake_request) == "OK"
     assert captured["json"]["reasoning"] == {"effort": "low"}
-    assert captured["json"]["max_output_tokens"] == 512
+    assert "max_output_tokens" not in captured["json"]
 
 
 def test_ai_rate_key_uses_stable_ids_not_nicknames():
@@ -1209,7 +1209,7 @@ async def test_direct_openrouter_probe_uses_openrouter_responses_api(monkeypatch
     assert kwargs["headers"]["Authorization"] == "Bearer openrouter-test-key"
     assert kwargs["headers"]["X-Title"] == "Katherine"
     assert kwargs["json"]["model"] == "openrouter/free"
-    assert kwargs["json"]["max_output_tokens"] == 512
+    assert "max_output_tokens" not in kwargs["json"]
     assert kwargs["json"]["text"]["format"]["type"] == "json_schema"
 
 
