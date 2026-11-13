@@ -1036,13 +1036,25 @@ class KatherineAI:
         allowed = AI_ALLOWED_COMMANDS if allowed_commands is None else frozenset(
             str(item).strip().lstrip("!").casefold() for item in allowed_commands
         )
+        history = self._history(key)
         faq_answer = resolve_community_faq(text)
         if faq_answer:
+            last_user_turn = next(
+                (turn for turn in reversed(history) if turn.get("role") == "user"),
+                None,
+            )
+            if (
+                last_user_turn
+                and is_genshin_related_request(str(last_user_turn.get("content") or ""))
+                and not is_genshin_related_request(text)
+            ):
+                # Canonical FAQ answers are domain-independent; don't carry a
+                # stale Genshin conversation through this early-return path.
+                self._memory.pop(key, None)
             self._append_history(key, "user", text[:1200])
             self._append_history(key, "assistant", faq_answer[:1800])
             return {"kind": "answer", "answer": faq_answer, "command": "", "args": ""}
 
-        history = self._history(key)
         clarification = clarification_for_unspecified_topic(text)
         if clarification:
             # An unspecified subject is a new topic, not a Genshin follow-up.
