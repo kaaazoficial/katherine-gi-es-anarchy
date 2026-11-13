@@ -66,6 +66,7 @@ from katherine_astra import (
     resolve_music_mood,
 )
 from katherine_ai import (
+    AI_ADMIN_COMMANDS, AI_PLAN_SAFE_COMMANDS, AI_PUBLIC_COMMANDS,
     KatherineAI, build_ai_session_key, is_bot_author, validate_ai_tool_call
 )
 from katherine_research import search_web, fetch_public_page, build_source_context
@@ -12906,24 +12907,32 @@ async def handle_command(event: dict, source: str):
                     "trivia", "adivina", "encuesta", "elige", "duelo",
                     "join", "playlist", "tts", "dj", "reproducir",
                 }
-                await execute_ai_tool(
+                tool_result = await execute_ai_tool(
                     event, source, session_key, invocation,
                     silent=command_name not in interactive_commands,
                 )
                 if command_name not in interactive_commands:
                     try:
-                        # One final response is produced from the actual command output.
-                        tool_context = AI_CORE._history(session_key)
-                        captured = str(tool_context[-1].get("content") or "") if tool_context else ""
-                        output = captured.split("Resultado de herramienta:",1)[-1].strip()
-                        if output:
-                            answer = await AI_CORE.synthesize_tool_results(
-                                request_text, [{"command":invocation,"output":output}],
-                                external_request, rate_key=None,
+                        answer = await AI_CORE.synthesize_tool_results(
+                            request_text, [tool_result],
+                            external_request, rate_key=None,
+                        )
+                        await send_message(thread, answer, source, reply)
+                    except Exception as exc:
+                        logging.warning(
+                            "[AI] No se pudo sintetizar la herramienta: %s",
+                            type(exc).__name__,
+                        )
+                        if tool_result.get("output"):
+                            await send_message(
+                                thread, tool_result["output"], source, reply
                             )
-                            await send_message(thread, answer, source, reply)
-                    except Exception:
-                        pass
+                        else:
+                            await send_message(
+                                thread,
+                                "La acción se intentó, pero no recibí un resultado verificable.",
+                                source, reply,
+                            )
                 return
             if has_deterministic_fallback:
                 logging.warning(
