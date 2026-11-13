@@ -63,9 +63,21 @@ NATURAL_COMMAND_ALIASES = {
     "subirvolumenlectura": "subirvolumenlectura",
     "bajarvolumenlectura": "bajarvolumenlectura",
 }
+# Acciones sociales clásicas que existen en main.SOCIAL. No se exponen a la
+# selección autónoma de herramientas IA: solo se enrutan cuando el usuario las
+# invoca explícitamente como "Katherine <acción> @usuario".
+NATURAL_EXTRA_COMMAND_NAMES = frozenset({
+    "abrazo", "abrazar", "beso", "besar", "patada", "golpe", "cachetada",
+    "acariciar", "mimar", "morder", "consolar", "felicitar", "saludar",
+    "proteger", "bailar", "cosquillas", "chocar", "highfive", "ayudar",
+    "regalar", "acompañar", "asustar", "curar", "cargar", "empujar",
+    "regañar", "admirar", "apoyar", "dormir", "ignorar", "mirar", "invitar",
+})
+
 NATURAL_COMMAND_NAMES = frozenset(
     set(AI_COMMAND_CATALOG)
     | set(NATURAL_COMMAND_ALIASES)
+    | set(NATURAL_EXTRA_COMMAND_NAMES)
     | {
         "asistente", "ia", "investiga", "investigacion", "investigación",
         "analizarenlace", "leerweb", "eventos", "reputacion", "reputación",
