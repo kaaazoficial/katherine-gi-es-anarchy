@@ -29,6 +29,8 @@ def test_game_scope_is_removed_without_corrupting_entity_names(query, expected):
         ("qué es Natlan Genshin Impact", ("geografia", "Natlan")),
         ("qué es la región de Natlan en Genshin Impact", ("geografia", "Natlan")),
         ("dónde está Fontaine", ("geografia", "Fontaine")),
+        ("háblame sobre la región de Natlan", ("geografia", "Natlan")),
+        ("qué se sabe de la región Natlan", ("geografia", "Natlan")),
         ("qué es el elemento Dendro", ("elemento", "Dendro")),
         ("qué es Pyro", ("elemento", "Pyro")),
         ("quién es Mualani en Genshin Impact", ("enciclopedia", "mualani")),
@@ -96,4 +98,9 @@ def test_dump_result_metadata_without_entity_is_not_displayable():
 
 def test_plain_entity_payload_is_preserved():
     entity = {"name": "Mualani", "description": "Una guía."}
+    assert unwrap_genshin_db_response(entity) is entity
+
+
+def test_entity_with_unrelated_query_field_is_not_mistaken_for_dump_metadata():
+    entity = {"name": "Natlan", "description": "Región de Teyvat", "query": "Natlan"}
     assert unwrap_genshin_db_response(entity) is entity
