@@ -994,11 +994,11 @@ RESEARCH_MODES = {
 
 def parse_research_mode(query: str) -> tuple[str, str]:
     """Extract an explicit research mode without changing the actual subject."""
-    raw = re.sub(r"\\s+", " ", str(query or "")).strip()
+    raw = re.sub(r"\s+", " ", str(query or "")).strip()
     match = re.match(
         r"^(comparar|comparación|comparacion|verificar|verificación|verificacion|"
         r"cronología|cronologia|línea de tiempo|linea de tiempo|informe|completo)"
-        r"\\s*(?::|\\||sobre|de)?\\s*(.*)$",
+        r"\s*(?::|\\||sobre|de)?\\s*(.*)$",
         raw,
         flags=re.IGNORECASE,
     )
