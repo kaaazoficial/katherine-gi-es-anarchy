@@ -322,6 +322,10 @@ def resolve_community_faq(question: str) -> str | None:
     if text.startswith("katherine "):
         text = text[len("katherine "):].strip()
 
+    greeting = text.removesuffix(" katherine")
+    if greeting in {"hola", "buenas", "buenos dias", "buenas tardes", "buenas noches"}:
+        return "¡Hola! ¿Qué hacemos hoy?"
+
     creator = (
         "quien es tu creador", "quien fue tu creador", "quien es su creador",
         "quien es el creador de katherine", "quien es el creador",
@@ -331,8 +335,14 @@ def resolve_community_faq(question: str) -> str | None:
     if any(x in text for x in creator):
         return "Mi creador es Sinner."
 
-    if "anarchy apps" in text and any(
-        x in text for x in ("que es", "que significa", "para que sirve", "explica", "define")
+    if (
+        ("anarchy apps" in text and any(
+            x in text for x in ("que es", "que significa", "para que sirve", "explica", "define", "que ofrece")
+        ))
+        or "ecosistema comunitario" in text
+        or ("esta aplicacion" in text and any(
+            x in text for x in ("que ofrece", "para que sirve", "que puedo hacer")
+        ))
     ):
         return "Anarchy apps es una red social para crear comunidades, unirse a ellas y hablar con la gente"
 
@@ -1071,6 +1081,8 @@ class KatherineAI:
             f"Analizador de chat: {'ACTIVO' if thread_id and str(thread_id) in self._analyst_enabled else 'INACTIVO'} en esta sala.",
             "No se muestran credenciales ni se guardan conversaciones de forma permanente.",
         ]
+        if groq["key"]:
+            lines.append("En Groq no se envía el parámetro store.")
         return "\n".join(lines)
 
     def _provider_state(self) -> dict[str, Any]:
@@ -1584,11 +1596,9 @@ class KatherineAI:
         if self.is_groq and not self.uses_groq_strict_schema:
             prompt_instructions += (
                 "\n\nDevuelve únicamente un objeto JSON válido, sin bloques Markdown, "
-                "con estas cinco claves: kind (answer, command o plan), answer, command, args y steps. "
-                "Todos los valores deben ser cadenas, salvo steps, que es una lista de objetos command/args. "
-                "Si respondes directamente usa kind=answer y deja command y args vacíos y steps como lista vacía. "
-                "Si solicitas una herramienta individual usa kind=command y steps como lista vacía. "
-                "Si el usuario pide varias acciones compatibles, usa kind=plan y entre uno y tres pasos ordenados."
+                "con claves kind, answer, command, args y steps. "
+                "answer: command/args vacíos y steps=[]. command: steps=[]. "
+                "plan: 1-3 pasos de solo lectura."
             )
 
         output_format = (
