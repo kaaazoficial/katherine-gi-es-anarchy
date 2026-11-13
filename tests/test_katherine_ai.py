@@ -887,3 +887,17 @@ def test_provider_detects_daily_quota_and_uses_reset_window(monkeypatch):
 
     delay = ai._daily_quota_reset_delay(DailyQuotaResponse())
     assert delay == pytest.approx(86400)
+
+
+def test_provider_token_pacing_works_when_remaining_request_header_is_absent(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    monkeypatch.setenv("KATHERINE_AI_API_URL", "https://api.groq.com/openai/v1/responses")
+    ai = KatherineAI()
+
+    class PartialHeadersResponse(FakeResponse):
+        def __init__(self):
+            super().__init__({"usage": {"input_tokens": 80, "output_tokens": 20}})
+            self.headers = {"x-ratelimit-limit-tokens": "6000"}
+
+    ai._update_provider_limits(PartialHeadersResponse())
+    assert ai._provider_token_interval == pytest.approx(1.05)
