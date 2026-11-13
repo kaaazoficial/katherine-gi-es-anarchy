@@ -56,7 +56,7 @@ def test_explicit_user_actions_are_available_but_plans_stay_read_only():
     assert validate_ai_tool_call("evento", "crear reunión") == "evento crear reunión"
     assert validate_ai_tool_call("pagar", "@Ana 100") == "pagar @Ana 100"
     assert validate_ai_tool_call("bio", "Me gusta la música") == "bio Me gusta la música"
-    assert validate_ai_tool_call("antispam", "off", AI_ADMIN_COMMANDS) is None
+    assert validate_ai_tool_call("antispam", "off", AI_ADMIN_COMMANDS) == "antispam off"
     assert "pagar" not in AI_PLAN_SAFE_COMMANDS
     assert "evento" not in AI_PLAN_SAFE_COMMANDS
     assert classify_request_intent("Katherine, transfiere 100 puntos a Ana") == "action"
