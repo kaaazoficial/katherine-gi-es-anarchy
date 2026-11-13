@@ -2034,7 +2034,18 @@ async def send_message(
                         if buttons and pending_index == len(parts) - 1:
                             pending_body["buttons"] = buttons
                         pending_bodies.append(pending_body)
-                    schedule_pending_delivery(thread_id, source, pending_bodies)
+                    queued = schedule_pending_delivery(thread_id, source, pending_bodies)
+                    if queued:
+                        logging.warning(
+                            "[ANARCHY] %s bloque(s) quedaron en recuperación temporal en RAM.",
+                            len(pending_bodies),
+                        )
+                        return {
+                            "ok": True,
+                            "queued": True,
+                            "status": 429,
+                            "data": {"queuedBlocks": len(pending_bodies)},
+                        }
                 if is_not_in_chat_response(result.get("status"), result.get("data")):
                     logging.info(
                         "[ANARCHY] Envío omitido: Katherine ya no pertenece al chat."
