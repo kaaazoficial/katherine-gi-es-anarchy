@@ -3510,7 +3510,7 @@ async def download_dj_audio(url: str, file_extension: str | None = None) -> Path
                     raise ValueError("La descarga redirigió a un dominio no autorizado.")
             if response is None:
                 raise RuntimeError("No se pudo iniciar la descarga musical.")
-            async with response:
+            try:
                 if not response.is_success:
                     raise RuntimeError(f"La fuente musical respondió HTTP {response.status_code}.")
                 if not dj_audio_url_allowed(str(response.url)):
@@ -3537,6 +3537,8 @@ async def download_dj_audio(url: str, file_extension: str | None = None) -> Path
                         if total_bytes > max_bytes:
                             raise RuntimeError("La pista supera el límite de 150 MB.")
                         output.write(chunk)
+            finally:
+                await response.aclose()
 
         if total_bytes < 1024:
             raise RuntimeError("El archivo descargado está vacío o incompleto.")
