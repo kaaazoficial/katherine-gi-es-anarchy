@@ -1183,7 +1183,7 @@ class KatherineAI:
             # into Genshin or produce another speculative command.
             retry_instructions = (
                 build_ai_instructions(frozenset(), "conversation")
-                + "\\n\\nRESPONDE SOLO A LA PREGUNTA ACTUAL. Devuelve kind=answer, "
+                + "\n\nRESPONDE SOLO A LA PREGUNTA ACTUAL. Devuelve kind=answer, "
                 "deja command, args y steps vacíos. No ejecutes herramientas ni "
                 "menciones Genshin/Teyvat salvo que el usuario lo haya pedido. "
                 "Si falta el tema o el contexto, formula una pregunta breve para aclararlo."
