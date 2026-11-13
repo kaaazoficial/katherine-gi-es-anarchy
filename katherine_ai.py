@@ -1083,7 +1083,7 @@ class KatherineAI:
                 # Canonical FAQ answers are domain-independent; don't carry a
                 # stale Genshin conversation through this early-return path.
                 self._memory.pop(key, None)
-            self._append_history(key, "user", text[:1200])
+            self._append_history(key, "user", text)
             self._append_history(key, "assistant", faq_answer)
             return {"kind": "answer", "answer": faq_answer, "command": "", "args": ""}
 
@@ -1091,7 +1091,7 @@ class KatherineAI:
         if clarification:
             # An unspecified subject is a new topic, not a Genshin follow-up.
             self._memory.pop(key, None)
-            self._append_history(key, "user", text[:1200])
+            self._append_history(key, "user", text)
             self._append_history(key, "assistant", clarification)
             return {
                 "kind": "answer", "answer": clarification, "command": "", "args": ""
@@ -1131,7 +1131,7 @@ class KatherineAI:
                 "args": "",
                 "fallback": True,
             }
-        messages = [*history, {"role": "user", "content": text[:1200]}]
+        messages = [*history, {"role": "user", "content": text}]
         try:
             result = await self._request_json(
                 instructions, messages, request_func, rate_key=key
@@ -1142,13 +1142,13 @@ class KatherineAI:
                 answer = "La inteligencia artificial no está configurada todavía."
             else:
                 answer = "No pude completar la consulta de IA. Los comandos clásicos siguen disponibles."
-            self._append_history(key, "user", text[:1200])
+            self._append_history(key, "user", text)
             return {
                 "kind": "answer", "answer": answer, "command": "", "args": "",
                 "fallback": reason != "IA_NO_CONFIGURADA",
             }
         except Exception:
-            self._append_history(key, "user", text[:1200])
+            self._append_history(key, "user", text)
             return {
                 "kind": "answer",
                 "answer": "No pude conectar con el servicio de IA. Inténtalo más tarde; los comandos clásicos siguen disponibles.",
@@ -1163,7 +1163,7 @@ class KatherineAI:
         )
         if result["kind"] == "plan":
             if intent != "multi_action":
-                self._append_history(key, "user", text[:1200])
+                self._append_history(key, "user", text)
                 safe_answer = (
                     "No necesitas encadenar acciones para esta consulta. "
                     "Dime qué aspecto quieres conocer y te responderé directamente."
@@ -1199,7 +1199,7 @@ class KatherineAI:
                 ):
                     validated_steps = []
                 if validated_steps:
-                    self._append_history(key, "user", text[:1200])
+                    self._append_history(key, "user", text)
                     return {
                         "kind": "plan",
                         "answer": "",
@@ -1207,7 +1207,7 @@ class KatherineAI:
                         "args": "",
                         "steps": validated_steps,
                     }
-            self._append_history(key, "user", text[:1200])
+            self._append_history(key, "user", text)
             return {
                 "kind": "answer",
                 "answer": "No pude validar todos los pasos de esa solicitud. No ejecutaré una secuencia parcial; prueba dividiéndola en peticiones más pequeñas.",
@@ -1241,7 +1241,7 @@ class KatherineAI:
                 "menciones Genshin/Teyvat salvo que el usuario lo haya pedido. "
                 "Si falta el tema o el contexto, formula una pregunta breve para aclararlo."
             )
-            retry_messages = [{"role": "user", "content": text[:1200]}]
+            retry_messages = [{"role": "user", "content": text}]
             try:
                 retry = await self._request_json(
                     retry_instructions,
@@ -1258,14 +1258,14 @@ class KatherineAI:
                 and retry_answer
                 and not is_genshin_related_request(retry_answer)
             ):
-                self._append_history(key, "user", text[:1200])
+                self._append_history(key, "user", text)
                 self._append_history(key, "assistant", retry_answer)
                 return {
                     "kind": "answer", "answer": retry_answer,
                     "command": "", "args": "",
                 }
 
-            self._append_history(key, "user", text[:1200])
+            self._append_history(key, "user", text)
             safe_answer = build_domain_drift_recovery()
             self._append_history(key, "assistant", safe_answer)
             return {
@@ -1275,7 +1275,7 @@ class KatherineAI:
 
         if result["kind"] == "command" and intent == "conversation":
             # A tool call must never turn a general question into an action.
-            self._append_history(key, "user", text[:1200])
+            self._append_history(key, "user", text)
             safe_answer = (
                 "Puedo responderte directamente. ¿Qué aspecto del tema te gustaría conocer?"
             )
@@ -1287,14 +1287,14 @@ class KatherineAI:
 
         if result["kind"] == "command":
             if invocation:
-                self._append_history(key, "user", text[:1200])
+                self._append_history(key, "user", text)
                 return {
                     "kind": "command",
                     "answer": "",
                     "command": result["command"],
                     "args": result["args"],
                 }
-            self._append_history(key, "user", text[:1200])
+            self._append_history(key, "user", text)
             return {
                 "kind": "answer",
                 "answer": "La acción solicitada no está disponible o no está permitida para mí.",
@@ -1303,7 +1303,7 @@ class KatherineAI:
                 "fallback": True,
             }
         answer = result["answer"].strip() or "No pude formular una respuesta útil."
-        self._append_history(key, "user", text[:1200])
+        self._append_history(key, "user", text)
         self._append_history(key, "assistant", answer)
         return {"kind": "answer", "answer": answer, "command": "", "args": ""}
 
@@ -1403,7 +1403,7 @@ class KatherineAI:
             raise ValueError("Falta el texto que debo analizar.")
         result = await self._request_json(
             f"Eres un módulo especializado de Katherine. {instruction}\n{extra_instructions}",
-            [{"role": "user", "content": text[:10000]}],
+            [{"role": "user", "content": text}],
             request_func,
             rate_key=rate_key,
         )
