@@ -233,13 +233,13 @@ ACTION_SCHEMA = {
 def sanitize_ai_trace_text(value: Any, limit: int = 2400) -> str:
     """Redact obvious credentials and personal identifiers before temporary diagnostics."""
     text = str(value or "")
-    text = re.sub(r"(?i)\\b(?:gsk_[A-Za-z0-9_-]{12,}|sk-proj-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{20,})\\b", "[secreto]", text)
-    text = re.sub(r"(?i)\\bBearer\\s+[^\\s,;]+", "Bearer [secreto]", text)
-    text = re.sub(r"(?i)\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b", "[correo]", text)
-    text = re.sub(r"(?<![\\w])@[A-Za-z0-9_.-]{2,64}\\b", "@[usuario]", text)
-    text = re.sub(r"(?<!\\w)\\d{7,}(?!\\w)", "[identificador]", text)
-    text = re.sub(r"[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f]", " ", text)
-    text = re.sub(r"\\s+", " ", text).strip()
+    text = re.sub(r"(?i)\b(?:gsk_[A-Za-z0-9_-]{12,}|sk-proj-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{20,})\\b", "[secreto]", text)
+    text = re.sub(r"(?i)\bBearer\\s+[^\\s,;]+", "Bearer [secreto]", text)
+    text = re.sub(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b", "[correo]", text)
+    text = re.sub(r"(?<![\w])@[A-Za-z0-9_.-]{2,64}\\b", "@[usuario]", text)
+    text = re.sub(r"(?<!\w)\d{7,}(?!\w)", "[identificador]", text)
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
     maximum = max(80, min(4000, int(limit)))
     return text if len(text) <= maximum else text[:maximum] + "…[recortado]"
 
@@ -1158,6 +1158,44 @@ class KatherineAI:
                     self._provider_last_request = time.monotonic()
                     self.metrics["ai_provider_requests"] += 1
                     self._update_provider_limits(response)
+
+                    # Retry once without strict schema only when Groq explicitly
+                    # rejects response_format/schema. Application validation below
+                    # still enforces the complete action contract and step limits.
+                    if (
+                        self.is_groq
+                        and output_format.get("type") == "json_schema"
+                        and _is_structured_output_rejection(response)
+                    ):
+                        fallback_body = dict(body)
+                        fallback_body["text"] = {"format": {"type": "json_object"}}
+                        fallback_body["instructions"] = (
+                            prompt_instructions
+                            + "\\n\\nDevuelve solo JSON válido sin Markdown. "
+                            + "Incluye kind, answer, command, args y steps. "
+                            + "steps debe ser una lista de cero a tres objetos con command y args."
+                        )
+                        logging.warning(
+                            "[AI] %s rechazó el esquema estructurado (HTTP 400); "
+                            "se reintenta una vez con JSON object.",
+                            self.provider_name,
+                        )
+                        self.metrics["ai_provider_schema_fallbacks"] += 1
+                        response = await request_func(
+                            "POST",
+                            self.api_url,
+                            headers={
+                                "Authorization": f"Bearer {self.api_key}",
+                                "Content-Type": "application/json",
+                                "Accept": "application/json",
+                            },
+                            json=fallback_body,
+                            timeout=35,
+                        )
+                        self._provider_last_request = time.monotonic()
+                        self.metrics["ai_provider_requests"] += 1
+                        self._update_provider_limits(response)
+
                     if (
                         getattr(response, "status_code", None) == 429
                         and self._daily_quota_reset_at > time.monotonic()
@@ -1193,18 +1231,7 @@ class KatherineAI:
             status = getattr(response, "status_code", "desconocido")
             # Preserve only the provider's safe diagnostic fields; never log headers
             # or request data, which may contain the API credential.
-            code = ""
-            error_type = ""
-            message = ""
-            try:
-                error_payload = response.json()
-                error_data = error_payload.get("error", {}) if isinstance(error_payload, dict) else {}
-                if isinstance(error_data, dict):
-                    code = str(error_data.get("code") or "")[:80]
-                    error_type = str(error_data.get("type") or "")[:80]
-                    message = str(error_data.get("message") or "")[:240]
-            except Exception:
-                pass
+            code, error_type, message = _provider_error_fields(response)
             safe_detail = " | ".join(
                 part for part in (
                     f"código={code}" if code else "",
@@ -1213,6 +1240,14 @@ class KatherineAI:
                 ) if part
             )
             suffix = f" ({safe_detail})" if safe_detail else ""
+            logging.warning(
+                "[AI] Fallo del proveedor | proveedor=%s | HTTP %s | código=%s | tipo=%s | detalle=%s",
+                self.provider_name,
+                status,
+                code or "n/d",
+                error_type or "n/d",
+                sanitize_ai_trace_text(message, 240),
+            )
             raise RuntimeError(f"Proveedor IA HTTP {status}{suffix}.")
         try:
             payload = response.json()
