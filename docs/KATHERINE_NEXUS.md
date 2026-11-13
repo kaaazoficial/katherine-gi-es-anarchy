@@ -1,30 +1,19 @@
 # Katherine Nexus
 
-Katherine Nexus is an additive natural-language layer for Katherine. The bot keeps the same name, existing command handlers, and Anarchy Apps API integration.
+Capa de interpretación de lenguaje natural que complementa los comandos existentes de Katherine para Anarchy Apps.
 
-## Current scope
+## Alcance
+- Permite invocar comandos existentes con «Katherine …» cuando la intención se reconoce con suficiente confianza.
+- Reutiliza manejadores, permisos, límites y operaciones de API originales.
+- Solicitudes ambiguas o desconocidas no deben convertirse en acciones.
+- La mención aislada «Katherine» no activa el asistente.
+- La clasificación evita dirigir consultas generales a módulos temáticos ajenos.
 
-- Converts a deliberately small set of high-confidence Spanish requests into commands already supported by Katherine.
-- Reuses existing command handlers, permissions, rate limits, and API calls.
-- Leaves ambiguous requests and ordinary conversation untouched.
-- Does not call an LLM, add a database table, persist message content, or add undocumented Anarchy Apps endpoints.
-- Routes only in the developer-bot message path; community-bot voice behavior remains unchanged.
+## Seguridad y privacidad
+Nexus no inventa endpoints ni amplía permisos. Las acciones administrativas verifican el UID real. El contexto conversacional de IA es temporal y no debe convertirse en memoria persistente de usuarios o conversaciones.
 
-## Safety and limitations
+## Respuestas automáticas
+Las reglas automáticas se evalúan después de descartar comandos con prefijo y solicitudes naturales dirigidas a Katherine. Se conservan límites por sala y usuario para evitar respuestas repetitivas.
 
-This is deterministic intent routing, not unrestricted natural-language understanding. If a request does not match a safe pattern, users should use !ayuda or the explicit command. The feature does not imply that Katherine can send DMs, read chat history, attach media, or moderate members through unavailable API operations.
-
-## Rollback
-
-The feature is isolated in katherine_nexus.py and a small dispatch integration. Reverting the integration and deleting the module/tests returns the prior message-processing path without changing existing command implementations.
-
-
-## Invocación natural universal
-
-Cualquier comando existente incluido en el catálogo de `katherine_ai.py` puede invocarse
-sin escribir el prefijo, dirigiéndose a Katherine: `Katherine ayuda`,
-`Katherine perfil`, `Katherine dj pausa`, `Katherine guia Cyno` o
-`Katherine admin resumen`. También se admite `Katherine !comando argumentos`.
-La invocación solo resuelve el nombre: los manejadores originales siguen validando
-argumentos, UID administrativo y permisos. Los comandos desconocidos no se ejecutan.
-Mencionar únicamente «Katherine» no activa el bot.
+## Pruebas y rollback
+Los cambios de intención requieren pruebas para solicitudes válidas, ambiguas y fuera de dominio. Los comandos conservan la validación de argumentos y permisos original. Revertir la integración y el módulo permite recuperar el flujo previo.

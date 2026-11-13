@@ -63,4 +63,4 @@ jobs:
         run: python -m pip check
 
       - name: Compile bot source
-        run: python -m py_compile main.py katherine_nexus.py katherine_astra.py katherine_ai.py katherine_research.py katherine_retention.py
+        run: python -m compileall -q .

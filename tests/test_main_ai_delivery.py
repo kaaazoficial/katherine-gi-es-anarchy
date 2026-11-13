@@ -302,3 +302,22 @@ async def test_rate_limited_response_is_marked_queued_to_prevent_fallback_duplic
     assert result["data"]["queuedBlocks"] == 1
     assert len(calls) == 4
     assert len(scheduled) == 1
+
+
+@pytest.mark.asyncio
+async def test_ai_tool_failure_is_not_reported_as_success(monkeypatch):
+    async def failing_command(event, source):
+        raise RuntimeError("fallo simulado")
+
+    monkeypatch.setattr(bot_main, "handle_command", failing_command)
+    result = await bot_main.execute_ai_tool(
+        {"threadId": "room", "message": {"content": "consulta"}},
+        "developer", "room:user", "ayuda", silent=True,
+    )
+    assert result["output"]
+    assert result["success"] is False
+
+
+def test_webhook_limits_are_explicit():
+    assert bot_main.MAX_WEBHOOK_BODY_BYTES == 1_048_576
+    assert bot_main.MAX_WEBHOOK_BACKGROUND_TASKS == 100
