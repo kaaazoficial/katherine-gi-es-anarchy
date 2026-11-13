@@ -74,6 +74,11 @@ from katherine_ai import (
     KatherineAI, build_ai_session_key, is_bot_author, validate_ai_tool_call
 )
 from katherine_research import search_web, fetch_public_page, build_source_context
+from katherine_game_queries import (
+    infer_genshin_data_folder,
+    strip_game_scope_qualifier,
+    unwrap_genshin_db_response,
+)
 from katherine_retention import cleanup_database_retention
 
 AI_CORE = KatherineAI()
@@ -3631,14 +3636,16 @@ async def start_dj_room(
 # GENSHIN DATABASE API
 # ---------------------------------------------------------------------------
 async def game_data(folder: str, query: str, extra_params: dict | None = None):
+    clean_query = strip_game_scope_qualifier(query)
+    clean_query = clean_query or str(query or "").strip()
     options_key = json.dumps(extra_params or {}, sort_keys=True, ensure_ascii=False)
-    key = f"{folder}:{query.casefold()}:{options_key}"
+    key = f"{folder}:{clean_query.casefold()}:{options_key}"
 
     if key in cache and cache[key][0] > time.time():
         return cache[key][1]
 
     params = {
-        "query": query,
+        "query": clean_query,
         "dumpResult": "true",
         "matchNames": "true",
         "matchAltNames": "true",
@@ -3650,17 +3657,17 @@ async def game_data(folder: str, query: str, extra_params: dict | None = None):
         params.update(extra_params)
 
     try:
-        r = await external_request(
+        response = await external_request(
             "GET", f"{GAME_API}/{folder}", params=params, timeout=18
         )
-        r.raise_for_status()
-        data = r.json()
+        response.raise_for_status()
+        payload = response.json()
+        data = unwrap_genshin_db_response(payload)
 
-        if isinstance(data, dict):
-            if "result" in data and ("folder" in data or "query" in data):
-                data = data.get("result")
-            else:
-                data = data.get("data", data.get("result", data))
+        # dumpResult envelopes may describe a failed match rather than contain
+        # an entity. Never cache or expose those diagnostics as encyclopedia data.
+        if data is None or data == {} or data == []:
+            return None
 
         cache[key] = (time.time() + 21600, data)
 
@@ -3675,10 +3682,16 @@ async def game_data(folder: str, query: str, extra_params: dict | None = None):
         logging.warning(
             "Genshin API %s/%s: %s",
             folder,
-            query,
+            clean_query,
             exc
         )
         return None
+
+
+def normalize_game_entity_name(value: Any) -> str:
+    text = unicodedata.normalize("NFKD", str(value or "").casefold())
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
 
 
 def clean_game_text(value: Any) -> str:
@@ -3748,10 +3761,7 @@ def game_items_text(items: Any, limit: int = 7) -> list[str]:
 
 
 def describe_game(data: Any, fallback: str, folder: str | None = None) -> str:
-    if isinstance(data, dict) and "result" in data and (
-        "folder" in data or "query" in data
-    ):
-        data = data.get("result")
+    data = unwrap_genshin_db_response(data)
 
     if not isinstance(data, dict):
         if isinstance(data, list) and data:
@@ -14302,6 +14312,7 @@ Uso: !enciclopedia <nombre>""",
                 reply
             )
             return
+        clean_query = strip_game_scope_qualifier(query)
         categories = [
             ("Personajes", "characters"),
             ("Armas", "weapons"),
@@ -14313,8 +14324,17 @@ Uso: !enciclopedia <nombre>""",
             ("Geografía", "geographies"),
             ("Elementos", "elements"),
         ]
+        # If the entity taxonomy identifies a region or element, query only
+        # its own folder instead of spraying the same query across every folder.
+        inferred_folder = infer_genshin_data_folder(clean_query)
+        if inferred_folder:
+            category_labels = {
+                "geographies": "Geografía",
+                "elements": "Elementos",
+            }
+            categories = [(category_labels[inferred_folder], inferred_folder)]
         results = await asyncio.gather(
-            *(game_data(folder, query) for _, folder in categories),
+            *(game_data(folder, clean_query) for _, folder in categories),
             return_exceptions=True
         )
         sections = []
@@ -14322,9 +14342,15 @@ Uso: !enciclopedia <nombre>""",
             if isinstance(data, Exception) or data is None:
                 continue
             if isinstance(data, dict):
-                name = clean_game_text(data.get("name") or data.get("Name") or query)
-                if name.casefold() == query.casefold() or query.casefold() in name.casefold():
-                    detail = describe_game(data, query, folder)
+                name = clean_game_text(data.get("name") or data.get("Name") or clean_query)
+                normalized_name = normalize_game_entity_name(name)
+                normalized_query = normalize_game_entity_name(clean_query)
+                if (
+                    normalized_name == normalized_query
+                    or normalized_query in normalized_name
+                    or normalized_name in normalized_query
+                ):
+                    detail = describe_game(data, clean_query, folder)
                     if detail and not detail.startswith("No encontré"):
                         sections.append(f"【{label}】\n{detail}")
             elif isinstance(data, list) and data:
@@ -14459,7 +14485,8 @@ Uso: !enciclopedia <nombre>""",
             )
             return
 
-        data = await game_data(object_commands[command], query)
+        clean_query = strip_game_scope_qualifier(query)
+        data = await game_data(object_commands[command], clean_query)
 
         await send_message(
             thread,
