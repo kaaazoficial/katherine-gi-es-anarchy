@@ -1116,6 +1116,16 @@ class KatherineAI:
                     self._provider_last_request = time.monotonic()
                     self.metrics["ai_provider_requests"] += 1
                     self._update_provider_limits(response)
+                    if (
+                        getattr(response, "status_code", None) == 429
+                        and self._daily_quota_reset_at > time.monotonic()
+                    ):
+                        self.metrics["ai_provider_daily_quota_hits"] += 1
+                        logging.warning(
+                            "[AI] %s agotó una cuota diaria; se pausa la IA hasta el reinicio indicado.",
+                            self.provider_name,
+                        )
+                        raise RuntimeError("IA_CUOTA_DIARIA_AGOTADA")
                     if getattr(response, "status_code", None) != 429:
                         break
                     self.metrics["ai_provider_429"] += 1
