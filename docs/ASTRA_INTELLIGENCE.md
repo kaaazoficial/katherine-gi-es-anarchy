@@ -55,3 +55,14 @@ El núcleo de IA puede devolver un plan de hasta tres herramientas. Katherine va
 - Los datos de usuario y sus estados de juego se eliminan después de 90 días de inactividad. Las configuraciones comunitarias se mantienen, pero se anonimiza el identificador del creador a los 90 días.
 - Las cachés, favoritos, límites y resultados temporales se eliminan automáticamente al caducar. No se guardan transcripciones de conversación en SQLite.
 - La retención local no controla las políticas del proveedor externo de IA; revisa las condiciones del proveedor configurado.
+
+
+## Enrutamiento natural y ejecución de comandos
+
+- El enrutador clasifica conversación, acción, investigación, Genshin y solicitudes múltiples; el dominio de Genshin se detecta antes de las palabras genéricas de investigación.
+- El catálogo de herramientas se construye por solicitud y por permisos: los comandos administrativos solo se muestran a la IA cuando el UID verificado pertenece a `ADMIN_UIDS`. El manejador original vuelve a comprobarlos.
+- Las peticiones naturales dirigidas a Katherine pueden invocar los comandos existentes de comunidad, perfiles propios, economía, juegos, Teyvat, investigación, multimedia, DJ y voz.
+- Los comandos con efectos se ejecutan solo ante una instrucción explícita. Las transferencias requieren destinatario y cantidad válidos. Los comandos administrativos conservan sus comprobaciones de UID.
+- Los planes admiten hasta tres acciones de consulta/investigación independientes, validadas por completo antes de ejecutarse. No se incluyen pagos, cambios de perfil, moderación, creación/cierre de eventos ni otras acciones con efectos.
+- La ejecución silenciosa captura el resultado real del comando y genera una única respuesta final. Si no hay salida verificable, Katherine informa que no pudo confirmar el resultado. Los comandos interactivos mantienen sus botones y controles nativos.
+- Una mención aislada de «Katherine» sigue sin activar el bot; una petición explícita no puede ser interceptada por las respuestas automáticas por palabras clave.
