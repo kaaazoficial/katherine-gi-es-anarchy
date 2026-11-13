@@ -270,3 +270,39 @@ def test_source_context_keeps_all_eight_sources_with_large_excerpts():
     assert len(context) < 18_000
     assert all(f"FUENTE [{index}]" in context for index in range(1, 9))
     assert "source8.example" in context
+
+
+def test_public_page_fetch_uses_dns_pinning_and_stream_byte_limit():
+    calls = []
+
+    async def request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return FakeResponse(text="<html><title>Public</title><p>" + ("A" * 120) + "</p></html>")
+
+    page = run(research.fetch_public_page("https://example.org/article", request))
+    assert page["title"] == "Public"
+    assert calls[0][2]["safe_public"] is True
+    assert calls[0][2]["max_response_bytes"] == 600_000
+
+
+def test_provider_failure_is_logged_and_does_not_abort_other_sources(monkeypatch, caplog):
+    async def fail(*args, **kwargs):
+        raise RuntimeError("offline")
+
+    async def success(*args, **kwargs):
+        return [{
+            "title": "Public result",
+            "url": "https://example.org/article",
+            "domain": "example.org",
+            "snippet": "Evidence from source",
+            "excerpt": "Evidence from source",
+            "source_type": "public_web",
+        }]
+
+    monkeypatch.setattr(research, "search_wikidata", fail)
+    monkeypatch.setattr(research, "search_wikipedia", success)
+    monkeypatch.setattr(research, "_search_general_web", success)
+    monkeypatch.setattr(research, "search_fandom_wikis", success)
+    results = run(research.search_web("generic question about public topic", lambda *a, **k: None, limit=3))
+    assert results
+    assert "Fuente" in caplog.text

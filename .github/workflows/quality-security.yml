@@ -48,11 +48,17 @@ jobs:
           python -m pip install -r requirements-dev.txt
           python -m pip install -r requirements.txt
 
-      - name: Ruff static analysis (baseline report)
+      - name: Ruff undefined-name gate
+        run: ruff check . --select F821 --output-format=github
+
+      - name: Ruff full baseline report
         run: ruff check . --output-format=github
         continue-on-error: true
 
-      - name: Bandit security scan (baseline report)
+      - name: Bandit high-severity security gate
+        run: bandit -r . -x ./tests,./.git -lll
+
+      - name: Bandit medium/low baseline report
         run: bandit -r . -x ./tests,./.git -ll
         continue-on-error: true
 

@@ -459,3 +459,29 @@ def test_antispam_tracking_evicts_oldest_keys_at_capacity(monkeypatch):
     katherine.prune_antispam_tracking(now=10.0)
     assert ("room", "old") not in katherine.USER_MESSAGE_ACTIVITY
     assert ("room", "new") in katherine.USER_MESSAGE_ACTIVITY
+
+
+@pytest.mark.asyncio
+async def test_public_https_dns_pinning_rejects_private_and_mixed_answers(monkeypatch):
+    loop = asyncio.get_running_loop()
+
+    async def public_answer(host, port, **kwargs):
+        return [(2, 1, 6, "", ("93.184.216.34", 443))]
+
+    monkeypatch.setattr(loop, "getaddrinfo", public_answer)
+    pinned, headers, extensions = await katherine.pin_public_https_url(
+        "https://example.org/article"
+    )
+    assert pinned == "https://93.184.216.34/article"
+    assert headers == {"Host": "example.org"}
+    assert extensions == {"sni_hostname": "example.org"}
+
+    async def mixed_answer(host, port, **kwargs):
+        return [
+            (2, 1, 6, "", ("93.184.216.34", 443)),
+            (2, 1, 6, "", ("127.0.0.1", 443)),
+        ]
+
+    monkeypatch.setattr(loop, "getaddrinfo", mixed_answer)
+    with pytest.raises(ValueError, match="no pública"):
+        await katherine.pin_public_https_url("https://example.org/article")

@@ -347,3 +347,88 @@ async def test_webhook_body_reader_accepts_bounded_stream():
             yield b"llo"
 
     assert await bot_main.read_limited_webhook_body(FakeRequest(), limit=5) == b"hello"
+
+
+@pytest.mark.asyncio
+async def test_avatarbot_updates_and_verifies_both_bot_identities_by_default(monkeypatch, tmp_path):
+    monkeypatch.setattr(bot_main, "DB_PATH", tmp_path / "avatar-bot-test.sqlite3")
+    bot_main.init_db()
+    monkeypatch.setattr(bot_main, "ADMIN_UIDS", {"trusted-admin"})
+    calls = []
+    sent = []
+
+    async def fake_resolve(_url):
+        return b"fake-image", "image/png"
+
+    async def fake_upload(path, target, content, mime):
+        calls.append((path, target, content, mime))
+        return {"ok": True, "status": 200, "data": {"bot": {"icon": f"https://cdn.example/{target}.png"}}}
+
+    async def fake_send(thread_id, content, source="developer", reply_id=None, buttons=None, **kwargs):
+        sent.append(str(content))
+        return {"ok": True}
+
+    monkeypatch.setattr(bot_main, "resolve_avatar_image", fake_resolve)
+    monkeypatch.setattr(bot_main, "api_upload_bytes", fake_upload)
+    monkeypatch.setattr(bot_main, "send_message", fake_send)
+
+    event = {
+        "threadId": "avatar-admin-room",
+        "message": {
+            "content": "!avatarbot https://images.example/katherine.png",
+            "author": {"uid": "trusted-admin", "nickname": "Admin"},
+        },
+    }
+    await bot_main.handle_command(event, "developer")
+
+    assert [item[1] for item in calls] == ["developer", "community"]
+    assert all(item[2:] == (b"fake-image", "image/png") for item in calls)
+    assert sent and "developer: actualizado" in sent[0] and "community: actualizado" in sent[0]
+
+
+def test_admin_bot_target_parser_defaults_to_both_and_accepts_explicit_target():
+    assert bot_main.parse_admin_bot_targets("https://example.com/avatar.png") == (
+        ["developer", "community"], "https://example.com/avatar.png"
+    )
+    assert bot_main.parse_admin_bot_targets("comunidad https://example.com/a.png") == (
+        ["community"], "https://example.com/a.png"
+    )
+    assert bot_main.parse_admin_bot_targets("desarrollador Nombre") == (
+        ["developer"], "Nombre"
+    )
+
+
+@pytest.mark.asyncio
+async def test_avatarbot_remains_uid_protected(monkeypatch, tmp_path):
+    monkeypatch.setattr(bot_main, "DB_PATH", tmp_path / "avatar-admin-test.sqlite3")
+    bot_main.init_db()
+    monkeypatch.setattr(bot_main, "ADMIN_UIDS", {"trusted-admin"})
+    sent = []
+
+    async def fake_send(thread_id, content, source="developer", reply_id=None, buttons=None, **kwargs):
+        sent.append(str(content))
+        return {"ok": True}
+
+    monkeypatch.setattr(bot_main, "send_message", fake_send)
+    event = {
+        "threadId": "avatar-admin-room",
+        "message": {
+            "content": "!avatarbot https://images.example/katherine.png",
+            "author": {"uid": "not-admin", "nickname": "trusted-admin"},
+        },
+    }
+    await bot_main.handle_command(event, "developer")
+    assert sent and "Acceso restringido" in sent[0]
+
+
+@pytest.mark.asyncio
+async def test_research_source_links_are_preserved_only_when_explicitly_allowed(monkeypatch):
+    safe_url = "https://example.org/article"
+    safe = bot_main.sanitize_chat_text(f"Fuente [Abrir fuente]({safe_url})", allow_safe_links=True)
+    assert safe == f"Fuente [Abrir fuente]({safe_url})"
+    ordinary = bot_main.sanitize_chat_text(f"Visita [Abrir fuente]({safe_url})")
+    assert "https://" not in ordinary
+    unsafe = bot_main.sanitize_chat_text(
+        "Fuente [interna](https://127.0.0.1/admin)", allow_safe_links=True
+    )
+    assert "127.0.0.1" not in unsafe
