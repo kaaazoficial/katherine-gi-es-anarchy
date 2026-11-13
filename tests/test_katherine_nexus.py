@@ -195,6 +195,8 @@ def test_genshin_entity_names_still_route_to_teyvat():
         ("Katherine, qué es Natlan", "geografia Natlan"),
         ("Katherine, qué es la región de Natlan en Genshin Impact", "geografia Natlan"),
         ("Katherine, dónde está Fontaine en Genshin", "geografia Fontaine"),
+        ("Katherine, háblame sobre la región de Natlan", "geografia Natlan"),
+        ("Katherine, qué se sabe de la región Natlan", "geografia Natlan"),
         ("Katherine, qué es el elemento Dendro", "elemento Dendro"),
         ("Katherine, qué es Pyro en Genshin Impact", "elemento Pyro"),
         ("Katherine, quién es Mualani en Genshin Impact", "enciclopedia mualani"),
