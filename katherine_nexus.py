@@ -34,6 +34,7 @@ NATURAL_COMMAND_ALIASES = {
     "menú": "menu",
     "mi-id": "mi-id",
     "mi_uid": "mi_uid",
+    "guardian": "admin",
     "investiga": "investigar",
     "investigacion": "investigar",
     "investigación": "investigar",
@@ -79,6 +80,8 @@ def interpret_direct_command(value: str) -> str | None:
         canonical = command.lstrip("!")
         if canonical not in NATURAL_COMMAND_NAMES:
             return None
+        if canonical in GENSHIN_COMMANDS and not is_genshin_related_request(raw):
+            return None
         return " ".join([canonical, *args]).strip()
 
     first, separator, remainder = raw.partition(" ")
@@ -88,6 +91,8 @@ def interpret_direct_command(value: str) -> str | None:
 
     command = NATURAL_COMMAND_ALIASES.get(command_key, command_key)
     args = remainder.strip() if separator else ""
+    if command in GENSHIN_COMMANDS and not is_genshin_related_request(raw):
+        return None
 
     # Apply the exact same aliases as the prefixed command parser.
     alias = COMMAND_ALIASES.get("!" + command)
@@ -298,6 +303,8 @@ def interpret_natural_request(value: str) -> str | None:
     direct_command = interpret_direct_command(raw)
     if direct_command:
         return direct_command
+    if raw.startswith(("!", "-")):
+        return None
     # Una invocación explícita siempre recibe una respuesta, incluso si la
     # solicitud todavía no tiene una acción específica registrada.
     return f"asistente {raw[:300]}"
