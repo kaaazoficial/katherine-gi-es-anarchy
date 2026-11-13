@@ -120,6 +120,7 @@ ADMIN_ONLY_COMMANDS = frozenset({
     "!admin", "!paneladmin", "!guardian",
     "!respuestas", "!respuesta", "!advertir", "!advertencias",
     "!quitaradvertencia", "!antispam", "!perfilbot", "!avatarbot",
+    "!eliminarmensajes",
 })
 STARTED = time.time()
 STARTED_MONOTONIC = time.monotonic()
@@ -874,6 +875,7 @@ DJ_ROOMS: dict[str, dict] = {}
 DJ_READY_EVENTS: dict[str, asyncio.Event] = {}
 VOICE_CONNECT_LOCKS: dict[str, asyncio.Lock] = {}
 BOT_IDENTITIES: dict[str, dict] = {}
+BOT_SENT_MESSAGES: dict[tuple[str, str], deque] = defaultdict(lambda: deque(maxlen=5000))
 TTS_VOICE = SETTINGS.tts_voice
 TTS_VOICE_OPTIONS = {
     "catalina": "es-CL-CatalinaNeural",
@@ -1602,7 +1604,7 @@ def utf16_prefix_length(value: str, limit: int) -> int:
     return len(value)
 
 
-def split_message_content(content: str, limit: int = 1800) -> list[str]:
+def split_message_content(content: str, limit: int = 2000) -> list[str]:
     """Split outgoing messages below the API cap, counting UTF-16 code units."""
     if limit < 1:
         raise ValueError("El límite de mensaje debe ser positivo.")
@@ -1735,6 +1737,40 @@ def sanitize_chat_text(content: Any) -> str:
     return text.strip()
 
 
+async def delete_katherine_messages(thread_id: str, source: str) -> dict[str, int]:
+    """Delete only messages whose IDs were returned by our own successful sends."""
+    key = (str(source), str(thread_id))
+    tracked = list(BOT_SENT_MESSAGES.get(key, ()))
+    deleted = failed = 0
+    for item in tracked:
+        message_id = str(item.get("message_id") or "").strip()
+        if not message_id:
+            continue
+        result = await api(
+            "DELETE",
+            f"/threads/{thread_id}/messages/{message_id}",
+            source,
+        )
+        if result.get("ok") or result.get("status") == 404:
+            deleted += 1
+        else:
+            failed += 1
+            logging.warning(
+                "[ANARCHY] No se pudo eliminar un mensaje propio (HTTP %s).",
+                result.get("status"),
+            )
+    if failed == 0:
+        BOT_SENT_MESSAGES.pop(key, None)
+    else:
+        # Keep only IDs that could not be deleted, so a later retry can finish.
+        remaining = deque(
+            item for item in tracked
+            if item.get("message_id")
+        )
+        BOT_SENT_MESSAGES[key] = remaining
+    return {"attempted": len(tracked), "deleted": deleted, "failed": failed}
+
+
 async def send_message(
     thread_id: str,
     content: str,
@@ -1759,9 +1795,9 @@ async def send_message(
                 )
             )
             if normalized_capture and not is_progress and len(capture) < 8:
-                capture.append(normalized_capture[:2000])
-        return {"ok": True, "silent": True, "data": {"content": content[:2000]}}
-    parts = split_message_content(content, 1800)
+                capture.append(normalized_capture)
+        return {"ok": True, "silent": True, "data": {"content": content}}
+    parts = split_message_content(content, 2000)
     if not parts:
         return None
 
@@ -1848,6 +1884,16 @@ async def send_message(
             last_result = result
 
             if result.get("ok"):
+                sent_message_id = extract_message_id(result.get("data"))
+                if sent_message_id:
+                    BOT_SENT_MESSAGES[(str(source), str(thread_id))].append({
+                        "message_id": sent_message_id,
+                        "created_at": time.time(),
+                    })
+                else:
+                    logging.warning(
+                        "[ANARCHY] Mensaje enviado sin ID recuperable; no podrá incluirse en la limpieza."
+                    )
                 metrics["messages_sent"] += 1
                 now = time.monotonic()
                 last_bot_send = now
@@ -12861,6 +12907,23 @@ async def handle_command(event: dict, source: str):
         return
 
 
+
+    if command == "!eliminarmensajes":
+        result = await delete_katherine_messages(thread, source)
+        if result["attempted"] == 0:
+            answer = (
+                "No tengo identificadores temporales de mensajes propios en esta sala. "
+                "Solo puedo eliminar mensajes enviados desde que esta instancia está activa."
+            )
+        elif result["failed"]:
+            answer = (
+                f"Limpieza parcial: {result['deleted']} mensajes eliminados; "
+                f"{result['failed']} no se pudieron eliminar. Puedes volver a intentarlo."
+            )
+        else:
+            answer = f"He eliminado {result['deleted']} mensajes propios de esta sala."
+        await send_message(thread, answer, source, reply)
+        return
 
     if command == "!asistente":
         request_text = query.strip()
