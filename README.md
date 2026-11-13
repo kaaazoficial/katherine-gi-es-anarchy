@@ -23,6 +23,6 @@ python -m compileall -q .
 Las dependencias de audio/voz son opcionales en pruebas aisladas.
 
 ## Persistencia y despliegue
-`render.yaml` mantiene el plan Free. En Render Free el sistema de archivos es efímero y no admite Persistent Disks; SQLite local puede reiniciarse al sustituirse el contenedor, reiniciarse o salir del reposo. No se debe asumir que los datos locales sobreviven. Para persistencia real se requiere un servicio con disco persistente o una base de datos administrada. No se cambia el plan ni se crea infraestructura automáticamente. Configura secretos únicamente en el panel del proveedor, nunca en Git.
+`render.yaml` declara un servicio Free y no declara un Persistent Disk ni una base de datos externa. Por tanto, el repositorio por sí solo no garantiza persistencia de SQLite entre sustituciones o reinicios del contenedor. El proceso detecta un montaje externo y advierte si no lo encuentra, pero esa comprobación no revela si el panel tiene recursos añadidos manualmente. Antes de depender de datos persistentes, verifica el almacenamiento real en el proveedor y configura una base de datos o volumen compatible. Esta auditoría no modifica el plan ni la infraestructura. Configura secretos únicamente en el panel del proveedor, nunca en Git.
 
 Consulta [docs/COMMANDS_AND_PERMISSIONS.md](docs/COMMANDS_AND_PERMISSIONS.md) para comandos y permisos.
