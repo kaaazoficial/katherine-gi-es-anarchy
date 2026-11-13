@@ -22,6 +22,10 @@ _COUNTERS = (
     ("katherine_message_send_retries", "message_send_retries", "Rate-limited outgoing message retries."),
     ("katherine_message_send_429", "message_send_429", "Outgoing message rate-limit responses."),
     ("katherine_message_send_failures", "message_send_failures", "Outgoing message blocks that could not be delivered."),
+    ("katherine_message_send_recovered", "message_send_recovered", "Outgoing message blocks recovered from a definitive rate limit."),
+    ("katherine_message_send_pending_queued", "message_send_pending_queued", "Outgoing message blocks temporarily queued in process memory."),
+    ("katherine_message_send_pending_expired", "message_send_pending_expired", "Pending message blocks that expired before delivery."),
+    ("katherine_message_send_pending_abandoned", "message_send_pending_abandoned", "Pending message blocks abandoned after a non-rate-limit error."),
 )
 
 
