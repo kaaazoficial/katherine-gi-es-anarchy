@@ -14,6 +14,16 @@ GENSHIN_TOPIC_HINTS = frozenset({
     "siete naciones", "arconte", "arcontes", "vision elemental",
 })
 
+GENSHIN_REGION_HINTS = frozenset({
+    "mondstadt", "liyue", "inazuma", "sumeru", "fontaine",
+    "natlan", "snezhnaya", "nod-krai", "khaenriah",
+    "dragonspine", "enkanomiya", "the chasm", "chasm",
+})
+
+GENSHIN_ELEMENT_HINTS = frozenset({
+    "pyro", "hydro", "electro", "cryo", "dendro", "anemo", "geo",
+})
+
 GENSHIN_ENTITY_HINTS = frozenset({
     "albedo", "alhaitham", "amber", "arataki itto", "ayaka", "ayato",
     "baizhu", "barbara", "beidou", "bennett", "candace", "charlotte",
@@ -51,5 +61,8 @@ def is_genshin_related_request(value: str) -> bool:
         return False
     return any(
         _contains_phrase(text, hint)
-        for hint in (*GENSHIN_TOPIC_HINTS, *GENSHIN_ENTITY_HINTS)
+        for hint in (
+            *GENSHIN_TOPIC_HINTS, *GENSHIN_ENTITY_HINTS,
+            *GENSHIN_REGION_HINTS, *GENSHIN_ELEMENT_HINTS,
+        )
     )

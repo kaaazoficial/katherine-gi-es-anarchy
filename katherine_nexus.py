@@ -6,6 +6,7 @@ import unicodedata
 from typing import Any
 
 from katherine_topics import is_genshin_related_request
+from katherine_game_queries import resolve_genshin_entity_intent
 
 
 GENSHIN_COMMANDS = frozenset({
@@ -117,6 +118,13 @@ def interpret_natural_request(value: str) -> str | None:
     if not text:
         # Mencionar solo el nombre (o "Oye Katherine") no abre menús ni responde.
         return None
+    # Resolve domain, entity type and requested information before generic
+    # "qué es/quién es" routes. Strip "Genshin Impact" as a scope qualifier;
+    # it is not part of the entity's name.
+    game_intent = resolve_genshin_entity_intent(text)
+    if game_intent:
+        game_command, game_subject = game_intent
+        return f"{game_command} {game_subject}"
     patterns = (
         (r"^(?:abre|abrir|muestra|mostrar) (?:el )?(?:menu|panel)(?: interactivo)?$", "menu"),
         (r"^(?:ayuda|que puedes hacer|que sabes hacer|comandos disponibles)$", "ayuda"),
