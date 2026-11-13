@@ -12996,6 +12996,7 @@ async def execute_ai_plan(
             f"{item['command']}: {item['output'] or 'Sin resultado verificable.'}"
             for item in results
         )
+    log_ai_conversation_trace(request_text or "Plan de acciones", answer, "!asistente:plan")
     await send_message(thread, answer, source, reply_id)
     return True
 
@@ -13144,7 +13145,12 @@ async def handle_command(event: dict, source: str):
                 "[NEXUS] Respuesta vacía; se usa respaldo explícito: %s",
                 fallback_command.split(maxsplit=1)[0],
             )
-            await execute_ai_tool(event, source, session_key, fallback_command)
+            fallback_result = await execute_ai_tool(event, source, session_key, fallback_command)
+            log_ai_conversation_trace(
+                request_text,
+                fallback_result.get("output") or "La herramienta no devolvió una salida verificable.",
+                "!asistente:fallback",
+            )
             return
         if ai_result.get("kind") == "plan":
             if await execute_ai_plan(
@@ -13175,6 +13181,12 @@ async def handle_command(event: dict, source: str):
                     event, source, session_key, invocation,
                     silent=command_name not in interactive_commands,
                 )
+                if command_name in interactive_commands:
+                    log_ai_conversation_trace(
+                        request_text,
+                        tool_result.get("output") or "La acción se ejecutó sin una salida textual verificable.",
+                        "!asistente:accion",
+                    )
                 if command_name not in interactive_commands:
                     try:
                         answer = await AI_CORE.synthesize_tool_results(
@@ -13388,6 +13400,12 @@ async def handle_command(event: dict, source: str):
                         event, source, session_key, invocation,
                         silent=command_name not in interactive_commands,
                     )
+                    if command_name in interactive_commands:
+                        log_ai_conversation_trace(
+                            rest,
+                            tool_result.get("output") or "La acción se ejecutó sin una salida textual verificable.",
+                            "!ia:accion",
+                        )
                     if command_name not in interactive_commands:
                         try:
                             answer = await AI_CORE.synthesize_tool_results(
