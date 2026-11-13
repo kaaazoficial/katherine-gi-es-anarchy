@@ -44,5 +44,5 @@ Los eventos se crean libremente; solo su creador o un UID administrador puede ce
 ### Limpieza de mensajes propios
 
 - `!eliminarmensajes` o «Katherine, elimina tus mensajes»: elimina únicamente mensajes de Katherine cuyos identificadores fueron confirmados por Anarchy Apps durante la ejecución actual del proceso.
-- Requiere UID administrador configurado en `ADMIN_UIDS`. Los identificadores se mantienen solo en memoria RAM; no se guardan contenidos ni se crea historial persistente.
+- Requiere UID administrador configurado en `ADMIN_UIDS`. Los identificadores se mantienen solo en memoria RAM durante un máximo de 7 días y caducan automáticamente; no se guardan contenidos ni se crea historial persistente.
 - Tras un reinicio o despliegue, los identificadores temporales anteriores ya no están disponibles. Los mensajes antiguos no se eliminan si no pueden identificarse con seguridad.
