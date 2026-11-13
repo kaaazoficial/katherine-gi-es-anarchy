@@ -17,3 +17,14 @@ This is deterministic intent routing, not unrestricted natural-language understa
 ## Rollback
 
 The feature is isolated in katherine_nexus.py and a small dispatch integration. Reverting the integration and deleting the module/tests returns the prior message-processing path without changing existing command implementations.
+
+
+## Invocación natural universal
+
+Cualquier comando existente incluido en el catálogo de `katherine_ai.py` puede invocarse
+sin escribir el prefijo, dirigiéndose a Katherine: `Katherine ayuda`,
+`Katherine perfil`, `Katherine dj pausa`, `Katherine guia Cyno` o
+`Katherine admin resumen`. También se admite `Katherine !comando argumentos`.
+La invocación solo resuelve el nombre: los manejadores originales siguen validando
+argumentos, UID administrativo y permisos. Los comandos desconocidos no se ejecutan.
+Mencionar únicamente «Katherine» no activa el bot.
