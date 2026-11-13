@@ -69,6 +69,28 @@ def test_ambiguous_or_ordinary_chat_is_not_routed(utterance):
     assert interpret_natural_request(utterance) is None
 
 
+@pytest.mark.parametrize(("utterance", "expected"), [
+    ("Katherine ayuda", "ayuda"),
+    ("Katherine, comandos", "comandos"),
+    ("Katherine !guia Cyno", "guia Cyno"),
+    ("Katherine -estado", "estado"),
+    ("Oye Katherine, admin resumen", "admin resumen"),
+    ("Katherine, dj pausa", "dj pausa"),
+    ("Katherine, investigacion inteligencia artificial", "investigar inteligencia artificial"),
+    ("Katherine, miuid", "miuid"),
+    ("Katherine, subirvolumen", "subirvolumen"),
+    ("Katherine, playlist crear favoritos", "playlist crear favoritos"),
+])
+def test_every_catalog_command_can_be_invoked_with_katherine(utterance, expected):
+    assert interpret_natural_request(utterance) == expected
+
+
+def test_catalog_routing_does_not_activate_for_bare_name_or_unaddressed_commands():
+    assert interpret_natural_request("Katherine") is None
+    assert interpret_natural_request("ayuda") is None
+    assert interpret_natural_request("!ayuda") is None
+
+
 def test_translation_routes_to_existing_translation_command():
     assert interpret_natural_request("Katherine, traduce al inglés: buenos días") == (
         "traducir ingles | buenos días"
