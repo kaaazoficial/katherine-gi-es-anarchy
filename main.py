@@ -1087,6 +1087,11 @@ def cleanup_expired_state():
         if action.get("expires", now + 1) <= now:
             BUTTON_ACTIONS.pop(key, None)
     cleanup_community_events(COMMUNITY_EVENTS, now=now)
+    for key, messages in list(BOT_SENT_MESSAGES.items()):
+        while messages and float(messages[0].get("created_at", 0)) < now - BOT_SENT_MESSAGE_TTL:
+            messages.popleft()
+        if not messages:
+            BOT_SENT_MESSAGES.pop(key, None)
     AI_CORE.cleanup(now=now)
 
     # Expire process-local catalogs, user favorites and transient identifiers.
