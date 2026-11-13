@@ -188,6 +188,26 @@ def test_genshin_entity_names_still_route_to_teyvat():
     assert interpret_natural_request("Katherine, quién es Cyno") == "enciclopedia cyno"
     assert interpret_natural_request("Katherine, dame una guía de Nahida") == "guia nahida"
 
+@pytest.mark.parametrize(
+    ("utterance", "expected"),
+    [
+        ("Katherine, qué es Natlan Genshin Impact", "geografia Natlan"),
+        ("Katherine, qué es Natlan", "geografia Natlan"),
+        ("Katherine, qué es la región de Natlan en Genshin Impact", "geografia Natlan"),
+        ("Katherine, dónde está Fontaine en Genshin", "geografia Fontaine"),
+        ("Katherine, qué es el elemento Dendro", "elemento Dendro"),
+        ("Katherine, qué es Pyro en Genshin Impact", "elemento Pyro"),
+        ("Katherine, quién es Mualani en Genshin Impact", "enciclopedia Mualani"),
+        ("Katherine, qué materiales necesita Mualani Genshin Impact", "materiales Mualani"),
+        ("Katherine, qué armas usa Mualani", "guia Mualani"),
+        ("Katherine, qué materiales necesita mi laptop", "asistente qué materiales necesita mi laptop"),
+    ],
+)
+def test_genshin_questions_are_routed_by_entity_and_requested_information(
+    utterance, expected
+):
+    assert interpret_natural_request(utterance) == expected
+
 
 @pytest.mark.parametrize(
     ("utterance", "expected"),
