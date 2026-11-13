@@ -11,9 +11,24 @@ from katherine_ai import AI_COMMAND_CATALOG
 
 
 GENSHIN_COMMANDS = frozenset({
-    "enciclopedia", "guia", "equipos", "rotacion", "materiales",
-    "cobertura", "buscargenshin",
+    "enciclopedia", "archivo", "teyvat", "guia", "equipos", "rotacion",
+    "materiales", "reacciones", "buscargenshin", "banner", "calendario",
+    "cobertura", "sinergia", "jefes", "lista", "enemigo", "geografia",
+    "elemento", "curiosidad", "deseo", "pity", "resetpity",
 })
+
+
+def _is_genshin_command_request(command: str, raw: str, args: list[str]) -> bool:
+    """Prevent Genshin tools from capturing unrelated topics."""
+    if not args:
+        return True
+    if is_genshin_related_request(raw):
+        return True
+    if command == "lista" and _normalize(" ".join(args)) in {
+        "personaje", "personajes", "enemigo", "enemigos"
+    }:
+        return True
+    return False
 
 
 def _normalize(value: str) -> str:
@@ -80,7 +95,7 @@ def interpret_direct_command(value: str) -> str | None:
         canonical = command.lstrip("!")
         if canonical not in NATURAL_COMMAND_NAMES:
             return None
-        if args and canonical in GENSHIN_COMMANDS and not is_genshin_related_request(raw):
+        if canonical in GENSHIN_COMMANDS and not _is_genshin_command_request(canonical, raw, args):
             return None
         return " ".join([canonical, *args]).strip()
 
@@ -91,7 +106,7 @@ def interpret_direct_command(value: str) -> str | None:
 
     command = NATURAL_COMMAND_ALIASES.get(command_key, command_key)
     args = remainder.strip() if separator else ""
-    if args and command in GENSHIN_COMMANDS and not is_genshin_related_request(raw):
+    if command in GENSHIN_COMMANDS and not _is_genshin_command_request(command, raw, args.split() if args else []):
         return None
 
     # Apply the exact same aliases as the prefixed command parser.
