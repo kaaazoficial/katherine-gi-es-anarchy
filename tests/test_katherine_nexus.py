@@ -287,3 +287,12 @@ def test_provider_failure_can_use_existing_deterministic_fallback():
 def test_natural_language_own_message_cleanup_routes_to_admin_command():
     assert interpret_natural_request("Katherine, elimina tus mensajes") == "eliminarmensajes"
     assert interpret_natural_request("Katherine elima tus mensajes") == "eliminarmensajes"
+
+
+def test_every_social_action_is_reachable_with_katherine():
+    from katherine_nexus import NATURAL_EXTRA_COMMAND_NAMES
+
+    for command in NATURAL_EXTRA_COMMAND_NAMES:
+        assert interpret_natural_request(f"Katherine {command} @usuario") == (
+            f"{command} @usuario"
+        )
