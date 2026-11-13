@@ -195,16 +195,16 @@ def test_public_research_requests_route_to_research_tools(utterance, expected):
     assert interpret_natural_request(utterance) == expected
 
 
-@pytest.mark.parametrize(("request", "fallback", "expected"), [
+@pytest.mark.parametrize(("utterance", "fallback", "expected"), [
     ("Katherine, qué es el gremio de aventureros", "enciclopedia el gremio", False),
     ("Katherine, quién es Anarchy Apps", "enciclopedia anarchy apps", False),
     ("Katherine, abre el menú", "menu", True),
     ("Katherine, pausa la música", "dj pausa", True),
     ("Katherine, investiga Python", "investigar python", True),
-    ("Katherine, qué es Anarchy Apps", "enciclopedia anarchy apps", True),
+    ("Katherine, qué es Anarchy Apps", "enciclopedia anarchy apps", False),
 ])
-def test_deterministic_fallback_requires_explicit_intent(request, fallback, expected):
-    assert should_execute_deterministic_fallback(request, fallback) is expected
+def test_deterministic_fallback_requires_explicit_intent(utterance, fallback, expected):
+    assert should_execute_deterministic_fallback(utterance, fallback) is expected
 
 
 def test_provider_failure_can_use_existing_deterministic_fallback():
