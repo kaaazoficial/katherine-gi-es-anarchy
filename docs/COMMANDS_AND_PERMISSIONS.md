@@ -48,3 +48,10 @@ Los eventos se crean libremente; solo su creador o un UID administrador puede ce
 - `!eliminarmensajes` o «Katherine, elimina tus mensajes»: elimina únicamente mensajes de Katherine cuyos identificadores fueron confirmados por Anarchy Apps durante la ejecución actual del proceso.
 - Requiere UID administrador configurado en `ADMIN_UIDS`. Los identificadores se mantienen solo en memoria RAM durante un máximo de 7 días y caducan automáticamente; no se guardan contenidos ni se crea historial persistente.
 - Tras un reinicio o despliegue, los identificadores temporales anteriores ya no están disponibles. Los mensajes antiguos no se eliminan si no pueden identificarse con seguridad.
+
+
+### Identidad del bot: perfil y avatar
+
+- `!perfilbot [ambos|desarrollador|comunidad] Nombre | Estado`: actualiza el perfil de la identidad seleccionada. Por defecto actualiza ambas.
+- `!avatarbot [ambos|desarrollador|comunidad] URL`: actualiza el icono de la identidad seleccionada. Por defecto actualiza ambas, para mantener sincronizados el perfil de chat y la identidad que entra a las llamadas.
+- Los comandos siguen requiriendo un UID administrador exacto. Si una de las identidades falla, el resultado informa el éxito parcial en vez de afirmar que ambas se actualizaron.
