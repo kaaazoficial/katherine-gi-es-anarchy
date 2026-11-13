@@ -108,3 +108,43 @@ async def test_successful_message_delivery_is_saved_to_ai_context(monkeypatch):
 
     assert result["ok"] is True
     assert captured == ["El resultado de herramienta sí se entregó."]
+
+
+
+def test_long_messages_are_split_into_blocks_of_at_most_2000_utf16_units():
+    content = "A" * 4500
+    parts = bot_main.split_message_content(content)
+    assert [bot_main.utf16_length(part) for part in parts] == [2000, 2000, 500]
+    assert "".join(parts) == content
+
+
+@pytest.mark.asyncio
+async def test_admin_cleanup_deletes_only_tracked_own_message_ids(monkeypatch):
+    key = ("developer", "cleanup-room")
+    bot_main.BOT_SENT_MESSAGES[key].clear()
+    bot_main.BOT_SENT_MESSAGES[key].extend([
+        {"message_id": "own-1", "created_at": 1},
+        {"message_id": "own-2", "created_at": 2},
+    ])
+    bot_main.BOT_SENT_MESSAGES[("community", "cleanup-room")].append(
+        {"message_id": "other-bot", "created_at": 3}
+    )
+    calls = []
+
+    async def fake_api(method, path, source="developer", body=None):
+        calls.append((method, path, source))
+        if path.endswith("own-2"):
+            return {"ok": False, "status": 403, "data": {}}
+        return {"ok": True, "status": 204, "data": {}}
+
+    monkeypatch.setattr(bot_main, "api", fake_api)
+    result = await bot_main.delete_katherine_messages("cleanup-room", "developer")
+    assert result == {"attempted": 2, "deleted": 1, "failed": 1}
+    assert calls == [
+        ("DELETE", "/threads/cleanup-room/messages/own-1", "developer"),
+        ("DELETE", "/threads/cleanup-room/messages/own-2", "developer"),
+    ]
+    assert [item["message_id"] for item in bot_main.BOT_SENT_MESSAGES[key]] == ["own-2"]
+    assert bot_main.BOT_SENT_MESSAGES[("community", "cleanup-room")][0]["message_id"] == "other-bot"
+    bot_main.BOT_SENT_MESSAGES.pop(key, None)
+    bot_main.BOT_SENT_MESSAGES.pop(("community", "cleanup-room"), None)
