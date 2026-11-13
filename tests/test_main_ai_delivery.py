@@ -157,3 +157,24 @@ def test_cleanup_command_is_privileged_and_not_available_to_public_ai():
     assert "eliminarmensajes" in AI_ADMIN_COMMANDS
     assert "eliminarmensajes" not in AI_PUBLIC_COMMANDS
     assert "eliminarmensajes" not in AI_PLAN_SAFE_COMMANDS
+
+
+
+@pytest.mark.asyncio
+async def test_admin_cleanup_ignores_expired_ephemeral_message_ids(monkeypatch):
+    key = ("developer", "cleanup-expired-room")
+    bot_main.BOT_SENT_MESSAGES[key].clear()
+    bot_main.BOT_SENT_MESSAGES[key].extend([
+        {"message_id": "expired", "created_at": 1},
+    ])
+    calls = []
+
+    async def fake_api(method, path, source="developer", body=None):
+        calls.append(path)
+        return {"ok": True, "status": 204, "data": {}}
+
+    monkeypatch.setattr(bot_main, "api", fake_api)
+    result = await bot_main.delete_katherine_messages("cleanup-expired-room", "developer")
+    assert result == {"attempted": 0, "deleted": 0, "failed": 0}
+    assert calls == []
+    assert key not in bot_main.BOT_SENT_MESSAGES
