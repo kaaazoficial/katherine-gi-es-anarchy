@@ -5,10 +5,11 @@ El catálogo de usuario se genera con `!ayuda` y `!comandos` en `main.py`. Debe 
 ## Investigación y herramientas universales
 
 - `!investigar <tema>`: busca páginas públicas en varios resultados independientes, recupera extractos y solicita una síntesis basada en las fuentes.
+- Modos del Centro de Investigación Avanzada: `!investigar comparar: <tema>` contrasta fuentes y posturas; `!investigar verificar: <afirmación>` clasifica afirmaciones según la evidencia; `!investigar cronologia: <tema>` ordena acontecimientos con fechas verificables; `!investigar informe: <tema>` genera un informe exhaustivo. Sin modo explícito se usa la investigación general.
 - `!enlace <URL>`: analiza una página HTML pública HTTPS; no sigue redirecciones ni acepta hosts locales/privados.
 - La investigación combina Wikipedia, Wikidata y búsqueda web general. Según la intención, añade Internet Archive (libros/archivos), OpenAlex y Crossref (bibliografía científica), NASA (biblioteca de imágenes y vídeos espaciales), MusicBrainz y Jamendo (metadatos y catálogo musical), y KeqingMains, HoYoLAB y Fandom (Genshin Impact). Las fuentes especializadas solo se consultan en temas pertinentes; no se mezclan con preguntas generales. Se muestran hasta ocho fuentes de dominios distintos. KeqingMains y Fandom son fuentes comunitarias; HoYoLAB puede contener publicaciones oficiales y de usuarios, por lo que se comprueba la autoría. Jamendo requiere `JAMENDO_CLIENT_ID` en Render; sin ella se omite. MusicBrainz limita las consultas a una por segundo. OpenAlex, Crossref, Wikidata, Internet Archive y NASA usan endpoints públicos sin clave de Katherine.
 - `!ia investigar <tema>` y `!ia enlace <URL>`: accesos desde el menú IA.
-- Katherine también reconoce peticiones explícitas como «Katherine, investiga…» y «Katherine, analiza este enlace…». La mención aislada sigue sin activar el bot.
+- Todos los comandos del catálogo y las acciones sociales (por ejemplo, `Katherine investigar comparar: ...`, `Katherine dj pausa`, `Katherine abrazo @usuario` o `Katherine perfil`) pueden invocarse directamente después de «Katherine». Se conservan los permisos originales y la mención aislada no activa el bot.
 - La síntesis cita las fuentes por número y dominio; páginas bloqueadas, no HTML o sin texto suficiente pueden omitirse. Los metadatos de Crossref/OpenAlex no garantizan acceso al texto completo y los derechos de Internet Archive/Jamendo dependen de cada ítem. La búsqueda no garantiza exhaustividad.
 
 ## Administración por UID
