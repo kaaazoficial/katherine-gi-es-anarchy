@@ -3,7 +3,7 @@
 Esta expansión excluye CREATIVITY AI. La IA es una capa opcional sobre los comandos y fuentes que Katherine ya tiene; no reemplaza el enrutador determinista ni las herramientas actuales.
 
 ## Componentes
-- **Katherine AI Core:** Responses API compatible con OpenAI o Groq, con salida JSON validada (Structured Outputs o JSON Object según proveedor/modelo). Puede responder o proponer un comando de una lista permitida.
+- **Katherine AI Core:** Responses API compatible con OpenAI o Groq, con salida JSON validada (Structured Outputs o JSON Object según proveedor/modelo). No impone un máximo artificial de tokens a la salida; las respuestas extensas se entregan en bloques de hasta 2.000 unidades UTF-16 para respetar el límite de mensajería.
 - **Memoria contextual:** aislada por usuario y sala, solo RAM, caduca a los 10 minutos y conserva hasta 6 turnos.
 - **Teyvat AI:** delega consultas en enciclopedia, guías, equipos, rotaciones, materiales, reacciones y noticias oficiales.
 - **Guardian AI:** revisión contextual manual; recomienda revisión humana, no sanciona ni borra mensajes.
