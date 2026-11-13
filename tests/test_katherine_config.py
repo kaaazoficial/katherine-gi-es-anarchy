@@ -6,7 +6,11 @@ import pytest
 from katherine_config import KatherineSettings
 
 
-def test_settings_use_safe_defaults():
+def test_settings_use_safe_defaults(monkeypatch):
+    # CI/test runners may inject DATA_DIR or other process-level settings.
+    # Clear every supported setting to make this a genuine defaults test.
+    for name in ("PORT", "COMMAND_PREFIX", "ADMIN_UIDS", "ADMINUIDS", "DATA_DIR", "TTS_VOICE"):
+        monkeypatch.delenv(name, raising=False)
     settings = KatherineSettings(_env_file=None)
     assert settings.port == 3000
     assert settings.command_prefix == "!"
