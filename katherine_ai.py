@@ -296,12 +296,12 @@ def is_contextual_followup_request(value: str) -> bool:
     pronoun_reference = re.search(
         r"\b(?:ella|ellas|ellos|eso|ese|esa|lo anterior|la anterior|el anterior|"
         r"la misma|el mismo|a ella|con ella|para ella|sobre ella|de ella|"
-        r"le sirve|le sirven|le conviene|le queda)\b",
+        r"le sirve|le sirven|le conviene|le queda|su historia|sus armas|sus talentos|sus constelaciones|sus habilidades|sus artefactos)\b",
         text,
     )
     game_followup_subject = re.search(
         r"\b(?:arma|armas|build|artefactos?|talentos?|equipos?|materiales|"
-        r"rotacion|constelacion|elemento|personaje|habilidad|ascension)\b",
+        r"rotacion|constelaciones?|elemento|personajes?|habilidades?|ascensiones?)\b",
         text,
     )
     return bool(
@@ -309,8 +309,8 @@ def is_contextual_followup_request(value: str) -> bool:
         or (
             game_followup_subject
             and re.match(r"^(?:que|cual|como|y que|y cual|y como)\b", text)
-)
-        or re.match(r"^y (?:que|cual|como|con|para|sobre|respecto a)\b", text)
+        )
+        or re.match(r"^y (?:que|cual|como|con|para|sobre|la|respecto a)\b", text)
     )
 
 
