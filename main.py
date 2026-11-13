@@ -13104,6 +13104,12 @@ async def handle_command(event: dict, source: str):
         )
         fallback_command = str(event.get("_nexus_fallback_command") or "").strip()
         provider_failed = bool(ai_result.get("fallback"))
+        if ai_result.get("kind") == "answer":
+            log_ai_conversation_trace(
+                request_text,
+                ai_result.get("answer") or "No pude completar tu solicitud.",
+                "!asistente",
+            )
         if provider_failed:
             metrics["ai_errors"] += 1
         has_deterministic_fallback = should_execute_deterministic_fallback(
@@ -13118,7 +13124,12 @@ async def handle_command(event: dict, source: str):
                 "[NEXUS] Proveedor IA no disponible; se usa respaldo explícito: %s",
                 fallback_command.split(maxsplit=1)[0],
             )
-            await execute_ai_tool(event, source, session_key, fallback_command)
+            fallback_result = await execute_ai_tool(event, source, session_key, fallback_command)
+            log_ai_conversation_trace(
+                request_text,
+                fallback_result.get("output") or "La herramienta no devolvió una salida verificable.",
+                "!asistente:fallback",
+            )
             return
         if (
             has_deterministic_fallback
@@ -13167,6 +13178,7 @@ async def handle_command(event: dict, source: str):
                             request_text, [tool_result],
                             external_request, rate_key=None,
                         )
+                        log_ai_conversation_trace(request_text, answer, "!asistente:herramienta")
                         await send_message(thread, answer, source, reply)
                     except Exception as exc:
                         logging.warning(
@@ -13190,7 +13202,9 @@ async def handle_command(event: dict, source: str):
                 )
                 await execute_ai_tool(event, source, session_key, fallback_command)
                 return
-        await send_message(thread, ai_result.get("answer") or "No pude completar tu solicitud.", source, reply)
+        final_answer = ai_result.get("answer") or "No pude completar tu solicitud."
+        log_ai_conversation_trace(request_text, final_answer, "!asistente")
+        await send_message(thread, final_answer, source, reply)
         return
 
     if command in ("!investigar", "!investiga", "!investigacion"):
@@ -13343,6 +13357,10 @@ async def handle_command(event: dict, source: str):
             )
             if result.get("fallback"):
                 metrics["ai_errors"] += 1
+            if result.get("kind") == "answer":
+                log_ai_conversation_trace(
+                    rest, result.get("answer") or "No pude responder.", "!ia preguntar"
+                )
             if result.get("kind") == "plan":
                 if await execute_ai_plan(
                     event, source, session_key, result.get("steps") or [],
@@ -13376,13 +13394,16 @@ async def handle_command(event: dict, source: str):
                             answer = await AI_CORE.synthesize_tool_results(
                                 rest, [tool_result], external_request, rate_key=None
                             )
+                            log_ai_conversation_trace(rest, answer, "!ia:herramienta")
                         except Exception:
                             answer = tool_result.get("output") or (
                                 "La acción se intentó, pero no recibí un resultado verificable."
                             )
                         await send_message(thread, answer, source, reply)
                     return
-            await send_message(thread, result.get("answer") or "No pude responder.", source, reply)
+            final_answer = result.get("answer") or "No pude responder."
+            log_ai_conversation_trace(rest, final_answer, "!ia preguntar")
+            await send_message(thread, final_answer, source, reply)
             return
         if sub in ("investigar", "investigacion", "investigación"):
             if not rest:
