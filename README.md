@@ -22,7 +22,7 @@ python -m compileall -q .
 ```
 Las dependencias de audio/voz son opcionales en pruebas aisladas.
 
-## Despliegue
-Render usa `render.yaml`. Configura secretos solo en el panel de Render, nunca en Git. Verifica logs y `/health` tras publicar.
+## Persistencia y despliegue
+`render.yaml` mantiene el plan Free. En Render Free el sistema de archivos es efímero y no admite Persistent Disks; SQLite local puede reiniciarse al sustituirse el contenedor, reiniciarse o salir del reposo. No se debe asumir que los datos locales sobreviven. Para persistencia real se requiere un servicio con disco persistente o una base de datos administrada. No se cambia el plan ni se crea infraestructura automáticamente. Configura secretos únicamente en el panel del proveedor, nunca en Git.
 
 Consulta [docs/COMMANDS_AND_PERMISSIONS.md](docs/COMMANDS_AND_PERMISSIONS.md) para comandos y permisos.
