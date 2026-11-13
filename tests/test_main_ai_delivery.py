@@ -32,6 +32,32 @@ async def test_ai_plan_executor_rejects_side_effect_tools_before_execution(monke
 
 
 
+def test_genshin_db_no_match_metadata_is_never_rendered_as_an_entity():
+    payload = {
+        "query": "natlan genshin impact",
+        "folder": "characters",
+        "matchFolder": "characters",
+        "matchtype": "none",
+    }
+    answer = bot_main.describe_game(payload, "Natlan", "characters")
+    assert answer == "No encontré información de «Natlan»."
+    assert "Matchtype" not in answer
+    assert "Query:" not in answer
+    assert "Folder:" not in answer
+
+
+def test_geography_descriptions_use_region_fields():
+    data = {
+        "name": "Natlan",
+        "description": "Una de las naciones de Teyvat.",
+        "archon": "Pyro",
+    }
+    answer = bot_main.describe_game(data, "Natlan", "geographies")
+    assert "GENSHIN IMPACT — Natlan" in answer
+    assert "Arconte: Pyro" in answer
+    assert "Una de las naciones de Teyvat" in answer
+
+
 @pytest.mark.asyncio
 async def test_failed_message_delivery_is_not_saved_to_ai_context(monkeypatch):
     captured = []
