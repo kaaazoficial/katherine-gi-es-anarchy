@@ -411,6 +411,12 @@ def test_contextual_genshin_followups_require_a_recent_genshin_question():
         "Katherine, explícame circuitos eléctricos", history
     )
     assert not is_contextual_genshin_followup(
+        "Katherine, dime la fecha", history
+    )
+    assert is_contextual_genshin_followup(
+        "Katherine, explícame sus constelaciones", history
+    )
+    assert not is_contextual_genshin_followup(
         "Katherine, cambiando de tema, ¿y qué armas compro?", history
     )
 
