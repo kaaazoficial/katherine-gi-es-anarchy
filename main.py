@@ -661,6 +661,34 @@ def update_tts_volume(thread_id: str, state: dict, target: int) -> int:
     return target
 
 
+MAX_ANTISPAM_TRACKED_USERS = 5000
+
+
+def prune_antispam_tracking(now: float | None = None) -> None:
+    """Bound per-user in-memory anti-spam state without persisting message content."""
+    current = time.time() if now is None else float(now)
+    for key, history in list(USER_MESSAGE_ACTIVITY.items()):
+        if not history or current - history[-1][0] > 300:
+            USER_MESSAGE_ACTIVITY.pop(key, None)
+    if len(USER_MESSAGE_ACTIVITY) >= MAX_ANTISPAM_TRACKED_USERS:
+        excess = len(USER_MESSAGE_ACTIVITY) - MAX_ANTISPAM_TRACKED_USERS + 1
+        oldest = sorted(
+            USER_MESSAGE_ACTIVITY,
+            key=lambda key: USER_MESSAGE_ACTIVITY[key][-1][0]
+            if USER_MESSAGE_ACTIVITY[key] else 0,
+        )[:excess]
+        for key in oldest:
+            USER_MESSAGE_ACTIVITY.pop(key, None)
+
+    for key, expiry in list(USER_SPAM_WARNED_UNTIL.items()):
+        if expiry <= current:
+            USER_SPAM_WARNED_UNTIL.pop(key, None)
+    if len(USER_SPAM_WARNED_UNTIL) > MAX_ANTISPAM_TRACKED_USERS:
+        excess = len(USER_SPAM_WARNED_UNTIL) - MAX_ANTISPAM_TRACKED_USERS
+        for key, _ in sorted(USER_SPAM_WARNED_UNTIL.items(), key=lambda item: item[1])[:excess]:
+            USER_SPAM_WARNED_UNTIL.pop(key, None)
+
+
 def check_antispam_message(event: dict, source: str):
     if source != "developer":
         return False, None
@@ -687,6 +715,8 @@ def check_antispam_message(event: dict, source: str):
 
     now = time.time()
     key = (thread_id, uid)
+    if key not in USER_MESSAGE_ACTIVITY and len(USER_MESSAGE_ACTIVITY) >= MAX_ANTISPAM_TRACKED_USERS:
+        prune_antispam_tracking(now)
     activity = USER_MESSAGE_ACTIVITY[key]
     cutoff = now - config["window_seconds"]
     while activity and activity[0][0] < cutoff:
@@ -941,6 +971,9 @@ metrics["api_latency_total_ms"] = 0.0
 metrics["api_latency_last_ms"] = 0.0
 metrics["api_latency_max_ms"] = 0.0
 background_tasks: set[asyncio.Task] = set()
+webhook_tasks: set[asyncio.Task] = set()
+MAX_WEBHOOK_BODY_BYTES = 1_048_576
+MAX_WEBHOOK_BACKGROUND_TASKS = 100
 CLEANUP_TASK: asyncio.Task | None = None
 
 trivia = {}
@@ -3364,14 +3397,15 @@ async def disable_room_reading(thread_id: str):
     if not state:
         return True, "La lectura ya está desactivada; Katherine no está conectada a esta sala."
     state["reading_enabled"] = False
-    queue = state.get("speech_queue")
-    if queue:
-        while not queue.empty():
-            try:
-                queue.get_nowait()
-                queue.task_done()
-            except asyncio.QueueEmpty:
-                break
+    for queue_name in ("speech_queue", "speech_priority_queue"):
+        queue = state.get(queue_name)
+        if queue:
+            while not queue.empty():
+                try:
+                    queue.get_nowait()
+                    queue.task_done()
+                except asyncio.QueueEmpty:
+                    break
 
     task = state.get("speech_task")
     state["speech_task"] = None
@@ -3488,18 +3522,29 @@ async def download_dj_audio(url: str, file_extension: str | None = None) -> Path
             "User-Agent": "Katherine-AnarchyBot/3.1",
             "Accept": "audio/*,application/octet-stream;q=0.9,*/*;q=0.5"
         }
-        async with httpx.AsyncClient(
-            timeout=timeout,
-            follow_redirects=True,
-            headers=headers
-        ) as client:
-            async with client.stream("GET", str(url)) as response:
-                if not response.is_success:
-                    raise RuntimeError(
-                        f"La fuente musical respondió HTTP {response.status_code}."
-                    )
-                if not dj_audio_url_allowed(str(response.url)):
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, headers=headers) as client:
+            current_url = str(url)
+            response = None
+            for redirect_count in range(4):
+                if not dj_audio_url_allowed(current_url):
+                    raise ValueError("La descarga intentó acceder a un dominio no autorizado.")
+                response = await client.send(client.build_request("GET", current_url), stream=True)
+                if response.status_code not in (301, 302, 303, 307, 308):
+                    break
+                location = response.headers.get("location")
+                await response.aclose()
+                if not location or redirect_count >= 3:
+                    raise RuntimeError("La fuente musical excedió el límite de redirecciones.")
+                current_url = urljoin(current_url, location)
+                if not dj_audio_url_allowed(current_url):
                     raise ValueError("La descarga redirigió a un dominio no autorizado.")
+            if response is None:
+                raise RuntimeError("No se pudo iniciar la descarga musical.")
+            try:
+                if not response.is_success:
+                    raise RuntimeError(f"La fuente musical respondió HTTP {response.status_code}.")
+                if not dj_audio_url_allowed(str(response.url)):
+                    raise ValueError("La descarga terminó en un dominio no autorizado.")
                 content_type = response.headers.get("content-type", "").lower()
                 if "text/html" in content_type or "application/json" in content_type:
                     raise RuntimeError(
@@ -3522,6 +3567,8 @@ async def download_dj_audio(url: str, file_extension: str | None = None) -> Path
                         if total_bytes > max_bytes:
                             raise RuntimeError("La pista supera el límite de 150 MB.")
                         output.write(chunk)
+            finally:
+                await response.aclose()
 
         if total_bytes < 1024:
             raise RuntimeError("El archivo descargado está vacío o incompleto.")
@@ -12936,11 +12983,13 @@ async def execute_ai_tool(
     routed_event["message"] = routed_message
 
     captured: list[str] = []
+    execution_error = False
     capture_token = AI_TOOL_OUTPUT_CAPTURE.set(captured)
     silent_token = AI_TOOL_SILENT.set(bool(silent))
     try:
         await handle_command(routed_event, source)
     except Exception as exc:
+        execution_error = True
         logging.warning("[AI] Falló herramienta %s: %s", invocation.split()[0], type(exc).__name__)
         captured.append(f"La herramienta terminó con un error ({type(exc).__name__}).")
     finally:
@@ -12952,7 +13001,7 @@ async def execute_ai_tool(
     return {
         "command": invocation,
         "output": output,
-        "success": bool(output),
+        "success": bool(output) and not execution_error,
         "interactive": not silent,
     }
 
@@ -15331,8 +15380,12 @@ Uso: !enciclopedia <nombre>""",
 
     if command == "!duelo":
         target_uid, target_name = target_from_message(msg, args, scope_key)
-        if not target_name:
-            target_name = "un rival misterioso"
+        if not target_uid or not target_name:
+            await send_message(thread, "Uso: !duelo @usuario. Debes mencionar a un rival identificable.", source, reply)
+            return
+        if target_uid == uid:
+            await send_message(thread, "No puedes retarte a ti mismo.", source, reply)
+            return
 
         buttons = register_buttons(
             source,
@@ -16800,6 +16853,9 @@ async def handle_interaction(event: dict, source: str):
         challenger_uid = str(payload.get("challenger_uid") or "")
         opponent_uid = scoped_user_uid
         target_name = str(payload.get("target_name") or user_name)
+        if choice not in {"accept", "decline"}:
+            await send_message(thread_id, "La respuesta del duelo no es válida.", source)
+            return
         if choice == "decline":
             await send_message(
                 thread_id,
@@ -16892,15 +16948,18 @@ async def dispatch(event: dict, source: str):
                             "!nexus",
                         )
             else:
-                # Conversación ordinaria: se mantienen estadísticas de actividad,
-                # pero no se activa el asistente ni las respuestas automáticas.
+                # No interceptar comandos naturales; solo entonces evaluar reglas automáticas.
                 author = message_data.get("author") or {}
                 raw_uid = str(author.get("uid") or author.get("nickname") or "unknown")
                 nickname = author.get("nickname") or "Viajero"
                 scope_key = f"{source}:{event.get('threadId')}"
-                record_user(scoped_uid(scope_key, raw_uid), nickname, count_message=True)
-                record_chat_activity(str(event.get("threadId") or ""), scoped_uid(scope_key, raw_uid), nickname)
+                scoped_user = scoped_uid(scope_key, raw_uid)
+                record_user(scoped_user, nickname, count_message=True)
+                record_chat_activity(str(event.get("threadId") or ""), scoped_user, nickname)
                 metrics["unaddressed_messages_ignored"] += 1
+                await maybe_send_auto_reply(
+                    str(event.get("threadId") or ""), raw_uid, nickname, incoming_text
+                )
         else:
             # Los comandos clásicos con prefijo siguen funcionando.
             await handle_command(event, source)
@@ -16976,9 +17035,27 @@ def verify_webhook(raw: bytes, headers, secret: str):
         return None
 
 
+async def read_limited_webhook_body(request: Request, limit: int = MAX_WEBHOOK_BODY_BYTES) -> bytes:
+    """Read a webhook body incrementally and stop before unbounded allocation."""
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > limit:
+                raise HTTPException(status_code=413, detail="Webhook demasiado grande.")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Content-Length inválido.")
+    chunks, total = [], 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(status_code=413, detail="Webhook demasiado grande.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 async def webhook(request: Request, source: str | None):
     global LAST_EVENT_AT
-    raw = await request.body()
+    raw = await read_limited_webhook_body(request)
     event = None
     verified_source = source
 
@@ -17037,6 +17114,10 @@ async def webhook(request: Request, source: str | None):
         )
         verified_source, event = matched or valid_sources[0]
 
+    active_webhooks = sum(1 for task in webhook_tasks if not task.done())
+    if active_webhooks >= MAX_WEBHOOK_BACKGROUND_TASKS:
+        raise HTTPException(status_code=503, detail="Katherine está procesando demasiados eventos; reintenta más tarde.")
+
     event_id = str(event.get("eventId") or "")
 
     if event_id and event_id in seen_event_set:
@@ -17067,7 +17148,9 @@ async def webhook(request: Request, source: str | None):
 
     # Responder rápido a Anarchy; el procesamiento continúa en segundo plano.
     task = asyncio.create_task(safe_dispatch(event, verified_source))
+    webhook_tasks.add(task)
     background_tasks.add(task)
+    task.add_done_callback(webhook_tasks.discard)
     task.add_done_callback(background_tasks.discard)
 
     return JSONResponse({"ok": True})

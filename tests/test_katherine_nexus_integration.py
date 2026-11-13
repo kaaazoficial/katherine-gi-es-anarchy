@@ -130,9 +130,14 @@ def test_guide_sources_run_in_parallel_and_return_partial_data(monkeypatch):
     assert any("RESPALDO" in item or "FICHA" in item for item in progress)
 
 def test_unaddressed_chat_is_tracked_but_does_not_activate_katherine(monkeypatch):
-    calls = {"commands": [], "users": [], "activity": []}
+    calls = {"commands": [], "users": [], "activity": [], "auto_replies": []}
 
     monkeypatch.setattr(katherine, "check_antispam_message", lambda event, source: (False, None))
+
+    async def capture_auto_reply(*args):
+        calls["auto_replies"].append(args)
+
+    monkeypatch.setattr(katherine, "maybe_send_auto_reply", capture_auto_reply)
 
     async def no_speech(event, source):
         return None
@@ -158,6 +163,7 @@ def test_unaddressed_chat_is_tracked_but_does_not_activate_katherine(monkeypatch
     assert calls["commands"] == []
     assert calls["users"] == [("developer:room-natural:user-1", "Viajero", True)]
     assert calls["activity"] == [("room-natural", "developer:room-natural:user-1", "Viajero")]
+    assert calls["auto_replies"] == [("room-natural", "user-1", "Viajero", "hola a todos")]
 
 
 def test_addressed_natural_request_routes_to_existing_command(monkeypatch):
