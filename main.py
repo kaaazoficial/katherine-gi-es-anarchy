@@ -13083,10 +13083,13 @@ async def handle_command(event: dict, source: str):
             allowed_ai_commands = set(AI_PUBLIC_COMMANDS)
             if is_admin_uid(admin_uid):
                 allowed_ai_commands.update(AI_ADMIN_COMMANDS)
+            metrics["ai_requests"] += 1
             result = await AI_CORE.assist(
                 prompt, session_key, external_request,
                 allowed_commands=allowed_ai_commands,
             )
+            if result.get("fallback"):
+                metrics["ai_errors"] += 1
             if result.get("kind") == "plan":
                 if await execute_ai_plan(
                     event, source, session_key, result.get("steps") or [],
