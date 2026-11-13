@@ -997,9 +997,9 @@ def parse_research_mode(query: str) -> tuple[str, str]:
     raw = re.sub(r"\s+", " ", str(query or "")).strip()
     match = re.match(
         r"^(comparar|comparación|comparacion|verificar|verificación|verificacion|"
+        r"^(comparar|comparación|comparacion|verificar|verificación|verificacion|"
         r"cronología|cronologia|línea de tiempo|linea de tiempo|informe|completo)"
-        r"\s*(?::|\\||sobre|de)?\\s*(.*)$",
-        raw,
+        r"\s*(?::|\||sobre|de)?\s*(.*)$",
         flags=re.IGNORECASE,
     )
     if not match:
