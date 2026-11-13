@@ -4,7 +4,7 @@ import time
 import pytest
 from katherine_ai import (
     ACTION_SCHEMA, KatherineAI, build_ai_session_key, is_bot_author,
-    validate_ai_tool_call,
+    sanitize_ai_trace_text, validate_ai_tool_call,
 )
 
 class FakeResponse:
@@ -278,6 +278,34 @@ async def test_groq_responses_omits_unsupported_store_and_uses_json_object(monke
     assert "store" not in captured["json"]
     assert captured["json"]["text"]["format"]["type"] == "json_schema"
     assert captured["json"]["text"]["format"]["strict"] is True
+
+
+@pytest.mark.asyncio
+async def test_groq_retries_json_schema_rejection_once_with_json_object(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-groq-key")
+    monkeypatch.setenv("KATHERINE_AI_API_URL", "https://api.groq.com/openai/v1/responses")
+    monkeypatch.setenv("KATHERINE_AI_MODEL", "openai/gpt-oss-20b")
+    ai = KatherineAI()
+    captured = []
+
+    async def fake_request(method, url, **kwargs):
+        captured.append(kwargs["json"])
+        if len(captured) == 1:
+            return FakeResponse({
+                "error": {
+                    "code": "invalid_request_error",
+                    "message": "response_format json_schema is not supported",
+                }
+            }, status_code=400)
+        return FakeResponse(response_payload({
+            "kind": "answer", "answer": "OK", "command": "", "args": "", "steps": []
+        }))
+
+    assert await ai.test_connection(fake_request) == "OK"
+    assert len(captured) == 2
+    assert captured[0]["text"]["format"]["type"] == "json_schema"
+    assert captured[1]["text"]["format"] == {"type": "json_object"}
+    assert "store" not in captured[1]
 
 
 @pytest.mark.asyncio
@@ -813,12 +841,25 @@ async def test_ai_plan_rejects_entire_sequence_if_one_step_is_forbidden(monkeypa
     assert "No ejecutaré una secuencia parcial" in result["answer"]
 
 
-def test_structured_ai_schema_requires_bounded_steps_array():
+def test_structured_ai_schema_uses_provider_compatible_steps_and_app_limits():
     assert "steps" in ACTION_SCHEMA["required"]
-    assert ACTION_SCHEMA["properties"]["steps"]["maxItems"] == 3
+    assert "maxItems" not in ACTION_SCHEMA["properties"]["steps"]
     assert ACTION_SCHEMA["properties"]["steps"]["items"]["required"] == [
         "command", "args"
     ]
+
+
+def test_ai_trace_redacts_secrets_and_personal_identifiers():
+    value = (
+        "gsk_1234567890abcdefghijklmnop user@example.com "
+        "@SomeUser uid 12345678901 Bearer token-value"
+    )
+    cleaned = sanitize_ai_trace_text(value)
+    assert "gsk_" not in cleaned
+    assert "user@example.com" not in cleaned
+    assert "@SomeUser" not in cleaned
+    assert "12345678901" not in cleaned
+    assert "token-value" not in cleaned
 
 
 @pytest.mark.asyncio

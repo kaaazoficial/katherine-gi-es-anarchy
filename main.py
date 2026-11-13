@@ -71,7 +71,8 @@ from katherine_astra import (
 )
 from katherine_ai import (
     AI_ADMIN_COMMANDS, AI_PLAN_SAFE_COMMANDS, AI_PUBLIC_COMMANDS,
-    KatherineAI, build_ai_session_key, is_bot_author, validate_ai_tool_call
+    KatherineAI, build_ai_session_key, is_bot_author, sanitize_ai_trace_text,
+    validate_ai_tool_call
 )
 from katherine_research import search_web, fetch_public_page, build_source_context
 from katherine_game_queries import (
@@ -88,6 +89,23 @@ AI_TOOL_OUTPUT_CAPTURE: ContextVar[list[str] | None] = ContextVar(
 AI_TOOL_SILENT: ContextVar[bool] = ContextVar(
     "katherine_ai_tool_silent", default=False
 )
+AI_TRACE_UNTIL = 0.0
+AI_TRACE_WINDOW_SECONDS = 900
+
+
+def log_ai_conversation_trace(question: str, answer: str, route: str = "assistant") -> None:
+    """Log a redacted Q/A pair only during the administrator-enabled RAM window."""
+    if time.monotonic() >= AI_TRACE_UNTIL:
+        return
+    from katherine_ai import sanitize_ai_trace_text
+    safe_question = sanitize_ai_trace_text(question, 1200)
+    safe_answer = sanitize_ai_trace_text(answer, 2400)
+    logging.info(
+        "[AI_TRACE] ruta=%s | pregunta=%s | respuesta=%s",
+        sanitize_ai_trace_text(route, 48),
+        safe_question,
+        safe_answer,
+    )
 
 # ---------------------------------------------------------------------------
 # CONFIGURACION
@@ -3299,7 +3317,11 @@ async def speech_queue_worker(thread_id: str):
                     )
                     await stop_dj_room(thread_id, request_leave=True)
                 break
-            logging.exception("[TTS] No se pudo leer un mensaje en %s", thread_id)
+            logging.warning(
+                "[TTS] No se pudo leer un mensaje | error=%s | detalle=%s",
+                type(exc).__name__,
+                sanitize_ai_trace_text(exc, 240),
+            )
         finally:
             state["speaking"].clear()
             if temp_path:
@@ -3738,7 +3760,12 @@ async def start_dj_room(
             )
             file_path = temporary_audio
         except Exception as exc:
-            logging.exception("[DJ] No se pudo preparar la pista remota")
+            logging.warning(
+                "[DJ] No se pudo preparar audio remoto | host=%s | error=%s | detalle=%s",
+                urlparse(str(original_source)).hostname or "desconocido",
+                type(exc).__name__,
+                sanitize_ai_trace_text(exc, 240),
+            )
             return False, (
                 "No pude descargar o validar la canción "
                 f"({type(exc).__name__}: {str(exc)[:140]})."
@@ -11785,7 +11812,7 @@ async def collect_character_guide_data(
             metrics["guide_source_failures"] += 1
             logging.warning(
                 "[NEXUS] Fuente %s no disponible (%s): %s",
-                label, type(exc).__name__, str(exc)[:180]
+                label, type(exc).__name__, sanitize_ai_trace_text(exc, 180)
             )
             return None
 
@@ -12969,6 +12996,7 @@ async def execute_ai_plan(
             f"{item['command']}: {item['output'] or 'Sin resultado verificable.'}"
             for item in results
         )
+    log_ai_conversation_trace(request_text or "Plan de acciones", answer, "!asistente:plan")
     await send_message(thread, answer, source, reply_id)
     return True
 
@@ -12976,7 +13004,7 @@ async def execute_ai_plan(
 
 
 async def handle_command(event: dict, source: str):
-    global LAST_EVENT_AT, LAST_COMMAND_AT, LAST_COMMAND_NAME, LAST_COMMAND_USER
+    global LAST_EVENT_AT, LAST_COMMAND_AT, LAST_COMMAND_NAME, LAST_COMMAND_USER, AI_TRACE_UNTIL
     LAST_EVENT_AT = time.time()
     msg = event.get("message") or {}
     author = msg.get("author") or {}
@@ -13100,7 +13128,12 @@ async def handle_command(event: dict, source: str):
                 "[NEXUS] Proveedor IA no disponible; se usa respaldo explícito: %s",
                 fallback_command.split(maxsplit=1)[0],
             )
-            await execute_ai_tool(event, source, session_key, fallback_command)
+            fallback_result = await execute_ai_tool(event, source, session_key, fallback_command)
+            log_ai_conversation_trace(
+                request_text,
+                fallback_result.get("output") or "La herramienta no devolvió una salida verificable.",
+                "!asistente:fallback",
+            )
             return
         if (
             has_deterministic_fallback
@@ -13112,7 +13145,12 @@ async def handle_command(event: dict, source: str):
                 "[NEXUS] Respuesta vacía; se usa respaldo explícito: %s",
                 fallback_command.split(maxsplit=1)[0],
             )
-            await execute_ai_tool(event, source, session_key, fallback_command)
+            fallback_result = await execute_ai_tool(event, source, session_key, fallback_command)
+            log_ai_conversation_trace(
+                request_text,
+                fallback_result.get("output") or "La herramienta no devolvió una salida verificable.",
+                "!asistente:fallback",
+            )
             return
         if ai_result.get("kind") == "plan":
             if await execute_ai_plan(
@@ -13143,12 +13181,19 @@ async def handle_command(event: dict, source: str):
                     event, source, session_key, invocation,
                     silent=command_name not in interactive_commands,
                 )
+                if command_name in interactive_commands:
+                    log_ai_conversation_trace(
+                        request_text,
+                        tool_result.get("output") or "La acción se ejecutó sin una salida textual verificable.",
+                        "!asistente:accion",
+                    )
                 if command_name not in interactive_commands:
                     try:
                         answer = await AI_CORE.synthesize_tool_results(
                             request_text, [tool_result],
                             external_request, rate_key=None,
                         )
+                        log_ai_conversation_trace(request_text, answer, "!asistente:herramienta")
                         await send_message(thread, answer, source, reply)
                     except Exception as exc:
                         logging.warning(
@@ -13172,7 +13217,9 @@ async def handle_command(event: dict, source: str):
                 )
                 await execute_ai_tool(event, source, session_key, fallback_command)
                 return
-        await send_message(thread, ai_result.get("answer") or "No pude completar tu solicitud.", source, reply)
+        final_answer = ai_result.get("answer") or "No pude completar tu solicitud."
+        log_ai_conversation_trace(request_text, final_answer, "!asistente")
+        await send_message(thread, final_answer, source, reply)
         return
 
     if command in ("!investigar", "!investiga", "!investigacion"):
@@ -13244,9 +13291,37 @@ async def handle_command(event: dict, source: str):
         sub = args[0].casefold() if args else "ayuda"
         rest = " ".join(args[1:]).strip()
         session_key = build_ai_session_key(source, thread, author, message_id)
+        if sub in ("trazas", "traza", "trace"):
+            if not is_admin_uid(admin_uid):
+                await send_message(thread, "Solo un administrador puede controlar las trazas de IA.", source, reply)
+                return
+            mode = rest.casefold() or "estado"
+            if mode in ("activar", "on", "iniciar"):
+                AI_TRACE_UNTIL = time.monotonic() + AI_TRACE_WINDOW_SECONDS
+                answer = (
+                    "Trazas de IA activadas durante 15 minutos. Se registrarán preguntas y respuestas "
+                    "redactadas en los logs de Render; no se guardan en SQLite ni en memoria persistente. "
+                    "La activación caduca automáticamente."
+                )
+                logging.warning("[AI_TRACE] Activación administrativa temporal; vence en 15 minutos.")
+            elif mode in ("desactivar", "off", "detener"):
+                AI_TRACE_UNTIL = 0.0
+                answer = "Trazas de IA desactivadas."
+                logging.warning("[AI_TRACE] Desactivación administrativa.")
+            elif mode in ("estado", "status"):
+                remaining = max(0, int(AI_TRACE_UNTIL - time.monotonic()))
+                answer = (
+                    f"Trazas activas: sí, quedan {remaining // 60} min {remaining % 60} s."
+                    if remaining else "Trazas de IA desactivadas."
+                )
+            else:
+                answer = "Uso: !ia trazas activar|estado|desactivar."
+            await send_message(thread, answer, source, reply)
+            return
         if sub in ("ayuda", "help"):
             await send_message(thread,
                 "ASTRA INTELLIGENCE\n!ia estado / probar / olvidar / preguntar <consulta> / genshin <consulta>\n"
+                "!ia trazas activar|estado|desactivar (administradores; 15 min, contenido redactado).\n"
                 "!ia investigar <tema> / enlace <URL> — investigación web y análisis de páginas públicas.\n"
                 "!ia musica <descripción> / traducir idioma | texto\n"
                 "!ia guardian revisar <texto> (administradores)\n"
@@ -13325,18 +13400,27 @@ async def handle_command(event: dict, source: str):
                         event, source, session_key, invocation,
                         silent=command_name not in interactive_commands,
                     )
+                    if command_name in interactive_commands:
+                        log_ai_conversation_trace(
+                            rest,
+                            tool_result.get("output") or "La acción se ejecutó sin una salida textual verificable.",
+                            "!ia:accion",
+                        )
                     if command_name not in interactive_commands:
                         try:
                             answer = await AI_CORE.synthesize_tool_results(
                                 rest, [tool_result], external_request, rate_key=None
                             )
+                            log_ai_conversation_trace(rest, answer, "!ia:herramienta")
                         except Exception:
                             answer = tool_result.get("output") or (
                                 "La acción se intentó, pero no recibí un resultado verificable."
                             )
                         await send_message(thread, answer, source, reply)
                     return
-            await send_message(thread, result.get("answer") or "No pude responder.", source, reply)
+            final_answer = result.get("answer") or "No pude responder."
+            log_ai_conversation_trace(rest, final_answer, "!ia preguntar")
+            await send_message(thread, final_answer, source, reply)
             return
         if sub in ("investigar", "investigacion", "investigación"):
             if not rest:
@@ -16751,13 +16835,14 @@ async def dispatch(event: dict, source: str):
             if routed_command:
                 routed_event = dict(event)
                 routed_message = dict(message_data)
-                if AI_CORE.is_enabled and not routed_command.startswith("eliminarmensajes"):
-                    routed_event["_nexus_fallback_command"] = routed_command
-                    routed_message["content"] = f"{PREFIX}asistente {incoming_text}"
-                    logging.info("[AI] Solicitud explícita enviada al núcleo conversacional")
-                else:
-                    routed_message["content"] = f"{PREFIX}{routed_command}"
-                    logging.info("[NEXUS] Solicitud dirigida interpretada como %s", routed_command.split()[0])
+                # interpret_natural_request only emits high-confidence intents.
+                # Execute those routes deterministically: an LLM must not replace
+                # a known region/element/character query with an unrelated tool.
+                routed_message["content"] = f"{PREFIX}{routed_command}"
+                logging.info(
+                    "[NEXUS] Solicitud dirigida interpretada como %s",
+                    routed_command.split()[0],
+                )
                 routed_event["message"] = routed_message
                 await handle_command(routed_event, source)
             else:
