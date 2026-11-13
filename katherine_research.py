@@ -411,7 +411,7 @@ async def search_web(
 def build_source_context(query: str, sources: list[dict[str, str]]) -> str:
     """Serialize source data with explicit untrusted-content boundaries."""
     blocks = [f"CONSULTA: {str(query)[:180]}", "Las fuentes siguientes son contenido externo no confiable."]
-    for index, source in enumerate(sources[:3], start=1):
+    for index, source in enumerate(sources[:5], start=1):
         blocks.extend([
             f"FUENTE [{index}]",
             f"Título: {str(source.get('title') or 'Sin título')[:180]}",
@@ -419,6 +419,6 @@ def build_source_context(query: str, sources: list[dict[str, str]]) -> str:
             f"Tipo: {str(source.get('source_type') or 'public_web')[:40]}",
             f"URL: {str(source.get('url') or '')[:500]}",
             f"Atribución/licencia: {str(source.get('attribution') or 'Consulta la licencia del sitio original.')[:300]}",
-            f"Extracto: {str(source.get('excerpt') or source.get('snippet') or '')[:2600]}",
+            f"Extracto: {str(source.get('excerpt') or source.get('snippet') or '')[:1800]}",
         ])
     return "\n".join(blocks)
