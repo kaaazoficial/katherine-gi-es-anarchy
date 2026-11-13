@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from difflib import SequenceMatcher
 from typing import Iterable
 
@@ -14,7 +15,8 @@ except ImportError:  # Keep local test environments usable without production ex
 
 def normalize_command_name(value: str) -> str:
     """Normalize one command token without changing its arguments."""
-    token = str(value or "").strip().casefold().lstrip("!")
+    token = unicodedata.normalize("NFKD", str(value or "").casefold().lstrip("!"))
+    token = "".join(character for character in token if not unicodedata.combining(character))
     return re.sub(r"[^a-z0-9_]", "", token)
 
 
@@ -22,7 +24,7 @@ def suggest_command(
     value: str,
     allowed_commands: Iterable[str],
     *,
-    score_cutoff: int = 88,
+    score_cutoff: int = 86,
 ) -> tuple[str, int] | None:
     """Return a high-confidence suggestion; callers must ask before executing."""
     query = normalize_command_name(value)
