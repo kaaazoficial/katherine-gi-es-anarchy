@@ -52,7 +52,7 @@ def test_metrics_command_is_admin_only_and_read_only():
     from katherine_ai import AI_ADMIN_COMMANDS, AI_PLAN_SAFE_COMMANDS
     assert validate_ai_tool_call("metricas", "") is None
     assert validate_ai_tool_call("metricas", "", AI_ADMIN_COMMANDS) == "metricas"
-    assert "metricas" in AI_PLAN_SAFE_COMMANDS
+    assert "metricas" not in AI_PLAN_SAFE_COMMANDS
 
 
 def test_conversational_questions_are_not_misclassified_as_actions():
