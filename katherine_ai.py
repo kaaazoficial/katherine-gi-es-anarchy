@@ -18,7 +18,7 @@ RequestFunc = Callable[..., Awaitable[Any]]
 
 AI_PUBLIC_COMMANDS = frozenset({
     # Ayuda, consulta e investigación
-    "ayuda", "comandos", "menu", "estado", "fuentes", "saludfuentes",
+    "ayuda", "comandos", "menu",
     "fecha", "zona", "perfil", "puntos", "ranking", "actividad", "economia",
     "investigar", "enlace", "traducir", "multimedia", "media", "imagen",
     "video", "audio",
@@ -42,6 +42,7 @@ AI_PUBLIC_COMMANDS = frozenset({
 })
 
 AI_ADMIN_COMMANDS = frozenset({
+    "estado", "fuentes", "saludfuentes",
     "centro", "nexus", "autotest", "admin", "paneladmin", "guardian",
     "respuestas", "respuesta", "advertir", "advertencias",
     "quitaradvertencia", "antispam", "perfilbot", "avatarbot",
