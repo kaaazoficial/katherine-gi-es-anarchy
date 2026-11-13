@@ -6,6 +6,7 @@ El catálogo de usuario se genera con `!ayuda` y `!comandos` en `main.py`. Debe 
 
 - `!investigar <tema>`: busca páginas públicas en varios resultados independientes, recupera extractos y solicita una síntesis basada en las fuentes.
 - `!enlace <URL>`: analiza una página HTML pública HTTPS; no sigue redirecciones ni acepta hosts locales/privados.
+- La investigación combina resultados web generales con Wikipedia en español/inglés y wikis de Fandom descubiertas por búsqueda, consultando sus APIs MediaWiki cuando están disponibles. Puede incluir hasta cinco fuentes de dominios distintos; Fandom se trata como contenido comunitario y no como fuente oficial.
 - `!ia investigar <tema>` y `!ia enlace <URL>`: accesos desde el menú IA.
 - Katherine también reconoce peticiones explícitas como «Katherine, investiga…» y «Katherine, analiza este enlace…». La mención aislada sigue sin activar el bot.
 - La síntesis cita las fuentes por número y dominio; páginas bloqueadas, no HTML o sin texto suficiente pueden omitirse. La búsqueda no garantiza exhaustividad.
