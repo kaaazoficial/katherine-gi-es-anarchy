@@ -83,8 +83,8 @@ def test_explicit_user_actions_are_available_but_plans_stay_read_only():
     assert classify_request_intent("Katherine, investiga Python y consulta la guía de Cyno") == "genshin"
     public_prompt = build_ai_instructions(AI_PUBLIC_COMMANDS, "action")
     admin_prompt = build_ai_instructions(AI_PUBLIC_COMMANDS | AI_ADMIN_COMMANDS, "action")
-    assert "- antispam:" not in public_prompt
-    assert "- antispam:" in admin_prompt
+    assert "antispam:" not in public_prompt
+    assert "antispam:" in admin_prompt
 
 
 @pytest.mark.asyncio
@@ -92,7 +92,7 @@ async def test_assist_uses_role_scoped_command_allowlist(monkeypatch):
     monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
     ai = KatherineAI()
     async def fake_request(method, url, **kwargs):
-        assert "- antispam:" not in kwargs["json"]["instructions"]
+        assert "antispam:" not in kwargs["json"]["instructions"]
         return FakeResponse(response_payload({
             "kind": "command", "answer": "", "command": "antispam",
             "args": "off", "steps": [],
@@ -232,7 +232,7 @@ async def test_provider_connection_probe(monkeypatch):
         }))
     assert await ai.test_connection(fake_request) == "OK"
     assert captured["json"]["store"] is False
-    assert captured["json"]["max_output_tokens"] == 512
+    assert "max_output_tokens" not in captured["json"]
 
 @pytest.mark.asyncio
 async def test_model_cannot_request_unapproved_tool(monkeypatch):
