@@ -12872,12 +12872,15 @@ async def handle_command(event: dict, source: str):
         allowed_ai_commands = set(AI_PUBLIC_COMMANDS)
         if is_admin_uid(admin_uid):
             allowed_ai_commands.update(AI_ADMIN_COMMANDS)
+        metrics["ai_requests"] += 1
         ai_result = await AI_CORE.assist(
             request_text, session_key, external_request,
             allowed_commands=allowed_ai_commands,
         )
         fallback_command = str(event.get("_nexus_fallback_command") or "").strip()
         provider_failed = bool(ai_result.get("fallback"))
+        if provider_failed:
+            metrics["ai_errors"] += 1
         has_deterministic_fallback = should_execute_deterministic_fallback(
             request_text, fallback_command, provider_failed=provider_failed
         )
@@ -15178,7 +15181,8 @@ Uso: !enciclopedia <nombre>""",
             f"Fuentes externas: {external_requests} solicitudes · {external_failures} fallos · {open_circuits} circuitos abiertos",
             f"DJ: {metrics['dj_tracks_started']} pistas · {metrics['dj_playback_errors']} errores de reproducción",
             f"TTS: {metrics['tts_priority_enqueued'] + metrics['tts_regular_enqueued']} mensajes en cola",
-            f"IA: {'activa' if AI_CORE.is_enabled else 'sin credencial'} · {AI_CORE.provider_name if AI_CORE.is_enabled else 'no configurada'} · {AI_CORE.model if AI_CORE.is_enabled else '—'}",
+            f"IA: {metrics['ai_requests']} solicitudes · {metrics['ai_errors']} fallos/respaldo",
+            f"Proveedor IA: {'activo' if AI_CORE.is_enabled else 'sin credencial'} · {AI_CORE.provider_name if AI_CORE.is_enabled else 'no configurada'} · {AI_CORE.model if AI_CORE.is_enabled else '—'}",
             "Prometheus: endpoint /metrics (contadores agregados, sin datos de usuarios ni conversaciones).",
             "Los contadores se reinician cuando Render reinicia el proceso.",
         ])
