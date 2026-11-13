@@ -1,0 +1,10 @@
+# Local development and CI quality tools.
+# Includes isolated test dependencies but deliberately excludes production media
+# dependencies, so lint/security jobs remain fast and platform-independent.
+-r requirements-test.txt
+
+ruff>=0.17.4,<0.18.0
+bandit>=1.9.4,<2.0.0
+mypy>=2.4.1,<3.0.0
+pip-audit>=2.10.1,<3.0.0
+pip-tools>=7.6.2,<8.0.0
