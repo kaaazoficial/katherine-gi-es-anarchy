@@ -74,7 +74,7 @@ from katherine_astra import (
 )
 from katherine_ai import (
     AI_ADMIN_COMMANDS, AI_PLAN_SAFE_COMMANDS, AI_PUBLIC_COMMANDS,
-    KatherineAI, build_ai_session_key, is_bot_author, sanitize_ai_trace_text,
+    KatherineAI, build_ai_session_key, build_ai_rate_key, is_bot_author, sanitize_ai_trace_text,
     validate_ai_tool_call
 )
 from katherine_research import (
@@ -8075,9 +8075,11 @@ async def handle_command(event: dict, source: str):
         if is_admin_uid(admin_uid):
             allowed_ai_commands.update(AI_ADMIN_COMMANDS)
         metrics["ai_requests"] += 1
+        ai_rate_key = build_ai_rate_key(source, thread, author)
         ai_result = await AI_CORE.assist(
             request_text, session_key, external_request,
             allowed_commands=allowed_ai_commands,
+            rate_key=ai_rate_key,
         )
         fallback_command = str(event.get("_nexus_fallback_command") or "").strip()
         provider_failed = bool(ai_result.get("fallback"))
@@ -8191,7 +8193,7 @@ async def handle_command(event: dict, source: str):
                 try:
                     summary = await AI_CORE.summarize_research(
                         research_query, context, external_request,
-                        rate_key=build_ai_session_key(source, thread, author, message_id),
+                        rate_key=build_ai_rate_key(source, thread, author),
                         mode=research_mode,
                     )
                 except Exception:
@@ -8263,6 +8265,7 @@ async def handle_command(event: dict, source: str):
         sub = args[0].casefold() if args else "ayuda"
         rest = " ".join(args[1:]).strip()
         session_key = build_ai_session_key(source, thread, author, message_id)
+        rate_key = build_ai_rate_key(source, thread, author)
         if sub in ("trazas", "traza", "trace"):
             if not is_admin_uid(admin_uid):
                 await send_message(thread, "Solo un administrador puede controlar las trazas de IA.", source, reply)
@@ -8298,7 +8301,7 @@ async def handle_command(event: dict, source: str):
                 "INVESTIGACIÓN: !investigar <tema> / !ia investigar <tema> / !enlace <URL> / !ia enlace <URL>.\n"
                 "TAREAS: !ia musica <descripción> / !ia traducir <idioma> | <texto>.\n"
                 "SESIÓN: !ia estado / !ia olvidar.\n"
-                "ADMIN: !ia probar [gemini|groq] / !ia trazas / !ia guardian / !ia analista / !ia diagnostico.\n"
+                "ADMIN: !ia probar [gemini|groq|openrouter] / !ia trazas / !ia guardian / !ia analista / !ia diagnostico.\n"
                 "Los comandos clásicos están en !ayuda. Los comandos ADMIN requieren UID en ADMIN_UIDS.", source, reply)
             return
         if sub in ("estado", "status"):
@@ -8315,17 +8318,20 @@ async def handle_command(event: dict, source: str):
             elif requested in {"groq", "secundario", "respaldo"}:
                 provider_target = "groq"
                 provider = "Groq"
+            elif requested in {"openrouter", "terciario"}:
+                provider_target = "openrouter"
+                provider = "OpenRouter"
             else:
                 await send_message(
                     thread,
-                    "Uso: !ia probar [gemini|groq]. La prueba consulta el proveedor indicado sin recurrir al respaldo.",
+                    "Uso: !ia probar [gemini|groq|openrouter]. La prueba consulta directamente el proveedor indicado, sin respaldo.",
                     source,
                     reply,
                 )
                 return
             try:
                 await AI_CORE.test_provider_connection(
-                    provider_target, external_request, rate_key=session_key
+                    provider_target, external_request, rate_key=rate_key
                 )
                 provider = AI_CORE.last_provider_name
                 answer = f"Conexión directa con {provider} verificada. Modelo: {AI_CORE.last_model}."
@@ -8343,7 +8349,7 @@ async def handle_command(event: dict, source: str):
                 elif "HTTP 400" in detail:
                     answer = f"{provider} rechazó el formato de la solicitud (HTTP 400). Comprueba el modelo y sus funciones compatibles. Detalle: {detail}"
                 elif "NO_CONFIGURADA" in detail:
-                    answer = "No hay credenciales de IA configuradas. Añade GEMINI_API_KEY y la clave secundaria de Groq."
+                    answer = "No hay credenciales para ese proveedor. Configura GEMINI_API_KEY, GROQ_API_KEY u OPENROUTER_API_KEY en Render, según corresponda."
                 else:
                     answer = f"No se pudo verificar la conexión con {provider}. Detalle: {detail or type(exc).__name__}"
             await send_message(thread, "ASTRA INTELLIGENCE · PRUEBA\n" + answer, source, reply)
@@ -8364,6 +8370,7 @@ async def handle_command(event: dict, source: str):
             result = await AI_CORE.assist(
                 prompt, session_key, external_request,
                 allowed_commands=allowed_ai_commands,
+                rate_key=rate_key,
             )
             if result.get("fallback"):
                 metrics["ai_errors"] += 1
@@ -8435,7 +8442,7 @@ async def handle_command(event: dict, source: str):
                 await send_message(thread, "Uso: !ia musica <ambiente o descripción>.", source, reply)
                 return
             try:
-                optimized = await AI_CORE.optimize_music_query(rest, external_request, rate_key=session_key)
+                optimized = await AI_CORE.optimize_music_query(rest, external_request, rate_key=rate_key)
                 invocation = validate_ai_tool_call("dj", f"buscar {optimized}")
                 if not invocation:
                     raise ValueError("Búsqueda no válida")
@@ -8451,7 +8458,7 @@ async def handle_command(event: dict, source: str):
                 return
             try:
                 answer = await AI_CORE.translate(
-                    pair[0].strip(), pair[1].strip(), external_request, rate_key=session_key
+                    pair[0].strip(), pair[1].strip(), external_request, rate_key=rate_key
                 )
             except Exception:
                 logging.exception("[AI] Error de traducción")
@@ -8467,7 +8474,7 @@ async def handle_command(event: dict, source: str):
                 await send_message(thread, "Uso: !ia guardian revisar <texto>.", source, reply)
                 return
             try:
-                answer = await AI_CORE.review_guardian(parts[1], external_request, rate_key=session_key)
+                answer = await AI_CORE.review_guardian(parts[1], external_request, rate_key=rate_key)
             except Exception:
                 logging.exception("[AI] Error en Guardian AI")
                 answer = "No pude analizar el texto. Comprueba la conexión con el proveedor."
@@ -8485,9 +8492,9 @@ async def handle_command(event: dict, source: str):
                     "AVISO · AI CHAT ANALYST ACTIVADO\n"
                     "Desde este momento, Katherine recopilará temporalmente los mensajes nuevos "
                     "de esta sala para generar resúmenes solicitados por un administrador. "
-                    "El buffer se mantiene en memoria del proceso hasta una hora y máximo 200 "
-                    "mensajes; no se consulta el historial anterior. Al pedir un resumen, los "
-                    "mensajes seleccionados se envían al proveedor IA configurado (Groq/OpenAI) "
+                    "El buffer se mantiene solo en RAM durante 15 minutos y hasta 60 mensajes; no se "
+                    "consulta el historial anterior. Al pedir un resumen, los mensajes "
+                    "seleccionados se envían al proveedor IA configurado (Gemini/Groq/OpenRouter) "
                     "para procesarlos. Activa esta función solo si la sala está informada y de "
                     "acuerdo. Un administrador puede detenerlo con !ia analista desactivar.",
                     source, reply
@@ -8506,7 +8513,7 @@ async def handle_command(event: dict, source: str):
                     await send_message(thread, "AI CHAT ANALYST\nPreparando resumen del buffer temporal…", source, reply)
                     try:
                         answer = await AI_CORE.summarize_chat(
-                            thread, external_request, rate_key=session_key
+                            thread, external_request, rate_key=rate_key
                         )
                     except Exception:
                         logging.exception("[AI] Error en Chat Analyst")
@@ -8524,7 +8531,7 @@ async def handle_command(event: dict, source: str):
             try:
                 diagnostic = await build_status_message(source, nickname, thread)
                 answer = await AI_CORE.explain_diagnostics(
-                    diagnostic, external_request, rate_key=session_key
+                    diagnostic, external_request, rate_key=rate_key
                 )
             except Exception:
                 logging.exception("[AI] Error en Astra Admin AI")

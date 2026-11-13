@@ -484,6 +484,18 @@ def build_ai_session_key(
     return f"{source}:{thread_id}:{identity}"
 
 
+def build_ai_rate_key(
+    source: str, thread_id: str, author: dict[str, Any] | None
+) -> str:
+    """Build a stable rate-limit identity without trusting editable nicknames."""
+    details = author if isinstance(author, dict) else {}
+    identity = str(
+        details.get("uid") or details.get("userId") or details.get("id") or ""
+    ).strip()
+    scope = f"user:{identity}" if identity else "anonymous-room"
+    return f"{str(source)[:40]}:{str(thread_id)[:120]}:{scope}"
+
+
 def is_bot_author(author: dict[str, Any] | None, bot_uid: str | None) -> bool:
     """Identify bot authors without treating missing user IDs as a match."""
     details = author if isinstance(author, dict) else {}
@@ -511,9 +523,10 @@ def classify_request_intent(
     if text in {"ayuda", "comandos disponibles", "que puedes hacer", "que sabes hacer"}:
         return "action"
     research_markers = (
-        "investiga", "investigar", "busca informacion", "fuentes sobre",
-        "analiza este enlace", "resume este enlace", "lee este articulo",
-        "consulta fuentes", "que ha pasado recientemente",
+        "investiga", "investigar", "busca informacion", "buscame informacion",
+        "averigua", "verifica con fuentes", "comprueba fuentes", "documentate sobre",
+        "fuentes sobre", "analiza este enlace", "resume este enlace",
+        "lee este articulo", "consulta fuentes", "que ha pasado recientemente",
     )
     conversational_question_markers = (
         "que opinas", "que piensas", "por que", "explicame", "explica ",
@@ -807,7 +820,10 @@ class KatherineAI:
         self._provider_token_interval = 0.0
         self._provider_cooldown_until = 0.0
         self._daily_quota_reset_at = 0.0
-        self._provider_runtime_state: dict[str, dict[str, float]] = {}
+        self._provider_runtime_state: dict[str, dict[str, Any]] = {}
+        self._last_provider_summary: dict[str, str] | None = None
+        self._rate_limit_salt = secrets.token_bytes(16)
+        self._user_request_windows: dict[str, deque[float]] = {}
         self._provider_override: ContextVar[dict[str, str] | None] = ContextVar(
             f"katherine_ai_provider_override_{id(self)}", default=None
         )
@@ -850,6 +866,17 @@ class KatherineAI:
                 )
                 or "openai/gpt-oss-20b"
             ).strip(),
+        }
+
+    def _openrouter_provider_config(self) -> dict[str, str]:
+        return {
+            "name": "OpenRouter",
+            "key": (os.getenv("OPENROUTER_API_KEY") or "").strip(),
+            "url": (
+                os.getenv("OPENROUTER_API_URL")
+                or "https://openrouter.ai/api/v1/responses"
+            ).strip(),
+            "model": (os.getenv("OPENROUTER_MODEL") or "openrouter/free").strip(),
         }
 
     def _primary_provider_config(self) -> dict[str, str]:
@@ -896,6 +923,12 @@ class KatherineAI:
         fallback = self._groq_provider_config()
         return fallback if fallback["key"] and fallback["url"] and fallback["model"] else None
 
+    def _tertiary_provider_config(self) -> dict[str, str] | None:
+        if self._primary_provider_config()["name"] != "Google Gemini":
+            return None
+        config = self._openrouter_provider_config()
+        return config if config["key"] and config["url"] and config["model"] else None
+
     def _active_provider_config(self) -> dict[str, str]:
         return self._provider_override.get() or self._primary_provider_config()
 
@@ -937,6 +970,8 @@ class KatherineAI:
             return "Groq"
         if host == "generativelanguage.googleapis.com":
             return "Google Gemini"
+        if host == "openrouter.ai" or host.endswith(".openrouter.ai"):
+            return "OpenRouter"
         if host == "api.openai.com" or host.endswith(".openai.com"):
             return "OpenAI"
         return self._active_provider_config()["name"]
@@ -950,6 +985,10 @@ class KatherineAI:
         return self.provider_name == "Google Gemini"
 
     @property
+    def is_openrouter(self) -> bool:
+        return self.provider_name == "OpenRouter"
+
+    @property
     def uses_groq_strict_schema(self) -> bool:
         return self.is_groq and self.model.casefold() in GROQ_STRICT_JSON_MODELS
 
@@ -957,56 +996,84 @@ class KatherineAI:
     def is_enabled(self) -> bool:
         primary = self._primary_provider_config()
         fallback = self._fallback_provider_config()
+        tertiary = self._tertiary_provider_config()
         return bool(
             (primary["key"] and primary["url"] and primary["model"])
             or (fallback and fallback["key"] and fallback["url"] and fallback["model"])
+            or (tertiary and tertiary["key"] and tertiary["url"] and tertiary["model"])
         )
 
     @property
     def last_provider_name(self) -> str:
-        last = self._last_provider_context.get()
+        last = self._last_provider_context.get() or self._last_provider_summary
         return str(last.get("name")) if last else self._primary_provider_config()["name"]
 
     @property
     def last_model(self) -> str:
-        last = self._last_provider_context.get()
+        last = self._last_provider_context.get() or self._last_provider_summary
         return str(last.get("model")) if last else self._primary_provider_config()["model"]
+
+    def _provider_status_line(self, config: dict[str, str]) -> str:
+        name = config["name"]
+        state = self._provider_runtime_state.get(name, {})
+        if not config["key"]:
+            state_text = "sin credencial"
+        else:
+            now = time.monotonic()
+            blocked_until = max(
+                float(state.get("circuit_open_until", 0) or 0),
+                float(state.get("cooldown_until", 0) or 0),
+                float(state.get("daily_quota_reset_at", 0) or 0),
+            )
+            if blocked_until > now:
+                state_text = f"en espera {max(1, int(blocked_until - now))} s"
+            elif state.get("last_error"):
+                state_text = "falló recientemente"
+            elif float(state.get("successes", 0) or 0) > 0:
+                state_text = "conexión verificada"
+            else:
+                state_text = "configurado; pendiente de prueba"
+        model = sanitize_ai_trace_text(config.get("model") or "sin modelo", 80)
+        latency = float(state.get("last_latency_ms", 0) or 0)
+        requests = int(state.get("requests", 0) or 0)
+        failures = int(state.get("failures", 0) or 0)
+        detail = f" · latencia {latency:.0f} ms" if latency > 0 else ""
+        last_error = str(state.get("last_error") or "")
+        error_detail = f" · error {last_error}" if last_error else ""
+        return (
+            f"• {name}: {state_text} · {model} · {requests} solicitudes · "
+            f"{failures} fallos{detail}{error_detail}"
+        )
 
     def status(self, thread_id: str | None = None) -> str:
         primary = self._primary_provider_config()
-        fallback = self._fallback_provider_config()
-        primary_configured = bool(primary["key"])
-        fallback_configured = bool(fallback and fallback["key"])
+        groq = self._groq_provider_config()
+        openrouter = self._openrouter_provider_config()
+        last = self._last_provider_summary or self._last_provider_context.get()
         lines = [
             "KATHERINE AI · ESTADO",
-            f"Proveedor principal: {primary['name']}.",
-            f"Credencial principal: {'detectada' if primary_configured else 'no detectada'}.",
-            f"Modelo principal: {primary['model']}.",
-            f"Proveedor secundario: Groq ({'configurado' if fallback_configured else 'sin credencial'}).",
+            f"Principal: {primary['name']} · {primary['model']}.",
+            "PROVEEDORES:",
+            self._provider_status_line(primary),
+            self._provider_status_line(groq),
+            self._provider_status_line(openrouter),
             (
-                f"Último proveedor utilizado: {self.last_provider_name} · {self.last_model}."
-                if self._last_provider_context.get()
-                else "Conexión no comprobada (usa !ia probar)."
+                f"Última respuesta completada: {last['name']} · {last['model']}."
+                if last else "Última respuesta completada: ninguna en este proceso."
             ),
+            (
+                f"Solicitudes IA: {int(self.metrics.get('ai_provider_requests', 0))} · "
+                f"respuestas: {int(self.metrics.get('ai_provider_responses_completed', 0))} · "
+                f"respaldos: {int(self.metrics.get('ai_provider_failovers', 0))}."
+            ),
+            f"Límite: {self.user_request_limit} consultas por usuario y minuto; estado temporal solo en RAM.",
             "Memoria contextual: solo RAM, aislada por usuario y sala (5 min; máximo 2 intercambios).",
-            (
-                "Gemini usa la API REST nativa generateContent; la retención y el uso de datos dependen de la configuración y política de Google."
-                if primary["name"] == "Google Gemini"
-                else "Groq: no se envía el parámetro store porque este endpoint no lo admite; la retención externa depende de su política."
-                if primary["name"] == "Groq"
-                else "La retención externa depende de la política del proveedor configurado."
-            ),
             f"Analizador de chat: {'ACTIVO' if thread_id and str(thread_id) in self._analyst_enabled else 'INACTIVO'} en esta sala.",
-            "Módulos: Teyvat, Guardian, Chat Analyst, Eclipse, Language y Admin.",
-            "CREATIVITY AI: no incluido.",
+            "No se muestran credenciales ni se guardan conversaciones de forma permanente.",
         ]
-        if not primary_configured and fallback_configured:
-            lines.append("Gemini no tiene credencial; las solicitudes se atenderán mediante Groq hasta configurarla.")
-        elif not primary_configured:
-            lines.append("Configura GEMINI_API_KEY para Gemini y GROQ_API_KEY para el respaldo.")
         return "\n".join(lines)
 
-    def _provider_state(self) -> dict[str, float]:
+    def _provider_state(self) -> dict[str, Any]:
         return self._provider_runtime_state.setdefault(
             self.provider_name,
             {
@@ -1015,13 +1082,51 @@ class KatherineAI:
                 "token_interval": 0.0,
                 "cooldown_until": 0.0,
                 "daily_quota_reset_at": 0.0,
+                "circuit_open_until": 0.0,
+                "consecutive_failures": 0.0,
+                "requests": 0.0,
+                "successes": 0.0,
+                "failures": 0.0,
+                "last_latency_ms": 0.0,
             },
         )
+
+    user_request_limit = 8
+    user_request_window_seconds = 60
+
+    def _enforce_user_rate_limit(self, rate_key: str | None) -> None:
+        """Limit AI calls per stable identity using salted RAM-only keys."""
+        identity = str(rate_key or "").strip()
+        if not identity:
+            return
+        digest = hashlib.sha256(
+            self._rate_limit_salt + identity.encode("utf-8", "replace")
+        ).hexdigest()
+        now = time.monotonic()
+        window = self._user_request_windows.setdefault(digest, deque())
+        cutoff = now - self.user_request_window_seconds
+        while window and window[0] <= cutoff:
+            window.popleft()
+        if len(window) >= self.user_request_limit:
+            self.metrics["ai_user_rate_limited"] += 1
+            raise RuntimeError("IA_LIMITE_USUARIO")
+        window.append(now)
+        if len(self._user_request_windows) > 1000:
+            for key, entries in list(self._user_request_windows.items()):
+                while entries and entries[0] <= cutoff:
+                    entries.popleft()
+                if not entries:
+                    self._user_request_windows.pop(key, None)
+            while len(self._user_request_windows) > 1000:
+                self._user_request_windows.pop(next(iter(self._user_request_windows)))
 
     def _record_provider_latency(self, started_at: float, attempt: int) -> None:
         elapsed = max(0.0, time.monotonic() - started_at)
         self.metrics["ai_provider_latency_seconds_total"] += elapsed
         self.metrics["ai_provider_latency_observations"] += 1
+        state = self._provider_state()
+        state["last_latency_ms"] = elapsed * 1000
+        state["requests"] = float(state.get("requests", 0) or 0) + 1
         logging.info(
             "[AI_LATENCY] proveedor=%s modelo=%s intento=%s tiempo_ms=%.0f",
             self.provider_name, self.model, attempt, elapsed * 1000,
@@ -1220,7 +1325,7 @@ class KatherineAI:
 
     def _update_provider_limits(self, response: Any) -> None:
         """Adapt Groq request pacing using provider headers, per provider."""
-        if not self.is_groq:
+        if not (self.is_groq or self.is_openrouter):
             return
         state = self._provider_state()
         headers = getattr(response, "headers", {}) or {}
@@ -1230,10 +1335,9 @@ class KatherineAI:
         except (TypeError, ValueError):
             request_limit = 0.0
         if request_limit > 0:
-            self._provider_min_interval = max(0.1, min(10.0, 60.0 / request_limit * 1.05))
-        else:
-            self._provider_min_interval = self._provider_min_interval or 2.1
-        state["min_interval"] = self._provider_min_interval
+            state["min_interval"] = max(0.1, min(10.0, 60.0 / request_limit * 1.05))
+        elif not state["min_interval"]:
+            state["min_interval"] = 3.1 if self.is_openrouter else 2.1
 
         try:
             token_limit = float(normalized.get("x-ratelimit-limit-tokens") or 0)
@@ -1267,10 +1371,9 @@ class KatherineAI:
                 except (TypeError, ValueError):
                     used_tokens = 0
                 if used_tokens:
-                    self._provider_token_interval = max(
+                    state["token_interval"] = max(
                         0.1, min(10.0, 60.0 * used_tokens / token_limit * 1.05)
                     )
-                    state["token_interval"] = self._provider_token_interval
 
         if remaining_requests == 0 or remaining_tokens == 0:
             reset_delays = [
@@ -1281,14 +1384,12 @@ class KatherineAI:
             if reset_delays:
                 reset = max(reset_delays)
                 if reset > 3600:
-                    self._daily_quota_reset_at = time.monotonic() + reset
-                    state["daily_quota_reset_at"] = self._daily_quota_reset_at
+                    state["daily_quota_reset_at"] = time.monotonic() + reset
                 else:
-                    self._provider_cooldown_until = max(
-                        self._provider_cooldown_until,
+                    state["cooldown_until"] = max(
+                        float(state.get("cooldown_until", 0) or 0),
                         time.monotonic() + reset,
                     )
-                    state["cooldown_until"] = self._provider_cooldown_until
 
     @staticmethod
     def _extract_chat_completion_text(payload: dict[str, Any]) -> str:
@@ -1350,8 +1451,10 @@ class KatherineAI:
         max_input_messages: int | None = None,
         max_output_tokens: int = 512,
     ) -> dict[str, str]:
+        self._enforce_user_rate_limit(rate_key)
         primary = self._primary_provider_config()
         fallback = self._fallback_provider_config()
+        tertiary = self._tertiary_provider_config()
         providers: list[dict[str, str]] = []
         if primary["key"] and primary["url"] and primary["model"]:
             providers.append(primary)
@@ -1363,13 +1466,41 @@ class KatherineAI:
             and fallback["name"] not in {item["name"] for item in providers}
         ):
             providers.append(fallback)
+        if (
+            tertiary
+            and tertiary["key"]
+            and tertiary["url"]
+            and tertiary["model"]
+            and tertiary["name"] not in {item["name"] for item in providers}
+        ):
+            providers.append(tertiary)
         if not providers:
             raise RuntimeError(
-                "IA_NO_CONFIGURADA: configura GEMINI_API_KEY y, como respaldo, GROQ_API_KEY."
+                "IA_NO_CONFIGURADA: configura GEMINI_API_KEY y GROQ_API_KEY; "
+                "OPENROUTER_API_KEY es un respaldo terciario opcional."
             )
 
+        now = time.monotonic()
+        available_providers: list[dict[str, str]] = []
+        blocked_until_values: list[float] = []
+        for config in providers:
+            state = self._provider_runtime_state.get(config["name"], {})
+            blocked_until = max(
+                float(state.get("circuit_open_until", 0) or 0),
+                float(state.get("cooldown_until", 0) or 0),
+                float(state.get("daily_quota_reset_at", 0) or 0),
+            )
+            if blocked_until > now:
+                blocked_until_values.append(blocked_until)
+                self.metrics["ai_provider_circuit_skips"] += 1
+                continue
+            available_providers.append(config)
+        if not available_providers:
+            wait_seconds = max(1, int(min(blocked_until_values) - now)) if blocked_until_values else 1
+            raise RuntimeError(f"IA_PROVEEDORES_EN_ESPERA:{wait_seconds}")
+
         last_error: Exception | None = None
-        for index, config in enumerate(providers):
+        for index, config in enumerate(available_providers):
             token = self._provider_override.set(config)
             try:
                 result = await self._request_json_with_provider(
@@ -1381,28 +1512,49 @@ class KatherineAI:
                     max_output_tokens=max_output_tokens,
                 )
                 self._last_provider_context.set(dict(config))
-                if index > 0:
+                self._last_provider_summary = {
+                    "name": config["name"], "model": config["model"]
+                }
+                provider_state = self._provider_runtime_state.setdefault(config["name"], {})
+                provider_state["successes"] = float(provider_state.get("successes", 0) or 0) + 1
+                provider_state["consecutive_failures"] = 0.0
+                provider_state["circuit_open_until"] = 0.0
+                provider_state["last_success_at"] = time.time()
+                provider_state.pop("last_error", None)
+                if config["name"] != primary["name"]:
                     self.metrics["ai_provider_failovers"] += 1
                     logging.warning(
                         "[AI] Conmutación completada | principal=%s | proveedor_activo=%s | modelo=%s",
                         primary["name"], config["name"], config["model"],
-                    )
-                elif config["name"] != primary["name"]:
-                    logging.warning(
-                        "[AI] Proveedor principal sin credencial; se utilizó el respaldo %s.",
-                        config["name"],
                     )
                 return result
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 last_error = exc
-                if index + 1 < len(providers):
+                provider_state = self._provider_runtime_state.setdefault(config["name"], {})
+                failures = float(provider_state.get("consecutive_failures", 0) or 0) + 1
+                provider_state["consecutive_failures"] = failures
+                provider_state["failures"] = float(provider_state.get("failures", 0) or 0) + 1
+                provider_state["last_error"] = type(exc).__name__
+                provider_state["last_failure_at"] = time.time()
+                if failures >= 2:
+                    cooldown = min(300.0, 30.0 * (2 ** min(3, int(failures) - 2)))
+                    provider_state["circuit_open_until"] = max(
+                        float(provider_state.get("circuit_open_until", 0) or 0),
+                        time.monotonic() + cooldown,
+                    )
+                    self.metrics["ai_provider_circuit_opened"] += 1
+                    logging.warning(
+                        "[AI] Circuito abierto | proveedor=%s | segundos=%.0f | fallos_consecutivos=%s",
+                        config["name"], cooldown, int(failures),
+                    )
+                if index + 1 < len(available_providers):
                     self.metrics["ai_provider_primary_failures"] += 1
                     logging.warning(
                         "[AI] Falló el proveedor %s; se intentará %s. Motivo=%s",
                         config["name"],
-                        providers[index + 1]["name"],
+                        available_providers[index + 1]["name"],
                         sanitize_ai_trace_text(str(exc), 180) or type(exc).__name__,
                     )
                     continue
@@ -1486,7 +1638,7 @@ class KatherineAI:
             }
             if self.is_groq:
                 body["reasoning"] = {"effort": "low"}
-            if not self.is_groq:
+            if not self.is_groq and not self.is_openrouter:
                 body["store"] = False
 
         request_url = self._provider_request_url()
@@ -1498,6 +1650,12 @@ class KatherineAI:
             request_headers["x-goog-api-key"] = self.api_key
         else:
             request_headers["Authorization"] = f"Bearer {self.api_key}"
+        if self.is_openrouter:
+            request_headers["HTTP-Referer"] = (
+                os.getenv("OPENROUTER_HTTP_REFERER")
+                or "https://github.com/kaaazoficial/katherine-gi-es-anarchy"
+            )
+            request_headers["X-Title"] = "Katherine"
 
         queued_at = time.monotonic()
         provider_lock = self._provider_locks.setdefault(
@@ -1512,7 +1670,11 @@ class KatherineAI:
                 if state["daily_quota_reset_at"] > time.monotonic():
                     raise RuntimeError("IA_CUOTA_DIARIA_AGOTADA")
 
-                base_interval = 3.1 if self.is_gemini else 2.1 if self.is_groq else 0.65
+                base_interval = (
+            3.1 if self.is_gemini or self.is_openrouter
+            else 2.1 if self.is_groq
+            else 0.65
+        )
                 response = None
                 max_attempts = 2
                 for attempt in range(max_attempts):
@@ -1570,7 +1732,7 @@ class KatherineAI:
                     # rejects response_format/schema. Application validation below
                     # still enforces the complete action contract and step limits.
                     if (
-                        (self.is_groq or self.is_gemini)
+                        (self.is_groq or self.is_gemini or self.is_openrouter)
                         and output_format.get("type") == "json_schema"
                         and _is_structured_output_rejection(response)
                     ):
@@ -1609,7 +1771,7 @@ class KatherineAI:
 
                     if (
                         getattr(response, "status_code", None) == 429
-                        and self._daily_quota_reset_at > time.monotonic()
+                        and state["daily_quota_reset_at"] > time.monotonic()
                     ):
                         self.metrics["ai_provider_daily_quota_hits"] += 1
                         logging.warning(
@@ -1749,6 +1911,7 @@ class KatherineAI:
         session_key: str,
         request_func: RequestFunc,
         allowed_commands: set[str] | frozenset[str] | None = None,
+        rate_key: str | None = None,
     ) -> dict[str, Any]:
         text = re.sub(r"\s+", " ", str(request_text or "")).strip()
         if not text:
@@ -1824,7 +1987,7 @@ class KatherineAI:
         messages = [*history, {"role": "user", "content": text}]
         try:
             result = await self._request_json(
-                instructions, messages, request_func, rate_key=key
+                instructions, messages, request_func, rate_key=rate_key or key
             )
         except RuntimeError as exc:
             reason = str(exc)
@@ -1832,9 +1995,19 @@ class KatherineAI:
                 answer = "La inteligencia artificial no está configurada todavía."
             elif reason == "IA_CUOTA_DIARIA_AGOTADA":
                 answer = (
-                    "El proveedor de IA alcanzó su cuota diaria disponible. "
-                    "La conexión se reintentará cuando se restablezca el límite; "
+                    "Los proveedores de IA alcanzaron sus cuotas disponibles. "
+                    "La conexión se reintentará cuando se restablezcan; "
                     "los comandos clásicos siguen disponibles."
+                )
+            elif reason == "IA_LIMITE_USUARIO":
+                answer = (
+                    "Alcanzaste el límite temporal de consultas de IA. "
+                    "Espera un minuto y vuelve a intentarlo; los comandos clásicos siguen disponibles."
+                )
+            elif reason.startswith("IA_PROVEEDORES_EN_ESPERA:"):
+                answer = (
+                    "Los proveedores de IA están recuperándose de errores o límites temporales. "
+                    "Inténtalo de nuevo en un momento; los comandos clásicos siguen disponibles."
                 )
             else:
                 answer = "No pude completar la consulta de IA. Los comandos clásicos siguen disponibles."
@@ -2129,8 +2302,10 @@ class KatherineAI:
             )
         elif requested in {"groq", "fallback", "secondary", "secundario"}:
             config = self._groq_provider_config()
+        elif requested in {"openrouter", "tertiary", "terciario"}:
+            config = self._openrouter_provider_config()
         else:
-            raise ValueError("Proveedor no válido. Usa primary, gemini o groq.")
+            raise ValueError("Proveedor no válido. Usa primary, gemini, groq u openrouter.")
 
         if not config["key"] or not config["url"] or not config["model"]:
             raise RuntimeError(f"IA_{config['name'].upper().replace(' ', '_')}_NO_CONFIGURADA")
@@ -2144,6 +2319,13 @@ class KatherineAI:
                 rate_key=rate_key,
             )
             self._last_provider_context.set(dict(config))
+            self._last_provider_summary = {
+                "name": config["name"], "model": config["model"]
+            }
+            provider_state = self._provider_runtime_state.setdefault(config["name"], {})
+            provider_state["successes"] = float(provider_state.get("successes", 0) or 0) + 1
+            provider_state["consecutive_failures"] = 0.0
+            provider_state.pop("last_error", None)
         finally:
             self._provider_override.reset(token)
 

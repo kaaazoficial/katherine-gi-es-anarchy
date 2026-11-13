@@ -3,8 +3,8 @@ import json
 import time
 import pytest
 from katherine_ai import (
-    ACTION_SCHEMA, KatherineAI, build_ai_session_key, is_bot_author,
-    sanitize_ai_trace_text, validate_ai_tool_call,
+    ACTION_SCHEMA, KatherineAI, build_ai_session_key, build_ai_rate_key,
+    is_bot_author, sanitize_ai_trace_text, validate_ai_tool_call,
 )
 
 class FakeResponse:
@@ -1167,3 +1167,135 @@ async def test_groq_uses_low_reasoning_and_output_cap(monkeypatch):
     assert await ai.test_provider_connection("groq", fake_request) == "OK"
     assert captured["json"]["reasoning"] == {"effort": "low"}
     assert captured["json"]["max_output_tokens"] == 512
+
+
+def test_ai_rate_key_uses_stable_ids_not_nicknames():
+    first = build_ai_rate_key("developer", "room", {"uid": "user-1", "nickname": "Ana"})
+    second = build_ai_rate_key("developer", "room", {"uid": "user-1", "nickname": "Another"})
+    other = build_ai_rate_key("developer", "room", {"uid": "user-2", "nickname": "Ana"})
+    anonymous_a = build_ai_rate_key("developer", "room", {"nickname": "Ana"})
+    anonymous_b = build_ai_rate_key("developer", "room", {"nickname": "Luis"})
+    assert first == second
+    assert first != other
+    assert anonymous_a == anonymous_b
+
+
+def test_openrouter_defaults_to_free_responses_router(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-test-key")
+    monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
+    config = KatherineAI()._openrouter_provider_config()
+    assert config["name"] == "OpenRouter"
+    assert config["model"] == "openrouter/free"
+    assert config["url"] == "https://openrouter.ai/api/v1/responses"
+
+
+@pytest.mark.asyncio
+async def test_direct_openrouter_probe_uses_openrouter_responses_api(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    monkeypatch.setenv("KATHERINE_AI_PRIMARY_PROVIDER", "gemini")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-test-key")
+    ai = KatherineAI()
+    calls = []
+
+    async def fake_request(method, url, **kwargs):
+        calls.append((url, kwargs))
+        return FakeResponse(response_payload({
+            "kind": "answer", "answer": "OK", "command": "", "args": "", "steps": []
+        }))
+
+    assert await ai.test_provider_connection("openrouter", fake_request) == "OK"
+    assert len(calls) == 1
+    url, kwargs = calls[0]
+    assert url == "https://openrouter.ai/api/v1/responses"
+    assert kwargs["headers"]["Authorization"] == "Bearer openrouter-test-key"
+    assert kwargs["headers"]["X-Title"] == "Katherine"
+    assert kwargs["json"]["model"] == "openrouter/free"
+    assert kwargs["json"]["max_output_tokens"] == 512
+    assert kwargs["json"]["text"]["format"]["type"] == "json_schema"
+
+
+@pytest.mark.asyncio
+async def test_provider_chain_falls_back_in_gemini_groq_openrouter_order(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-test-key")
+    ai = KatherineAI()
+    calls = []
+
+    async def fake_provider_call(*args, **kwargs):
+        calls.append(ai.provider_name)
+        if ai.provider_name != "OpenRouter":
+            raise RuntimeError("provider unavailable")
+        return {"kind": "answer", "answer": "OK", "command": "", "args": "", "steps": []}
+
+    ai._request_json_with_provider = fake_provider_call
+    result = await ai._request_json(
+        "JSON", [{"role": "user", "content": "hola"}],
+        lambda *args, **kwargs: None,
+    )
+    assert result["answer"] == "OK"
+    assert calls == ["Google Gemini", "Groq", "OpenRouter"]
+    assert ai.metrics["ai_provider_failovers"] == 1
+
+
+@pytest.mark.asyncio
+async def test_user_ai_rate_limit_is_ephemeral_and_per_identity():
+    ai = KatherineAI()
+    key_a = build_ai_rate_key("developer", "room", {"uid": "user-a"})
+    key_b = build_ai_rate_key("developer", "room", {"uid": "user-b"})
+    for _ in range(ai.user_request_limit):
+        ai._enforce_user_rate_limit(key_a)
+    with pytest.raises(RuntimeError, match="IA_LIMITE_USUARIO"):
+        ai._enforce_user_rate_limit(key_a)
+    ai._enforce_user_rate_limit(key_b)
+    assert ai.metrics["ai_user_rate_limited"] == 1
+    assert all("user-a" not in item for item in ai._user_request_windows)
+
+
+def test_ai_status_reports_three_providers_without_secrets(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-secret")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-secret")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-test-secret")
+    status = KatherineAI().status()
+    assert "Google Gemini" in status
+    assert "Groq" in status
+    assert "OpenRouter" in status
+    assert "openrouter/free" in status
+    assert "openrouter-test-secret" not in status
+
+
+@pytest.mark.asyncio
+async def test_provider_circuit_skips_recently_failed_provider(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
+    ai = KatherineAI()
+    ai._provider_runtime_state["Google Gemini"] = {
+        "circuit_open_until": time.monotonic() + 60,
+        "cooldown_until": 0,
+        "daily_quota_reset_at": 0,
+    }
+    calls = []
+
+    async def fake_provider_call(*args, **kwargs):
+        calls.append(ai.provider_name)
+        return {"kind": "answer", "answer": "OK", "command": "", "args": "", "steps": []}
+
+    ai._request_json_with_provider = fake_provider_call
+    result = await ai._request_json(
+        "JSON", [{"role": "user", "content": "hola"}],
+        lambda *args, **kwargs: None,
+    )
+    assert result["answer"] == "OK"
+    assert calls == ["Groq"]
+    assert ai.metrics["ai_provider_circuit_skips"] == 1
+
+
+def test_non_genshin_topic_does_not_expose_teyvat_tools():
+    from katherine_ai import AI_PUBLIC_COMMANDS, classify_request_intent, select_ai_tool_commands
+    text = "Explícame cómo funciona una API REST"
+    intent = classify_request_intent(text)
+    tools = select_ai_tool_commands(text, AI_PUBLIC_COMMANDS, intent)
+    assert intent == "conversation"
+    assert not tools
+    assert classify_request_intent("Katherine, busca información sobre OpenRouter") == "research"

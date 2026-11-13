@@ -3,7 +3,7 @@
 Esta expansión excluye CREATIVITY AI. La IA es una capa opcional sobre los comandos y fuentes que Katherine ya tiene; no reemplaza el enrutador determinista ni las herramientas actuales.
 
 ## Componentes
-- **Katherine AI Core:** Gemini 3.5 Flash-Lite es el proveedor principal y Groq GPT-OSS 20B el respaldo. Las respuestas normales se limitan a 512 tokens; Groq usa razonamiento bajo. Los resultados de comandos se entregan sin una segunda llamada de IA.
+- **Katherine AI Core:** Gemini 3.5 Flash-Lite es el proveedor principal, Groq GPT-OSS 20B el respaldo y OpenRouter (`openrouter/free`) el tercer proveedor opcional. Solo se consultan proveedores con credencial configurada. Las respuestas normales se limitan a 512 tokens; Groq usa razonamiento bajo. Los resultados de comandos se entregan sin una segunda llamada de IA.
 - **Memoria contextual:** aislada por usuario y sala, solo RAM, caduca a los 5 minutos y conserva hasta 2 intercambios.
 - **Teyvat AI:** delega consultas en enciclopedia, guías, equipos, rotaciones, materiales, reacciones y noticias oficiales.
 - **Guardian AI:** revisión contextual manual; recomienda revisión humana, no sanciona ni borra mensajes.
@@ -20,6 +20,10 @@ Variables principales:
 - `GEMINI_MODEL`: modelo principal; default `gemini-3.5-flash-lite`.
 - `GROQ_API_KEY`: credencial secundaria.
 - `GROQ_MODEL`: modelo secundario; default `openai/gpt-oss-20b`.
+- `OPENROUTER_API_KEY`: credencial opcional del tercer proveedor.
+- `OPENROUTER_MODEL`: modelo terciario; default `openrouter/free`.
+- `OPENROUTER_API_URL`: endpoint Responses; default `https://openrouter.ai/api/v1/responses`.
+- `OPENROUTER_HTTP_REFERER`: encabezado HTTP-Referer opcional.
 - `KATHERINE_AI_PRIMARY_PROVIDER`: se mantiene en `gemini`.
 - Compatibilidad: `KATHERINE_AI_API_KEY`, `KATHERINE_AI_MODEL` y `KATHERINE_AI_API_URL` siguen aceptándose en instalaciones heredadas.
 
@@ -32,7 +36,7 @@ La ayuda de IA está separada del catálogo clásico `!ayuda` y se consulta con 
 - `!investigar <tema>` / `!ia investigar <tema>`; `!enlace <URL>` / `!ia enlace <URL>`.
 - `!ia musica <descripción>`, `!ia traducir <idioma> | <texto>`.
 - `!ia estado`, `!ia olvidar`.
-- Solo administradores: `!ia probar [gemini|groq]`, `!ia trazas`, `!ia guardian`, `!ia analista`, `!ia diagnostico`.
+- Solo administradores: `!ia probar [gemini|groq|openrouter]`, `!ia trazas`, `!ia guardian`, `!ia analista`, `!ia diagnostico`.
 
 Las solicitudes naturales explícitas se envían al núcleo si hay clave configurada; si no, conservan el enrutador determinista. Las herramientas de Teyvat solo se seleccionan cuando la consulta menciona Genshin/Teyvat o una entidad reconocible del juego; preguntas generales sobre Anarchy Apps, Katherine, bots, APIs o programación nunca se derivan a la enciclopedia. La mención aislada «Katherine» nunca activa el bot.
 
@@ -59,7 +63,7 @@ El núcleo de IA puede devolver un plan de hasta tres herramientas. Katherine va
 
 
 ## Retención y privacidad
-- El contexto conversacional de IA existe solo en RAM, expira como máximo a los 10 minutos y conserva como máximo 6 turnos.
+- El contexto conversacional de IA existe solo en RAM, expira como máximo a los 5 minutos y conserva como máximo 2 intercambios.
 - El analizador es opcional, está desactivado por defecto y conserva como máximo 60 mensajes durante 15 minutos; no usa historiales previos.
 - Los textos de bio/estado caducan a los 30 días desde su última modificación.
 - Los registros de actividad se conservan 7 días; regalos 30 días y un máximo de 5 por destinatario; auditoría 30 días; advertencias 90 días.
@@ -81,7 +85,9 @@ El núcleo de IA puede devolver un plan de hasta tres herramientas. Katherine va
 
 ## Protección de cuotas y entrega de respuestas
 
-- Gemini y Groq mantienen sus esperas y bloqueos por separado. Groq ajusta el ritmo con sus cabeceras de cuota cuando están disponibles. Las respuestas usan un máximo de 512 tokens y los resultados de comandos evitan una segunda llamada de IA.
+- Gemini, Groq y OpenRouter mantienen esperas, cuotas y estados de recuperación separados. Groq y OpenRouter ajustan el ritmo con cabeceras de cuota cuando están disponibles. OpenRouter usa `openrouter/free` por defecto; sus variantes gratuitas tienen límites externos estrictos y pueden cambiar de modelo en cada llamada. Las respuestas usan un máximo de 512 tokens y los resultados de comandos evitan una segunda llamada de IA.
+- Cada UID verificado queda limitado a 8 solicitudes IA por minuto y por sala. Si la plataforma no entrega un identificador estable, se aplica el límite a la sala completa en lugar de confiar en nicknames. Las claves se derivan con sal aleatoria y viven solo en RAM.
+- Un proveedor que acumula dos fallos consecutivos abre un circuito durante 30 segundos; los intervalos aumentan hasta cinco minutos. También se respetan los tiempos de espera y cuotas diarias informados por el proveedor. Los proveedores en recuperación se omiten y se intenta automáticamente el siguiente disponible.
 - Los HTTP 429 se reintentan respetando `Retry-After` y los encabezados de reinicio. Cuando el error o las cabeceras indican agotamiento de cuota diaria, Katherine deja de reintentar en bucle y comunica que la IA volverá a estar disponible tras el reinicio.
 - Los bloques de mensajes rechazados explícitamente con HTTP 429 se pueden recuperar en una tarea temporal de RAM. La cola admite hasta 100 tareas concurrentes, conserva los bloques pendientes durante un máximo de 10 minutos y se pierde al reiniciar el proceso. Los errores distintos de 429 no se reenvían automáticamente para evitar duplicados cuando el resultado del primer envío es incierto.
 - Los mensajes largos mantienen el límite de transporte de 2000 unidades UTF-16 por bloque; no se recorta el contenido generado. Si un bloque no puede entregarse, los posteriores esperan a la recuperación para conservar el orden.

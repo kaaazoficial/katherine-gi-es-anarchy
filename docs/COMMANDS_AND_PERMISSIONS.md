@@ -26,7 +26,7 @@ En Render, configura la variable `ADMIN_UIDS` con uno o más UID. Se aceptan sep
 - `!antispam`, `!advertir`, `!advertencias`, `!quitaradvertencia`
 - `!perfilbot`, `!avatarbot`
 - `!respuestas`, `!respuesta`
-- `!ia probar`, `!ia guardian`, `!ia analista`, `!ia diagnostico`
+- `!ia probar [gemini|groq|openrouter]`, `!ia guardian`, `!ia analista`, `!ia diagnostico`
 
 Los eventos se crean libremente; solo su creador o un UID administrador puede cerrarlos. Los comandos generales de fecha, zona horaria, menú, economía, traducción y multimedia siguen disponibles para todos.
 

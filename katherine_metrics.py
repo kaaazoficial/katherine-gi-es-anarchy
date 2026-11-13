@@ -67,6 +67,11 @@ def render_prometheus_metrics(
         ("katherine_ai_provider_input_tokens", "ai_provider_input_tokens", "Input tokens reported by the AI provider."),
         ("katherine_ai_provider_output_tokens", "ai_provider_output_tokens", "Output tokens reported by the AI provider."),
         ("katherine_ai_provider_responses_completed", "ai_provider_responses_completed", "Structured AI responses completed."),
+        ("katherine_ai_provider_failovers", "ai_provider_failovers", "AI requests completed through a backup provider."),
+        ("katherine_ai_provider_primary_failures", "ai_provider_primary_failures", "AI provider failures before fallback."),
+        ("katherine_ai_provider_circuit_opened", "ai_provider_circuit_opened", "Times an AI provider circuit breaker opened."),
+        ("katherine_ai_provider_circuit_skips", "ai_provider_circuit_skips", "Provider calls skipped while unavailable."),
+        ("katherine_ai_user_rate_limited", "ai_user_rate_limited", "AI requests rejected by per-user rate limits."),
     ):
         Counter(metric_name, description, registry=registry).inc(
             _finite_number(counters.get(key, 0))
