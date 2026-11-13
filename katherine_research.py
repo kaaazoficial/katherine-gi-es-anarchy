@@ -983,6 +983,38 @@ async def search_web(
     ][:max_results]
 
 
+
+RESEARCH_MODES = {
+    "general": "investigación completa",
+    "comparar": "comparación de fuentes y posturas",
+    "verificar": "verificación de afirmaciones",
+    "cronologia": "cronología de acontecimientos",
+    "informe": "informe exhaustivo",
+}
+
+def parse_research_mode(query: str) -> tuple[str, str]:
+    """Extract an explicit research mode without changing the actual subject."""
+    raw = re.sub(r"\\s+", " ", str(query or "")).strip()
+    match = re.match(
+        r"^(comparar|comparación|comparacion|verificar|verificación|verificacion|"
+        r"cronología|cronologia|línea de tiempo|linea de tiempo|informe|completo)"
+        r"\\s*(?::|\\||sobre|de)?\\s*(.*)$",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return "general", raw
+    label = _normalized_query(match.group(1))
+    mode = (
+        "comparar" if label.startswith("compar")
+        else "verificar" if label.startswith("verific")
+        else "cronologia" if label in {"cronologia", "linea de tiempo"}
+        else "informe"
+    )
+    subject = match.group(2).strip(" :|")
+    return (mode, subject) if subject else ("general", raw)
+
+
 def build_source_context(query: str, sources: list[dict[str, str]]) -> str:
     """Build a bounded evidence dossier with provenance and date transparency."""
     blocks = [
