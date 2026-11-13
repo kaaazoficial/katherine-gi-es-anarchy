@@ -19,7 +19,6 @@ _COUNTERS = (
     ("katherine_api_errors", "api_errors", "Anarchy API request errors recorded by this process."),
     ("katherine_dj_tracks_started", "dj_tracks_started", "DJ tracks started by this process."),
     ("katherine_dj_playback_errors", "dj_playback_errors", "DJ playback errors recorded by this process."),
-    ("katherine_tts_messages_enqueued", "tts_priority_enqueued", "Priority TTS messages enqueued by this process."),
 )
 
 
@@ -63,6 +62,14 @@ def render_prometheus_metrics(
         "External source failures recorded by this process.",
         registry=registry,
     ).inc(external_failures)
+    Counter(
+        "katherine_tts_messages_enqueued",
+        "Priority and regular TTS messages enqueued by this process.",
+        registry=registry,
+    ).inc(
+        _finite_number(counters.get("tts_priority_enqueued", 0))
+        + _finite_number(counters.get("tts_regular_enqueued", 0))
+    )
 
     Gauge(
         "katherine_process_uptime_seconds",
