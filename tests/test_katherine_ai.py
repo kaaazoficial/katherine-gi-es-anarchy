@@ -76,6 +76,9 @@ def test_explicit_user_actions_are_available_but_plans_stay_read_only():
     assert "evento" not in AI_PLAN_SAFE_COMMANDS
     assert classify_request_intent("Katherine, transfiere 100 puntos a Ana") == "action"
     assert classify_request_intent("Katherine, investiga novedades de Python") == "research"
+    assert classify_request_intent(
+        "Katherine, investiga cambios de Python y analiza este artículo"
+    ) == "multi_action"
     assert classify_request_intent("Katherine, investiga Python y consulta la guía de Cyno") == "genshin"
     public_prompt = build_ai_instructions(AI_PUBLIC_COMMANDS, "action")
     admin_prompt = build_ai_instructions(AI_PUBLIC_COMMANDS | AI_ADMIN_COMMANDS, "action")
