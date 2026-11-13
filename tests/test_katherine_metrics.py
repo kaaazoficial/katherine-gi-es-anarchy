@@ -15,6 +15,7 @@ def test_metrics_export_contains_aggregate_counts_without_identity_labels():
     assert "katherine_api_requests_total 12.0" in text
     assert "katherine_external_requests_total 4.0" in text
     assert "katherine_process_uptime_seconds 120.0" in text
+    assert "katherine_tts_messages_enqueued_total 0.0" in text
     assert "text/plain" in content_type
     assert "uid=" not in text
     assert "nickname=" not in text
