@@ -1,7 +1,35 @@
 """Regression tests for AI tool output delivery capture."""
+import inspect
+
 import pytest
 
 import main as bot_main
+
+
+def test_ai_plan_executor_has_one_safe_definition():
+    parameters = inspect.signature(bot_main.execute_ai_plan).parameters
+    assert "request_text" in parameters
+
+
+@pytest.mark.asyncio
+async def test_ai_plan_executor_rejects_side_effect_tools_before_execution(monkeypatch):
+    calls = []
+
+    async def fake_execute(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"success": True, "output": "fake"}
+
+    monkeypatch.setattr(bot_main, "execute_ai_tool", fake_execute)
+    executed = await bot_main.execute_ai_plan(
+        {"threadId": "room", "message": {}},
+        "developer",
+        "session",
+        ["pagar @Ana 100"],
+        request_text="consulta",
+    )
+    assert executed is False
+    assert calls == []
+
 
 
 @pytest.mark.asyncio
