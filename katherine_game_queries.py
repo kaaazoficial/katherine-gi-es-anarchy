@@ -68,8 +68,8 @@ def resolve_genshin_entity_intent(value: str) -> tuple[str, str] | None:
     prefixes = (
         r"^(?:que es|que significa|como es|hablame (?:de|sobre)|cuentame (?:de|sobre)|"
         r"que sabes de|que se sabe de|que region es|que pais es|que nacion es|"
-        r"donde esta|donde se encuentra|informacion sobre|explicame)\\s+"
-        r"(?:(?:la )?(?:region|geografia|nacion)\\s+(?:de\\s+)?|)(.+)$",
+        r"donde esta|donde se encuentra|informacion sobre|explicame)\s+"
+        r"(?:(?:la )?(?:region|geografia|nacion)\s+(?:de\s+)?|)(.+)$",
     )
     for pattern in prefixes:
         match = re.fullmatch(pattern, text)
