@@ -680,10 +680,7 @@ def check_antispam_message(event: dict, source: str):
         automatic=True
     )
     metrics["antispam_blocked"] += 1
-    logging.warning(
-        "[MODERACION] Antispam | sala=%s | usuario=%s | advertencia=%s",
-        thread_id, nickname, warning_id
-    )
+    logging.warning("[MODERACION] Antispam automático | advertencia=%s", warning_id)
     return True, {"warning_id": warning_id, "nickname": nickname}
 
 
@@ -1835,8 +1832,7 @@ async def send_message(
             else:
                 if is_not_in_chat_response(result.get("status"), result.get("data")):
                     logging.info(
-                        "[ANARCHY] Envío omitido en %s: Katherine ya no pertenece a ese chat.",
-                        thread_id,
+                        "[ANARCHY] Envío omitido: Katherine ya no pertenece al chat."
                     )
                 else:
                     logging.error(
@@ -12761,12 +12757,7 @@ async def handle_command(event: dict, source: str):
         )
         return
 
-    logging.info(
-        "[COMANDO] %s | %s | %s",
-        command,
-        nickname,
-        thread
-    )
+    logging.info("[COMANDO] %s", command)
 
     # Identificador de la cuenta que envió el comando. Solo se devuelve al
     # propio usuario para que pueda configurarse como administrador en Render.
@@ -16349,11 +16340,11 @@ async def dispatch(event: dict, source: str):
                 ready.set()
         elif kind in ("room.end", "room.kicked"):
             await stop_dj_room(thread_id, request_leave=False)
-        logging.info("[SALA] %s | %s", kind, thread_id)
+        logging.info("[SALA] Evento de sala: %s", kind)
 
     elif kind in ("thread.added", "thread.removed", "message.edited", "message.deleted"):
         metrics[f"event_{kind}"] += 1
-        logging.info("[EVENTO] %s | %s", kind, event.get("threadId"))
+        logging.info("[EVENTO] %s", kind)
 
     else:
         logging.info("[EVENTO] Ignorado: %s", kind)
