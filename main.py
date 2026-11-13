@@ -57,6 +57,7 @@ from katherine_nexus import (
     extract_message_id,
     format_source_health,
     interpret_natural_request,
+    should_execute_deterministic_fallback,
     parse_command_invocation,
     toggle_community_participant,
 )
@@ -12874,12 +12875,30 @@ async def handle_command(event: dict, source: str):
             allowed_commands=allowed_ai_commands,
         )
         fallback_command = str(event.get("_nexus_fallback_command") or "").strip()
-        has_deterministic_fallback = bool(
-            fallback_command and not fallback_command.startswith("asistente ")
+        provider_failed = bool(ai_result.get("fallback"))
+        has_deterministic_fallback = should_execute_deterministic_fallback(
+            request_text, fallback_command, provider_failed=provider_failed
         )
-        if has_deterministic_fallback and ai_result.get("kind") not in {"command", "plan"}:
+        if (
+            has_deterministic_fallback
+            and ai_result.get("kind") == "answer"
+            and provider_failed
+        ):
             logging.warning(
-                "[NEXUS] IA sin herramienta válida; se ejecuta la ruta determinista."
+                "[NEXUS] Proveedor IA no disponible; se usa respaldo explícito: %s",
+                fallback_command.split(maxsplit=1)[0],
+            )
+            await execute_ai_tool(event, source, session_key, fallback_command)
+            return
+        if (
+            has_deterministic_fallback
+            and ai_result.get("kind") == "answer"
+            and not provider_failed
+            and not str(ai_result.get("answer") or "").strip()
+        ):
+            logging.warning(
+                "[NEXUS] Respuesta vacía; se usa respaldo explícito: %s",
+                fallback_command.split(maxsplit=1)[0],
             )
             await execute_ai_tool(event, source, session_key, fallback_command)
             return
@@ -12897,7 +12916,8 @@ async def handle_command(event: dict, source: str):
             return
         if ai_result.get("kind") == "command":
             invocation = validate_ai_tool_call(
-                ai_result.get("command", ""), ai_result.get("args", "")
+                ai_result.get("command", ""), ai_result.get("args", ""),
+                allowed_commands=allowed_ai_commands,
             )
             if invocation:
                 logging.info("[AI] Herramienta permitida: %s", invocation.split()[0])

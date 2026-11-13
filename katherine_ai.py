@@ -558,6 +558,8 @@ class KatherineAI:
         self._analyst: dict[str, deque] = {}
         self._last_call: dict[str, float] = {}
         self._semaphore: asyncio.Semaphore | None = None
+        self._provider_lock = asyncio.Lock()
+        self._provider_last_request = 0.0
 
     @property
     def api_key(self) -> str:
@@ -827,17 +829,46 @@ class KatherineAI:
             body["store"] = False
 
         async with self._semaphore:
-            response = await request_func(
-                "POST",
-                self.api_url,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
-                json=body,
-                timeout=35,
-            )
+            # Serialize provider dispatches with a small spacing to avoid
+            # self-inflicted bursts when several rooms call the model at once.
+            async with self._provider_lock:
+                spacing = 0.65 - (time.monotonic() - self._provider_last_request)
+                if spacing > 0:
+                    await asyncio.sleep(spacing)
+                response = await request_func(
+                    "POST",
+                    self.api_url,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                    },
+                    json=body,
+                    timeout=35,
+                )
+                self._provider_last_request = time.monotonic()
+                if getattr(response, "status_code", None) == 429:
+                    # One bounded retry. Honor Retry-After when available,
+                    # but cap the wait so a webhook cannot hang indefinitely.
+                    retry_after = 1.5
+                    headers = getattr(response, "headers", {}) or {}
+                    try:
+                        retry_after = float(headers.get("Retry-After", retry_after))
+                    except (TypeError, ValueError):
+                        pass
+                    await asyncio.sleep(max(0.5, min(5.0, retry_after)))
+                    response = await request_func(
+                        "POST",
+                        self.api_url,
+                        headers={
+                            "Authorization": f"Bearer {self.api_key}",
+                            "Content-Type": "application/json",
+                            "Accept": "application/json",
+                        },
+                        json=body,
+                        timeout=35,
+                    )
+                    self._provider_last_request = time.monotonic()
         if not getattr(response, "is_success", False):
             status = getattr(response, "status_code", "desconocido")
             # Preserve only the provider's safe diagnostic fields; never log headers

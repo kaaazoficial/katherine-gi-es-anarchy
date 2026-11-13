@@ -48,6 +48,56 @@ def parse_command_invocation(
     return command, args
 
 
+def should_execute_deterministic_fallback(
+    request_text: str,
+    fallback_command: str,
+    provider_failed: bool = False,
+) -> bool:
+    """Only use NEXUS fallback when the request is an explicit action/query.
+
+    A conversational or knowledge question must not be overridden by a
+    speculative command inferred from broad words such as "what is".
+    """
+    invocation = re.sub(r"\s+", " ", str(fallback_command or "")).strip()
+    if not invocation or invocation.casefold().startswith("asistente "):
+        return False
+    raw = re.sub(r"\s+", " ", str(request_text or "")).strip()
+    addressed = re.match(
+        r"^(?:oye[, ]+)?katherine(?:[, :]+|$)\s*(.*)$",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if addressed:
+        raw = addressed.group(1).strip()
+    text = _normalize(raw)
+    if not text:
+        return False
+    # When the provider is unavailable, retain the deterministic fallback.
+    # The caller still validates the command and the original handler checks
+    # permissions, while the interpreter below filters generic Teyvat queries.
+    if provider_failed:
+        return True
+    explicit_starters = (
+        "ayuda", "comandos disponibles", "que puedes hacer", "que sabes hacer",
+        "abre ", "abrir ", "muestra ", "mostrar ", "consulta ", "revisa ",
+        "dime ", "cuentame ", "haz ", "ejecuta ", "realiza ",
+        "pausa ", "pausar ", "deten ", "detener ", "reanuda ", "reanudar ",
+        "continua ", "continuar ", "salta ", "saltar ", "entra ", "entrar ",
+        "unete ", "unirse ", "lee ", "leer ", "deja de leer", "desactiva ",
+        "crea ", "crear ", "convoca ", "dame ", "di ", "lanza ", "tira ",
+        "recomiendame ", "ponme ", "reproduce ", "pon ", "busca ",
+        "investiga ", "investigar ", "haz una investigacion ",
+        "busca informacion ", "analiza ", "resume ", "traduce ", "traducir ",
+        "que equipos hay para ", "equipos para ", "equipo de ",
+        "composiciones para ", "cual es la rotacion ", "rotacion de ",
+        "rotacion para ", "que materiales necesita ", "materiales para ",
+        "materiales de ", "que cobertura tiene ", "cobertura de ",
+        "como armo ", "como construir ", "build de ", "build para ",
+        "equipa ", "que hora es en ",
+    )
+    return any(text.startswith(prefix) for prefix in explicit_starters)
+
+
 def interpret_natural_request(value: str) -> str | None:
     """Route only high-confidence Spanish requests to existing commands."""
     raw = re.sub(r"\s+", " ", str(value or "")).strip()
@@ -133,6 +183,19 @@ def interpret_natural_request(value: str) -> str | None:
             subject = re.sub(r"\s+", " ", match.group(1)).strip(" .?!")
             if not subject or len(subject) > 120:
                 return None
+            if command == "enciclopedia" and re.match(
+                r"^(?:quien es|que es|que sabes de)\b", text
+            ):
+                # A trailing "en Genshin" describes the setting, not necessarily
+                # an encyclopedia entity. Require the subject itself to be a
+                # recognizable game entity/topic, otherwise let the AI answer.
+                subject_for_domain = re.sub(
+                    r"\s*(?:,|\b(?:en|de))\s*genshin(?: impact)?$",
+                    "",
+                    _normalize(subject),
+                ).strip()
+                if not is_genshin_related_request(subject_for_domain):
+                    return f"asistente {raw[:300]}"
             if command in GENSHIN_COMMANDS and not is_genshin_related_request(text):
                 # Never route a generic app/platform/person question to Teyvat.
                 continue
