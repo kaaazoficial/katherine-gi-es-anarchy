@@ -122,9 +122,10 @@ def test_long_messages_are_split_into_blocks_of_at_most_2000_utf16_units():
 async def test_admin_cleanup_deletes_only_tracked_own_message_ids(monkeypatch):
     key = ("developer", "cleanup-room")
     bot_main.BOT_SENT_MESSAGES[key].clear()
+    now = bot_main.time.time()
     bot_main.BOT_SENT_MESSAGES[key].extend([
-        {"message_id": "own-1", "created_at": 1},
-        {"message_id": "own-2", "created_at": 2},
+        {"message_id": "own-1", "created_at": now},
+        {"message_id": "own-2", "created_at": now + 1},
     ])
     bot_main.BOT_SENT_MESSAGES[("community", "cleanup-room")].append(
         {"message_id": "other-bot", "created_at": 3}
