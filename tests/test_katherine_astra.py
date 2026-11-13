@@ -1,5 +1,6 @@
 """Regression tests for ASTRA NOVA pure intent and recovery helpers."""
 from katherine_astra import (
+    build_jamendo_download_url,
     is_livekit_audio_source_failure,
     is_recoverable_dj_failure,
     normalize_music_mood,
@@ -51,3 +52,12 @@ def test_dj_remote_download_http_errors_are_recoverable_but_voice_403_is_not():
     assert not is_recoverable_dj_failure(
         "No pude entrar a la llamada (HTTP 403): not_in_chat."
     )
+
+def test_jamendo_uses_authenticated_file_endpoint_and_validates_inputs():
+    url = build_jamendo_download_url("client-123", "1781193")
+    assert url == (
+        "https://api.jamendo.com/v3.0/tracks/file/"
+        "?client_id=client-123&id=1781193&audioformat=mp32"
+    )
+    assert build_jamendo_download_url("", "1781193") is None
+    assert build_jamendo_download_url("client-123", "not-a-track") is None

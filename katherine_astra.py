@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from urllib.parse import urlencode
 
 
 DJ_MOOD_QUERIES = {
@@ -31,6 +32,22 @@ def resolve_music_mood(value: str) -> str:
     normalized = normalize_music_mood(value)
     return DJ_MOOD_QUERIES.get(normalized, normalized or "ambient instrumental")
 
+
+
+def build_jamendo_download_url(client_id: str, track_id: str) -> str | None:
+    """Build Jamendo's documented authenticated file endpoint, not its raw storage URL."""
+    client = str(client_id or "").strip()
+    identifier = str(track_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{3,80}", client):
+        return None
+    if not re.fullmatch(r"\d{1,20}", identifier):
+        return None
+    params = urlencode({
+        "client_id": client,
+        "id": identifier,
+        "audioformat": "mp32",
+    })
+    return "https://api.jamendo.com/v3.0/tracks/file/?" + params
 
 def is_livekit_audio_source_failure(message: str | BaseException) -> bool:
     """Identify a disposed/invalid LiveKit audio source, not ordinary TTS errors."""

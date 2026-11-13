@@ -65,6 +65,7 @@ from katherine_nexus import (
     toggle_community_participant,
 )
 from katherine_astra import (
+    build_jamendo_download_url,
     is_livekit_audio_source_failure,
     is_recoverable_dj_failure,
     resolve_music_mood,
@@ -2892,11 +2893,9 @@ async def search_jamendo_audio(query: str, limit: int = 5) -> list[dict]:
             continue
         license_url = str(item.get("license_ccurl") or "")
         license_label = archive_license_label(license_url)
-        download_url = str(item.get("audiodownload") or "")
-        if not license_label or not dj_audio_url_allowed(download_url):
-            continue
         track_id = str(item.get("id") or "")
-        if not track_id:
+        download_url = build_jamendo_download_url(JAMENDO_CLIENT_ID, track_id)
+        if not license_label or not download_url or not dj_audio_url_allowed(download_url):
             continue
         tracks.append({
             "identifier": track_id,
@@ -2908,6 +2907,7 @@ async def search_jamendo_audio(query: str, limit: int = 5) -> list[dict]:
             "item_url": f"https://www.jamendo.com/track/{quote(track_id, safe='')}",
             "url": download_url,
             "extension": ".mp3",
+            "track_id": track_id,
             "source": "Jamendo",
             "source_key": "jamendo",
         })
@@ -3495,7 +3495,8 @@ async def download_dj_audio(url: str, file_extension: str | None = None) -> Path
                 content_type = response.headers.get("content-type", "").lower()
                 if "text/html" in content_type or "application/json" in content_type:
                     raise RuntimeError(
-                        "La fuente musical devolvió una página web en vez del audio."
+                        f"La fuente {urlparse(str(response.url)).hostname or 'musical'} "
+                        "devolvió una página web en vez del audio."
                     )
                 try:
                     content_length = int(response.headers.get("content-length", "0"))
