@@ -148,3 +148,12 @@ async def test_admin_cleanup_deletes_only_tracked_own_message_ids(monkeypatch):
     assert bot_main.BOT_SENT_MESSAGES[("community", "cleanup-room")][0]["message_id"] == "other-bot"
     bot_main.BOT_SENT_MESSAGES.pop(key, None)
     bot_main.BOT_SENT_MESSAGES.pop(("community", "cleanup-room"), None)
+
+
+
+def test_cleanup_command_is_privileged_and_not_available_to_public_ai():
+    from katherine_ai import AI_ADMIN_COMMANDS, AI_PUBLIC_COMMANDS, AI_PLAN_SAFE_COMMANDS
+    assert "!eliminarmensajes" in bot_main.ADMIN_ONLY_COMMANDS
+    assert "eliminarmensajes" in AI_ADMIN_COMMANDS
+    assert "eliminarmensajes" not in AI_PUBLIC_COMMANDS
+    assert "eliminarmensajes" not in AI_PLAN_SAFE_COMMANDS
