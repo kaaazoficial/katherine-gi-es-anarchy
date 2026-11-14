@@ -2290,7 +2290,7 @@ class KatherineAI:
         try:
             result = await self._request_assist_json(
                 instructions,
-                messages if not cacheable_simple else [{"role": "user", "content": text}],
+                messages if not cacheable_generic else [{"role": "user", "content": text}],
                 request_func,
                 rate_key=rate_key,
                 session_key=key,
