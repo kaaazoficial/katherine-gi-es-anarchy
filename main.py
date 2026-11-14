@@ -23,6 +23,57 @@ from email.utils import parsedate_to_datetime
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
+from contextvars import ContextVar
+from pathlib import Path
+from collections import defaultdict, deque
+from typing import Any
+from html.parser import HTMLParser
+from urllib.parse import urljoin, quote, urlparse, urlsplit, urlunsplit
+
+import httpx
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse, Response
+from katherine_config import SETTINGS
+from katherine_metrics import render_prometheus_metrics
+from katherine_matching import suggest_command
+from katherine_nexus import (
+    cleanup_community_events,
+    extract_message_id,
+    format_source_health,
+    interpret_natural_request,
+    should_execute_deterministic_fallback,
+    parse_command_invocation,
+    toggle_community_participant,
+)
+from katherine_astra import (
+    build_jamendo_download_url,
+    is_livekit_audio_source_failure,
+    is_recoverable_dj_failure,
+    resolve_music_mood,
+)
+from katherine_ai import (
+    AI_ADMIN_COMMANDS, AI_PLAN_SAFE_COMMANDS, AI_PUBLIC_COMMANDS,
+    KatherineAI, build_ai_session_key, build_ai_rate_key, is_bot_author, sanitize_ai_trace_text,
+    validate_ai_tool_call
+)
+from katherine_research import (
+    search_web, fetch_public_page, build_source_context, parse_research_mode,
+    is_safe_public_url,
+ )
+from katherine_game_queries import (
+    infer_genshin_data_folder,
+    strip_game_scope_qualifier,
+    unwrap_genshin_db_response,
+)
+from katherine_retention import cleanup_database_retention
+from katherine_storage import verify_sqlite_database
+from katherine_help import (
+    build_commands_help_blocks,
+    build_commands_help_text as _build_commands_help_text,
+    filter_commands_help_text,
+)
+
 try:
     import psutil
 except ImportError:
@@ -105,56 +156,7 @@ def load_tts_dependency() -> bool:
             logging.warning("[TTS] Edge TTS no está disponible: %s", type(exc).__name__)
             return False
 
-from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
-from contextvars import ContextVar
-from pathlib import Path
-from collections import defaultdict, deque
-from typing import Any
-from html.parser import HTMLParser
-from urllib.parse import urljoin, quote, urlparse, urlsplit, urlunsplit
 
-import httpx
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, Response
-from katherine_config import SETTINGS
-from katherine_metrics import render_prometheus_metrics
-from katherine_matching import suggest_command
-from katherine_nexus import (
-    cleanup_community_events,
-    extract_message_id,
-    format_source_health,
-    interpret_natural_request,
-    should_execute_deterministic_fallback,
-    parse_command_invocation,
-    toggle_community_participant,
-)
-from katherine_astra import (
-    build_jamendo_download_url,
-    is_livekit_audio_source_failure,
-    is_recoverable_dj_failure,
-    resolve_music_mood,
-)
-from katherine_ai import (
-    AI_ADMIN_COMMANDS, AI_PLAN_SAFE_COMMANDS, AI_PUBLIC_COMMANDS,
-    KatherineAI, build_ai_session_key, build_ai_rate_key, is_bot_author, sanitize_ai_trace_text,
-    validate_ai_tool_call
-)
-from katherine_research import (
-    search_web, fetch_public_page, build_source_context, parse_research_mode,
-    is_safe_public_url,
- )
-from katherine_game_queries import (
-    infer_genshin_data_folder,
-    strip_game_scope_qualifier,
-    unwrap_genshin_db_response,
-)
-from katherine_retention import cleanup_database_retention
-from katherine_storage import verify_sqlite_database
-from katherine_help import (
-    build_commands_help_blocks,
-    build_commands_help_text as _build_commands_help_text,
-    filter_commands_help_text,
-)
 
 AI_CORE = KatherineAI()
 AI_TOOL_OUTPUT_CAPTURE: ContextVar[list[str] | None] = ContextVar(
