@@ -1305,9 +1305,13 @@ class KatherineAI:
         bucket = self._token_usage_minute_buckets.setdefault(
             minute, {"input_tokens": 0, "output_tokens": 0, "responses": 0}
         )
-        bucket["input_tokens"] += max(0, int(input_tokens))
-        bucket["output_tokens"] += max(0, int(output_tokens))
+        input_value = max(0, int(input_tokens))
+        output_value = max(0, int(output_tokens))
+        bucket["input_tokens"] += input_value
+        bucket["output_tokens"] += output_value
         bucket["responses"] += 1
+        self.metrics["ai_provider_input_tokens"] += input_value
+        self.metrics["ai_provider_output_tokens"] += output_value
         self._token_usage_minute_buckets.move_to_end(minute)
 
         oldest_minute = minute - 59
@@ -1318,6 +1322,18 @@ class KatherineAI:
             self._token_usage_minute_buckets.popitem(last=False)
 
         self.metrics["ai_provider_token_usage_responses"] += 1
+        provider = str(self.provider_name)[:48]
+        model = str(self.model)[:96]
+        totals = self._provider_usage.setdefault(
+            (provider, model),
+            {"responses": 0, "input_tokens": 0, "output_tokens": 0},
+        )
+        totals["responses"] += 1
+        totals["input_tokens"] += input_value
+        totals["output_tokens"] += output_value
+        self._provider_usage.move_to_end((provider, model))
+        while len(self._provider_usage) > 12:
+            self._provider_usage.popitem(last=False)
 
     def token_usage_snapshot(self, *, now: float | None = None) -> dict[str, int | float | None]:
         """Return privacy-safe totals, averages, last-hour usage and a cautious daily projection."""
@@ -1363,11 +1379,53 @@ class KatherineAI:
         }
 
     def provider_usage_snapshot(self) -> list[dict[str, Any]]:
-        """Aggregate token totals by provider/model; never include user/session data."""
-        return [
-            {"provider": provider, "model": model, **dict(values)}
-            for (provider, model), values in list(self._provider_usage.items())[-12:]
-        ]
+        """Return per-provider/model token totals with transparent USD estimates."""
+        # Public standard paid-tier prices, USD per 1M tokens. Override with
+        # KATHERINE_AI_COST_RATES JSON: {"Google Gemini|model":{"input":0.3,"output":2.5}}.
+        rates: dict[tuple[str, str], dict[str, float]] = {
+            ("google gemini", "gemini-3.5-flash-lite"): {"input": 0.30, "output": 2.50},
+            ("groq", "openai/gpt-oss-20b"): {"input": 0.075, "output": 0.30},
+        }
+        raw_rates = (os.getenv("KATHERINE_AI_COST_RATES") or "").strip()
+        if raw_rates:
+            try:
+                configured = json.loads(raw_rates)
+            except (TypeError, ValueError):
+                configured = {}
+            if isinstance(configured, dict):
+                for key, value in configured.items():
+                    if not isinstance(key, str) or "|" not in key or not isinstance(value, dict):
+                        continue
+                    provider, model = (part.strip().casefold() for part in key.split("|", 1))
+                    try:
+                        input_rate = float(value["input"])
+                        output_rate = float(value["output"])
+                    except (KeyError, TypeError, ValueError, OverflowError):
+                        continue
+                    if (
+                        input_rate >= 0 and output_rate >= 0
+                        and input_rate < 1_000_000 and output_rate < 1_000_000
+                    ):
+                        rates[(provider, model)] = {
+                            "input": input_rate, "output": output_rate
+                        }
+
+        result: list[dict[str, Any]] = []
+        for (provider, model), values in self._provider_usage.items():
+            rate = rates.get((provider.casefold(), model.casefold()))
+            item: dict[str, Any] = {
+                "provider": provider,
+                "model": model,
+                **dict(values),
+                "cost_known": rate is not None,
+            }
+            if rate is not None:
+                item["estimated_cost_usd"] = (
+                    values["input_tokens"] * rate["input"]
+                    + values["output_tokens"] * rate["output"]
+                ) / 1_000_000
+            result.append(item)
+        return result
 
     def _cache_completed_simple_answer(self, cache_key: str, task: asyncio.Task) -> None:
         if self._simple_request_inflight.get(cache_key) is task:
@@ -2295,15 +2353,6 @@ class KatherineAI:
             if self.is_gemini
             else payload.get("usage", {})
         )
-        usage_key = (self.provider_name[:48], self.model[:96])
-        provider_totals = self._provider_usage.setdefault(
-            usage_key, {"responses": 0, "input_tokens": 0, "output_tokens": 0}
-        )
-        self._provider_usage.move_to_end(usage_key)
-        while len(self._provider_usage) > 12:
-            self._provider_usage.popitem(last=False)
-        provider_totals["responses"] += 1
-
         response_input_tokens = 0
         response_output_tokens = 0
         usage_reported = False
@@ -2327,9 +2376,7 @@ class KatherineAI:
                     numeric_value = max(0, int(value or 0))
                 except (TypeError, ValueError, OverflowError):
                     continue
-                self.metrics[key] += numeric_value
                 target = "input_tokens" if key.endswith("input_tokens") else "output_tokens"
-                provider_totals[target] += numeric_value
                 if target == "input_tokens":
                     response_input_tokens = numeric_value
                 else:
