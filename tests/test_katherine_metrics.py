@@ -59,7 +59,7 @@ def test_metrics_export_includes_ai_provider_and_delivery_signals():
 
 
 def test_metrics_export_includes_bounded_provider_model_token_totals():
-    payload, _ = render_prometheus_metrics(provider_usage=[{
+    payload, _ = render_prometheus_metrics({}, provider_usage=[{
         "provider": "Google Gemini", "model": "gemini-test-model",
         "responses": 3, "input_tokens": 120, "output_tokens": 45,
     }])

@@ -12,7 +12,7 @@ import os
 import re
 import time
 from email.utils import parsedate_to_datetime
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from typing import Any, Awaitable, Callable
 
 from katherine_topics import is_genshin_related_request, normalize_topic_text
@@ -846,6 +846,11 @@ class KatherineAI:
         self._last_provider_summary: dict[str, str] | None = None
         self._rate_limit_salt = secrets.token_bytes(16)
         self._user_request_windows: dict[str, deque[float]] = {}
+        self._simple_answer_cache: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
+        self._simple_request_inflight: dict[str, asyncio.Task] = {}
+        self._simple_answer_cache_ttl = 45.0
+        self._simple_answer_cache_limit = 64
+        self._provider_usage: OrderedDict[tuple[str, str], dict[str, int]] = OrderedDict()
         self._provider_override: ContextVar[dict[str, str] | None] = ContextVar(
             f"katherine_ai_provider_override_{id(self)}", default=None
         )
@@ -1163,6 +1168,142 @@ class KatherineAI:
             "[AI_LATENCY] proveedor=%s modelo=%s intento=%s tiempo_ms=%.0f",
             self.provider_name, self.model, attempt, elapsed * 1000,
         )
+
+    def provider_usage_snapshot(self) -> list[dict[str, Any]]:
+        """Aggregate token totals by provider/model; never include user/session data."""
+        return [
+            {"provider": provider, "model": model, **dict(values)}
+            for (provider, model), values in list(self._provider_usage.items())[-12:]
+        ]
+
+    def _cache_completed_simple_answer(self, cache_key: str, task: asyncio.Task) -> None:
+        if self._simple_request_inflight.get(cache_key) is task:
+            self._simple_request_inflight.pop(cache_key, None)
+        if task.cancelled():
+            return
+        try:
+            result = task.result()
+        except Exception:
+            return
+        if (
+            not isinstance(result, dict)
+            or result.get("kind") != "answer"
+            or result.get("fallback")
+            or not str(result.get("answer") or "").strip()
+        ):
+            return
+        self._simple_answer_cache[cache_key] = (
+            time.monotonic() + self._simple_answer_cache_ttl,
+            dict(result),
+        )
+        self._simple_answer_cache.move_to_end(cache_key)
+        while len(self._simple_answer_cache) > self._simple_answer_cache_limit:
+            self._simple_answer_cache.popitem(last=False)
+
+    def _simple_cache_key(
+        self,
+        instructions: str,
+        messages: list[dict[str, str]],
+        rate_key: str | None,
+        session_key: str,
+        difficulty: str,
+    ) -> str:
+        identity = str(rate_key or session_key)
+        scope_hash = hashlib.sha256(
+            self._rate_limit_salt + identity.encode("utf-8", "replace")
+        ).hexdigest()
+        material = json.dumps(
+            {
+                "scope": scope_hash,
+                "provider": self._primary_provider_config().get("name"),
+                "model": self._primary_provider_config().get("model"),
+                "difficulty": difficulty,
+                "instructions": instructions,
+                "messages": messages,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()
+
+    async def _request_assist_json(
+        self,
+        instructions: str,
+        messages: list[dict[str, str]],
+        request_func: RequestFunc,
+        *,
+        rate_key: str | None,
+        session_key: str,
+        difficulty: str,
+        cacheable: bool,
+    ) -> dict[str, str]:
+        if not cacheable:
+            return await self._request_json(
+                instructions,
+                messages,
+                request_func,
+                rate_key=rate_key or session_key,
+                difficulty=difficulty,
+            )
+        # Cache hits still count toward the user's normal rate limit.
+        self._enforce_user_rate_limit(rate_key or session_key)
+        cache_key = self._simple_cache_key(
+            instructions, messages, rate_key, session_key, difficulty
+        )
+        now = time.monotonic()
+        for old_key, (expires_at, _) in list(self._simple_answer_cache.items()):
+            if expires_at <= now:
+                self._simple_answer_cache.pop(old_key, None)
+
+        cached = self._simple_answer_cache.get(cache_key)
+        if cached and cached[0] > now:
+            self._simple_answer_cache.move_to_end(cache_key)
+            self.metrics["ai_cache_hits"] += 1
+            return dict(cached[1])
+
+        task = self._simple_request_inflight.get(cache_key)
+        if task is not None:
+            self.metrics["ai_singleflight_waits"] += 1
+        else:
+            self.metrics["ai_cache_misses"] += 1
+            task = asyncio.create_task(
+                self._request_json(
+                    instructions,
+                    messages,
+                    request_func,
+                    rate_key=None,
+                    difficulty=difficulty,
+                )
+            )
+            self._simple_request_inflight[cache_key] = task
+            task.add_done_callback(
+                lambda done, key=cache_key: self._cache_completed_simple_answer(key, done)
+            )
+        return dict(await asyncio.shield(task))
+
+    @staticmethod
+    def is_contextual_followup(
+        value: str, history: list[dict[str, str]]
+    ) -> bool:
+        """Keep old turns only when the current question clearly refers to them."""
+        if not history:
+            return False
+        text = normalize_topic_text(value)
+        if len(text) > 110:
+            return False
+        markers = (
+            "y por que", "y como", "y entonces", "y eso", "y ese", "y esa",
+            "y el", "y ella", "y ellos", "que dijiste", "lo anterior",
+            "esa respuesta", "a que te refieres", "como asi", "por que eso",
+            "y despues", "y luego", "que significa eso",
+        )
+        if any(text.startswith(marker) for marker in markers):
+            return True
+        return bool(re.search(
+            r"\b(?:eso|ese|esa|ello|ellos|ellas|aquello|ahi|alli|lo anterior)\b",
+            text,
+        ))
 
     def _history(self, key: str) -> list[dict[str, str]]:
         now = time.time()

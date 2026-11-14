@@ -1,5 +1,5 @@
-import asyncio
 """Tests for the bounded Katherine AI integration."""
+import asyncio
 import json
 import time
 import pytest
