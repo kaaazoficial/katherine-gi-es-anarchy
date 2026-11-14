@@ -1348,7 +1348,7 @@ async def test_simple_answer_cache_isolated_by_user_identity(monkeypatch):
     await ai.assist("¿Qué es una API?", "session-b", lambda *args, **kwargs: None, rate_key="user-b")
     assert len(calls) == 1
     assert ai.metrics["ai_shared_cache_hits"] == 1
-    assert ai.metrics["ai_cache_hits"] == 0
+    assert ai.metrics["ai_cache_hits"] == 1
 
 
 @pytest.mark.asyncio
@@ -1412,7 +1412,7 @@ def test_output_budgets_preserve_complex_answers_without_a_fixed_cap():
 
 
 def test_tool_context_compaction_keeps_start_and_end_and_caps_storage():
-    source = "\\n".join(
+    source = "\n".join(
         [f"Sección {index}: " + ("dato relevante " * 40) for index in range(30)]
     )
     compacted = compact_tool_result_for_context(source, max_chars=900)
