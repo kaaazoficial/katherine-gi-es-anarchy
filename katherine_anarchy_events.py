@@ -80,14 +80,15 @@ def _participant(event: dict) -> tuple[str, str] | None:
     return uid, name or uid[:24]
 
 
-def _speaking_value(event: dict) -> bool:
+def _speaking_value(event: dict, default: bool = False) -> bool:
     for item in _containers(event):
-        for field in ("isSpeaking", "is_speaking", "speaking", "isActive", "active"):
+        for field in (
+            "speaker", "isSpeaking", "is_speaking", "speaking", "isActive", "active"
+        ):
             parsed = _as_bool(item.get(field))
             if parsed is not None:
                 return parsed
-    # El evento room.speaker indica que el participante pasa a ser emisor.
-    return True
+    return default
 
 
 def _prune(now: float) -> None:
@@ -154,7 +155,9 @@ def update_voice_room_event(event: dict, now: float | None = None) -> bool:
     participant = participants.get(uid, {})
     participant.update({
         "name": name,
-        "speaking": _speaking_value(event) if kind == "room.speaker" else bool(participant.get("speaking")),
+        "speaking": _speaking_value(
+            event, default=bool(participant.get("speaking"))
+        ),
         "last_seen": timestamp,
     })
     participants[uid] = participant
