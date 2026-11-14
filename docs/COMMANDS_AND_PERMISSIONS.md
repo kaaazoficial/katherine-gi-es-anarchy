@@ -1,6 +1,6 @@
 # Katherine · Catálogo y permisos de comandos
 
-El catálogo clásico se genera con `!ayuda` y `!comandos`. Los comandos de IA tienen ayuda separada mediante `!ia ayuda`; ambos deben mantenerse sincronizados con sus manejadores.
+La ayuda del chat (`!ayuda` / `!comandos`) es una guía rápida y compacta por categorías; `!menu` abre el panel interactivo. Este documento conserva el catálogo técnico y los permisos completos. La IA tiene ayuda separada mediante `!ia ayuda`; los manejadores y las listas de permisos son la fuente de verdad.
 
 ## Investigación y herramientas universales
 

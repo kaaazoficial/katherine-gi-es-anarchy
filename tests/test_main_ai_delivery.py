@@ -432,3 +432,91 @@ async def test_research_source_links_are_preserved_only_when_explicitly_allowed(
         "Fuente [interna](https://127.0.0.1/admin)", allow_safe_links=True
     )
     assert "127.0.0.1" not in unsafe
+
+
+
+def test_reply_reference_accepts_flat_and_nested_webhook_shapes():
+    flat_id, flat_text = bot_main.extract_reply_reference({"replyMessageId": "katherine-1"})
+    nested_id, nested_text = bot_main.extract_reply_reference({
+        "replyTo": {"message": {"id": "katherine-2", "content": "Respuesta anterior"}},
+    })
+    assert flat_id == "katherine-1" and flat_text == ""
+    assert nested_id == "katherine-2" and nested_text == "Respuesta anterior"
+
+
+def test_only_confirmed_katherine_messages_trigger_reply_routing():
+    key = ("developer", "reply-room")
+    bot_main.BOT_SENT_MESSAGES[key].clear()
+    bot_main.BOT_SENT_MESSAGES[key].append({
+        "message_id": "katherine-known", "created_at": bot_main.time.time(),
+    })
+    assert bot_main.is_known_katherine_message("katherine-known", "developer", "reply-room")
+    assert not bot_main.is_known_katherine_message("another-user-id", "developer", "reply-room")
+    bot_main.BOT_SENT_MESSAGES.pop(key, None)
+
+
+@pytest.mark.asyncio
+async def test_reply_to_katherine_routes_plain_text_to_assistant(monkeypatch):
+    key = ("developer", "reply-route-room")
+    bot_main.BOT_SENT_MESSAGES[key].clear()
+    bot_main.BOT_SENT_MESSAGES[key].append({
+        "message_id": "katherine-reply-target", "created_at": bot_main.time.time(),
+    })
+    monkeypatch.setattr(bot_main, "check_antispam_message", lambda *_: (False, None))
+    monkeypatch.setattr(bot_main.AI_CORE, "record_chat_message", lambda *args, **kwargs: False)
+
+    async def no_speech(*_args, **_kwargs):
+        return None
+    monkeypatch.setattr(bot_main, "enqueue_message_for_speech", no_speech)
+    monkeypatch.setattr(bot_main, "interpret_natural_request", lambda _text: None)
+    captured = []
+
+    async def capture_command(event, source):
+        captured.append((event, source))
+    monkeypatch.setattr(bot_main, "handle_command", capture_command)
+    await bot_main.dispatch({
+        "type": "message", "threadId": "reply-route-room",
+        "message": {
+            "messageId": "user-reply-message",
+            "replyMessageId": "katherine-reply-target",
+            "content": "¿Puedes explicar un poco más?",
+            "author": {"uid": "user-1", "nickname": "Usuario"},
+        },
+    }, "developer")
+    assert len(captured) == 1
+    routed_event, source = captured[0]
+    assert source == "developer"
+    assert routed_event["message"]["content"].startswith("!asistente ")
+    assert routed_event["message"]["messageId"] == "user-reply-message"
+    assert bot_main.metrics["ai_reply_triggers"] >= 1
+    bot_main.BOT_SENT_MESSAGES.pop(key, None)
+
+
+@pytest.mark.asyncio
+async def test_stopping_music_keeps_katherine_connected_to_livekit():
+    room = type("FakeRoom", (), {"disconnected": False})()
+    key = "keep-call-room"
+    state = {
+        "room": room, "stop_event": bot_main.asyncio.Event(),
+        "playback_stop_event": bot_main.asyncio.Event(), "task": None,
+        "speech_task": None, "queue": bot_main.deque(),
+        "filename": "track.mp3", "track": {"title": "track"},
+        "temporary_audio_path": None,
+    }
+    bot_main.DJ_ROOMS[key] = state
+    try:
+        assert await bot_main.stop_dj_playback(key)
+        assert bot_main.DJ_ROOMS[key] is state
+        assert not state["stop_event"].is_set()
+        assert state["playback_stop_event"].is_set()
+        assert state["filename"] is None and state["track"] is None
+        assert not room.disconnected
+    finally:
+        bot_main.DJ_ROOMS.pop(key, None)
+
+
+def test_command_help_is_compact_and_keeps_main_categories():
+    help_text = bot_main.build_commands_help_text()
+    assert len(help_text) < 1500
+    assert "TEYVAT" in help_text and "MÚSICA Y VOZ" in help_text
+    assert "!menu" in help_text and "UID autorizado" in help_text
