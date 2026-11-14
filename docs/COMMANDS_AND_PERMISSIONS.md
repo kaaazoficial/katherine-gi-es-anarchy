@@ -33,6 +33,8 @@ Los eventos se crean libremente; solo su creador o un UID administrador puede ce
 ### Métricas y sugerencias de comandos
 
 - `!metricas` muestra solo métricas agregadas del proceso y requiere UID administrador.
+  Incluye promedios por respuesta con tokens informados, totales de los últimos 60 minutos y una proyección diaria solo tras 5 minutos y 3 observaciones. La proyección se calcula desde el arranque del proceso y no representa consumo real ni facturación.
+  Los contadores y las ventanas temporales viven solo en RAM y se reinician con el proceso; no se guardan usuarios, salas ni conversaciones.
 - `GET /metrics` expone métricas Prometheus sin etiquetas de usuario, sala o mensaje. Puede protegerse configurando `PROMETHEUS_METRICS_TOKEN` en Render; cuando se configura, requiere `Authorization: Bearer <token>`.
 - Si se escribe mal un comando, Katherine puede sugerir una coincidencia de alta confianza. La sugerencia nunca ejecuta el comando automáticamente.
 
