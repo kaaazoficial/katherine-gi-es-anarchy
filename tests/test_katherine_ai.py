@@ -1547,3 +1547,14 @@ def test_admin_intent_hints_select_only_privileged_tools_when_authorized():
     assert public == frozenset()
     assert admin == frozenset({"advertir", "advertencias", "quitaradvertencia"})
 
+
+def test_ai_tool_selection_does_not_match_incidental_command_words():
+    from katherine_ai import AI_PUBLIC_COMMANDS, select_ai_tool_commands
+
+    selected = select_ai_tool_commands(
+        "Katherine, crea una lista de libros para leer",
+        AI_PUBLIC_COMMANDS,
+        "action",
+    )
+    assert selected == frozenset()
+

@@ -751,7 +751,9 @@ def select_ai_tool_commands(
     # Explicit command names are useful for follow-ups, but never expand the
     # caller's allowlist. For example, an ordinary member cannot expose admin tools.
     for name in allowed:
-        if re.search(rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])", text):
+        # Only an explicit !command spelling is treated as a direct reference.
+        # Natural-language words such as "lista" must not accidentally expose tools.
+        if re.search(rf"(?<!\w)!{re.escape(name)}(?!\w)", text):
             selected.add(name)
 
     hint_groups = (
@@ -772,9 +774,6 @@ def select_ai_tool_commands(
 
     if intent == "genshin" and not selected:
         selected.update({"enciclopedia", "buscargenshin"})
-    if intent == "action" and not selected:
-        # Keep a tiny read-only fallback for underspecified but explicit actions.
-        selected.update({"ayuda", "fecha", "perfil", "puntos"})
     if intent == "multi_action":
         selected.intersection_update(AI_PLAN_SAFE_COMMANDS)
 
