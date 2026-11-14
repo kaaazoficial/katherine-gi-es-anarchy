@@ -115,24 +115,24 @@ def _normalize_expression(value: str) -> str:
     expression = expression.replace("^", "**")
     expression = re.sub(r"\bpi\b", "pi", expression, flags=re.IGNORECASE)
     expression = re.sub(r"\braiz\s*\(", "sqrt(", expression, flags=re.IGNORECASE)
+    if (
+        not re.search(r"[A-Za-z()]|,", expression.replace(",", "", 1))
+        and expression.count(",") == 1
+        and "." not in expression
+    ):
+        expression = expression.replace(",", ".")
     percent_of = re.fullmatch(
-        r"\s*(-?\d+(?:[.,]\d+)?)\s*%\s*(?:de|of)\s*(-?\d+(?:[.,]\d+)?)\s*",
+        r"\s*(-?\d+(?:\.\d+)?)\s*%\s*(?:de|of)\s*(-?\d+(?:\.\d+)?)\s*",
         expression,
         flags=re.IGNORECASE,
     )
     if percent_of:
-        percentage = percent_of.group(1).replace(",", ".")
-        amount = percent_of.group(2).replace(",", ".")
+        percentage = percent_of.group(1)
+        amount = percent_of.group(2)
         expression = f"({percentage}/100)*({amount})"
-    elif re.fullmatch(r"\s*-?\d+(?:[.,]\d+)?\s*%\s*", expression):
-        expression = expression.replace(",", ".").strip().rstrip("%").strip()
+    elif re.fullmatch(r"\s*-?\d+(?:\.\d+)?\s*%\s*", expression):
+        expression = expression.strip().rstrip("%").strip()
         expression = f"({expression}/100)"
-    elif not re.search(r"[A-Za-z()]|,", expression) and expression.count(".") == 0:
-        pass
-    elif not re.search(r"[A-Za-z()]|,", expression):
-        pass
-    elif not re.search(r"[A-Za-z()]|,", expression) and expression.count(",") == 1:
-        expression = expression.replace(",", ".")
 
     return expression
 
