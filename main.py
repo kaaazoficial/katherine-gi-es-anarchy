@@ -47,7 +47,6 @@ from katherine_nexus import (
     toggle_community_participant,
 )
 from katherine_astra import (
-    build_jamendo_download_url,
     is_livekit_audio_source_failure,
     is_recoverable_dj_failure,
     resolve_music_mood,
