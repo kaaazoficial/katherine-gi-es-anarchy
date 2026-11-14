@@ -1,12 +1,14 @@
-# Katherine — Anarchy Apps
+# Katherine — Genshin Impact ES en Anarchy
 
-Katherine es un bot modular para Anarchy Apps, desarrollado en Python con FastAPI. Integra comandos, moderación, herramientas sociales, asistencia conversacional, investigación web, música y voz.
+Katherine es el bot comunitario de Genshin Impact ES en Anarchy, desarrollado en Python con FastAPI. Anarchy Apps es su plataforma anfitriona. Integra comandos de Genshin, moderación, herramientas sociales, asistencia conversacional, investigación web, música y voz.
 
 ## Arquitectura
-- `main.py`: webhook, despacho de eventos, comandos, interacciones y voz.
-- `katherine_ai.py`: integración IA, clasificación de intención y contexto temporal en memoria.
+- `main.py`: orquestación de webhooks, despacho y compatibilidad con los comandos de Anarchy.
+- `katherine_database.py`: conexiones, transacciones y creación del esquema SQLite.
+- `katherine_ai.py`: núcleo de IA, proveedores Gemini/Groq, validación de herramientas y contexto temporal.
 - `katherine_nexus.py`: interpretación determinista de solicitudes naturales.
 - `katherine_research.py`: búsqueda y preparación de fuentes públicas.
+- `katherine_link_analysis.py`, `katherine_images.py`, `katherine_utilities.py`: inspección automática de enlaces, validación de imágenes y cálculo seguro.
 - `katherine_config.py`, `katherine_matching.py`, `katherine_metrics.py`: configuración, coincidencias y métricas.
 - `tests/`: pruebas unitarias y de regresión.
 
@@ -25,4 +27,4 @@ Las dependencias de audio/voz son opcionales en pruebas aisladas.
 ## Persistencia y despliegue
 `render.yaml` declara un servicio Free y no declara un Persistent Disk ni una base de datos externa. Por tanto, el repositorio por sí solo no garantiza persistencia de SQLite entre sustituciones o reinicios del contenedor. El proceso detecta un montaje externo y advierte si no lo encuentra, pero esa comprobación no revela si el panel tiene recursos añadidos manualmente. Antes de depender de datos persistentes, verifica el almacenamiento real en el proveedor y configura una base de datos o volumen compatible. Esta auditoría no modifica el plan ni la infraestructura. Configura secretos únicamente en el panel del proveedor, nunca en Git.
 
-Consulta [docs/COMMANDS_AND_PERMISSIONS.md](docs/COMMANDS_AND_PERMISSIONS.md) para comandos y permisos.
+El despacho principal permanece en `main.py`; las responsabilidades estables se separan en módulos específicos para reducir acoplamiento. Consulta [docs/COMMANDS_AND_PERMISSIONS.md](docs/COMMANDS_AND_PERMISSIONS.md) para comandos y permisos.
