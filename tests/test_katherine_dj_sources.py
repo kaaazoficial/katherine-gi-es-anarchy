@@ -79,6 +79,8 @@ def test_dj_source_cooldown_is_host_scoped_and_expires(monkeypatch):
     assert katherine.dj_source_is_cooled("prod-1.storage.jamendo.com")
     assert not katherine.dj_source_is_cooled("upload.wikimedia.org")
     assert not katherine.dj_source_is_cooled("prod-1.storage.jamendo.com", now=701.0)
+    # Do not leak a synthetic monotonic timestamp into other catalog tests.
+    katherine.DJ_SOURCE_COOLDOWNS.clear()
 
 
 def test_dj_remote_limits_are_bounded_for_free_instance():
