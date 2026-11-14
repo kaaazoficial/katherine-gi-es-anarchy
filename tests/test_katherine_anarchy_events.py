@@ -35,7 +35,7 @@ def test_room_join_and_speaker_events_track_transient_participants():
     assert len(participants) == 1
     assert participants[0]["name"] == "Viajero"
     assert participants[0]["speaking"] is True
-    output = format_voice_state("room-1")
+    output = format_voice_state("room-1", now=102)
     assert "Viajero" in output
     assert "secret" not in output
 
@@ -112,6 +112,6 @@ def test_voice_formatter_does_not_expose_user_uids():
         "type": "room.join", "threadId": "room-1",
         "author": {"uid": "secret-uid-123", "nickname": "Viajero"},
     }, now=100)
-    output = format_voice_state("room-1")
+    output = format_voice_state("room-1", now=100)
     assert "Viajero" in output
     assert "secret-uid-123" not in output
