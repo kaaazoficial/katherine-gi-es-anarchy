@@ -254,6 +254,20 @@ GEMINI_ACTION_SCHEMA = {
 }
 
 
+ANSWER_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {"answer": {"type": "string"}},
+    "required": ["answer"],
+}
+
+GEMINI_ANSWER_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {"answer": {"type": "STRING"}},
+    "required": ["answer"],
+}
+
+
 def sanitize_ai_trace_text(value: Any, limit: int = 2400) -> str:
     """Redact obvious credentials and personal identifiers before temporary diagnostics."""
     text = str(value or "")
@@ -325,6 +339,12 @@ def resolve_community_faq(question: str) -> str | None:
     greeting = text.removesuffix(" katherine")
     if greeting in {"hola", "buenas", "buenos dias", "buenas tardes", "buenas noches"}:
         return "¡Hola! ¿Qué hacemos hoy?"
+    if greeting in {"gracias", "muchas gracias", "te lo agradezco", "se agradece"}:
+        return "¡De nada! Me alegra poder ayudar."
+    if greeting in {"adios", "hasta luego", "nos vemos", "me voy"}:
+        return "¡Hasta luego! Cuídate."
+    if greeting in {"como estas", "como te va", "todo bien"}:
+        return "¡Todo bien por aquí! Lista para conversar o ayudarte con algo."
 
     creator = (
         "quien es tu creador", "quien fue tu creador", "quien es su creador",
@@ -585,6 +605,36 @@ def classify_request_difficulty(value: str, intent: str = "conversation") -> str
     return "standard"
 
 
+def output_token_budget_for_difficulty(difficulty: str) -> int | None:
+    """Bound only routine replies; complex/research answers remain uncapped."""
+    return {"simple": 256, "standard": 640}.get(
+        str(difficulty or "standard").casefold()
+    )
+
+
+def compact_tool_result_for_context(value: Any, max_chars: int = 1600) -> str:
+    """Compact a tool result for ephemeral follow-up context, never the chat output."""
+    text = re.sub(r"[\t ]+", " ", str(value or ""))
+    lines = []
+    previous = None
+    for raw_line in text.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line or re.fullmatch(r"[-=_*|•· ]{3,}", line):
+            continue
+        if line != previous:
+            lines.append(line)
+        previous = line
+    clean = " ".join(lines) if lines else " ".join(text.split())
+    limit = max(300, min(4000, int(max_chars)))
+    if len(clean) <= limit:
+        return clean
+    head_limit = int(limit * 0.68)
+    tail_limit = limit - head_limit
+    head = clean[:head_limit].rsplit(" ", 1)[0].rstrip()
+    tail = clean[-tail_limit:].lstrip()
+    return f"{head} …[contenido intermedio omitido solo en el contexto]… {tail}"
+
+
 def select_ai_tool_commands(
     request_text: str,
     allowed_commands: set[str] | frozenset[str] | None = None,
@@ -690,12 +740,16 @@ def build_ai_instructions(
         "HERRAMIENTAS:\n" + "\n".join(catalog)
         if catalog else "SIN HERRAMIENTAS."
     )
-    return (
-        BASE_INSTRUCTIONS + "\n" + intent_text + "\n" + tool_text
-        + "\nJSON requerido: kind, answer, command, args, steps. "
-        + "answer: command/args vacíos y steps=[]; command: steps=[]; "
-        + "plan: 1-3 pasos válidos."
+    output_contract = (
+        "JSON requerido: objeto con únicamente answer (texto)."
+        if intent == "conversation"
+        else (
+            "JSON requerido: kind, answer, command, args, steps. "
+            "answer: command/args vacíos y steps=[]; command: steps=[]; "
+            "plan: 1-3 pasos válidos."
+        )
     )
+    return BASE_INSTRUCTIONS + "\n" + intent_text + "\n" + tool_text + "\n" + output_contract
 
 
 def validate_ai_tool_call(
@@ -1208,9 +1262,10 @@ class KatherineAI:
         session_key: str,
         difficulty: str,
     ) -> str:
-        identity = str(rate_key or session_key)
+        # Only generic, history-free, non-personal requests reach this cache.
+        # Its shared scope lets identical safe questions reuse one short-lived answer.
         scope_hash = hashlib.sha256(
-            self._rate_limit_salt + identity.encode("utf-8", "replace")
+            self._rate_limit_salt + b"shared-generic-answers"
         ).hexdigest()
         material = json.dumps(
             {
@@ -1237,14 +1292,23 @@ class KatherineAI:
         session_key: str,
         difficulty: str,
         cacheable: bool,
+        response_mode: str = "action",
+        max_output_tokens: int | None = None,
     ) -> dict[str, str]:
         if not cacheable:
+            self.metrics["ai_output_budgeted_requests" if max_output_tokens is not None else "ai_output_unbounded_requests"] += 1
+            if max_output_tokens is not None:
+                self.metrics["ai_output_budget_tokens"] += max_output_tokens
+            if response_mode == "answer":
+                self.metrics["ai_answer_schema_requests"] += 1
             return await self._request_json(
                 instructions,
                 messages,
                 request_func,
                 rate_key=rate_key or session_key,
                 difficulty=difficulty,
+                response_mode=response_mode,
+                max_output_tokens=max_output_tokens,
             )
         # Cache hits still count toward the user's normal rate limit.
         self._enforce_user_rate_limit(rate_key or session_key)
@@ -1260,6 +1324,7 @@ class KatherineAI:
         if cached and cached[0] > now:
             self._simple_answer_cache.move_to_end(cache_key)
             self.metrics["ai_cache_hits"] += 1
+            self.metrics["ai_shared_cache_hits"] += 1
             return dict(cached[1])
 
         task = self._simple_request_inflight.get(cache_key)
@@ -1267,6 +1332,12 @@ class KatherineAI:
             self.metrics["ai_singleflight_waits"] += 1
         else:
             self.metrics["ai_cache_misses"] += 1
+            self.metrics["ai_shared_cache_misses"] += 1
+            self.metrics["ai_output_budgeted_requests" if max_output_tokens is not None else "ai_output_unbounded_requests"] += 1
+            if max_output_tokens is not None:
+                self.metrics["ai_output_budget_tokens"] += max_output_tokens
+            if response_mode == "answer":
+                self.metrics["ai_answer_schema_requests"] += 1
             task = asyncio.create_task(
                 self._request_json(
                     instructions,
@@ -1274,6 +1345,8 @@ class KatherineAI:
                     request_func,
                     rate_key=None,
                     difficulty=difficulty,
+                    response_mode=response_mode,
+                    max_output_tokens=max_output_tokens,
                 )
             )
             self._simple_request_inflight[cache_key] = task
@@ -1332,9 +1405,14 @@ class KatherineAI:
 
     def remember_tool_result(self, session_key: str, command: str, result: str) -> None:
         """Keep a bounded, factual tool result for follow-up questions in this session."""
-        clean_result = " ".join(str(result or "").split())
-        if not clean_result:
-            clean_result = "El comando se ejecutó, pero no produjo una respuesta textual."
+        original = " ".join(str(result or "").split())
+        if not original:
+            original = "El comando se ejecutó, pero no produjo una respuesta textual."
+        clean_result = compact_tool_result_for_context(original)
+        self.metrics["ai_tool_context_chars_original"] += len(original)
+        self.metrics["ai_tool_context_chars_stored"] += len(clean_result)
+        if len(clean_result) < len(original):
+            self.metrics["ai_tool_context_compactions"] += 1
         self._append_history(
             session_key,
             "assistant",
@@ -1624,6 +1702,7 @@ class KatherineAI:
         max_input_messages: int | None = None,
         max_output_tokens: int | None = None,
         difficulty: str = "standard",
+        response_mode: str = "action",
     ) -> dict[str, str]:
         self._enforce_user_rate_limit(rate_key)
         primary = self._primary_provider_config()
@@ -1693,6 +1772,7 @@ class KatherineAI:
                     rate_key=rate_key,
                     max_input_messages=max_input_messages,
                     max_output_tokens=max_output_tokens,
+                    response_mode=response_mode,
                 )
                 self._last_provider_context.set(dict(config))
                 self._last_provider_summary = {
@@ -1755,6 +1835,7 @@ class KatherineAI:
         rate_key: str | None = None,
         max_input_messages: int | None = None,
         max_output_tokens: int | None = None,
+        response_mode: str = "action",
     ) -> dict[str, str]:
         if not self.is_enabled:
             raise RuntimeError("IA_NO_CONFIGURADA")
@@ -1763,21 +1844,32 @@ class KatherineAI:
         if self._semaphore is None:
             self._semaphore = asyncio.Semaphore(3)
 
+        schema_mode = "answer" if response_mode == "answer" else "action"
+        response_schema = ANSWER_SCHEMA if schema_mode == "answer" else ACTION_SCHEMA
+        gemini_response_schema = (
+            GEMINI_ANSWER_SCHEMA if schema_mode == "answer" else GEMINI_ACTION_SCHEMA
+        )
         prompt_instructions = instructions
         if self.is_groq and not self.uses_groq_strict_schema:
-            prompt_instructions += (
-                "\n\nDevuelve únicamente un objeto JSON válido, sin bloques Markdown, "
-                "con claves kind, answer, command, args y steps. "
-                "answer: command/args vacíos y steps=[]. command: steps=[]. "
-                "plan: 1-3 pasos de solo lectura."
-            )
+            if schema_mode == "answer":
+                prompt_instructions += (
+                    "\n\nDevuelve únicamente un objeto JSON válido con la clave answer. "
+                    "No incluyas campos adicionales."
+                )
+            else:
+                prompt_instructions += (
+                    "\n\nDevuelve únicamente un objeto JSON válido, sin bloques Markdown, "
+                    "con claves kind, answer, command, args y steps. "
+                    "answer: command/args vacíos y steps=[]. command: steps=[]. "
+                    "plan: 1-3 pasos de solo lectura."
+                )
 
         output_format = (
             {
                 "type": "json_schema",
-                "name": "katherine_action",
+                "name": f"katherine_{schema_mode}",
                 "strict": True,
-                "schema": ACTION_SCHEMA,
+                "schema": response_schema,
             }
             if not self.is_groq or self.uses_groq_strict_schema
             else {"type": "json_object"}
@@ -1795,7 +1887,7 @@ class KatherineAI:
         if self.is_gemini:
             generation_config = {
                 "responseMimeType": "application/json",
-                "responseSchema": GEMINI_ACTION_SCHEMA,
+                "responseSchema": gemini_response_schema,
                 "thinkingConfig": {"thinkingLevel": "minimal"},
             }
             if output_limit is not None:
@@ -2178,21 +2270,23 @@ class KatherineAI:
             }
         messages = [*history, {"role": "user", "content": text}]
         normalized_request = normalize_topic_text(text)
-        cacheable_simple = (
+        cacheable_generic = (
             intent == "conversation"
-            and difficulty == "simple"
+            and difficulty in {"simple", "standard"}
             and not request_is_genshin
             and not history
-            and len(text) <= 120
+            and len(text) <= 160
             and not re.search(
-                r"\b(?:yo|mi|mis|mio|mia|me|tengo|estoy|siento|necesito|quiero|pareja|cuenta|usuario)\b",
+                r"\b(?:yo|soy|somos|nos|nosotros|mi|mis|mio|mia|me|tengo|estoy|siento|necesito|quiero|pareja|cuenta|usuario|edad|nombre|vivo|ubicacion|telefono|correo|uid|perfil|saldo)\b",
                 normalized_request,
             )
             and not re.search(
-                r"\b(?:eso|ese|esa|ellos|ellas|aquello|anterior|antes)\b",
+                r"\b(?:eso|ese|esa|ellos|ellas|aquello|anterior|antes|mi|mis|mio|mia)\b|[@]|https?://|\b\d{6,}\b",
                 normalized_request,
             )
         )
+        response_mode = "answer" if intent == "conversation" else "action"
+        output_budget = output_token_budget_for_difficulty(difficulty)
         try:
             result = await self._request_assist_json(
                 instructions,
@@ -2201,7 +2295,9 @@ class KatherineAI:
                 rate_key=rate_key,
                 session_key=key,
                 difficulty=difficulty,
-                cacheable=cacheable_simple,
+                cacheable=cacheable_generic,
+                response_mode=response_mode,
+                max_output_tokens=output_budget,
             )
         except RuntimeError as exc:
             reason = str(exc)
@@ -2332,7 +2428,9 @@ class KatherineAI:
                     request_func,
                     rate_key=None,
                     max_input_messages=1,
+                    max_output_tokens=output_token_budget_for_difficulty("simple"),
                     difficulty="simple",
+                    response_mode="answer",
                 )
             except Exception:
                 retry = {"kind": "answer", "answer": ""}
