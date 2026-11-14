@@ -2611,7 +2611,8 @@ def build_commands_help_text() -> str:
         ("AYUDA E INTELIGENCIA ARTIFICIAL", [
             f"{PREFIX}ayuda / {PREFIX}comandos / {PREFIX}menu — muestra esta guía.",
             f"{PREFIX}asistente <consulta> — conversación y solicitudes en lenguaje natural.",
-            f"{PREFIX}ia ayuda|preguntar|genshin|estado|olvidar — chat, consulta, estado y contexto temporal.",
+            f"{PREFIX}ia ayuda — guía; {PREFIX}ia preguntar <consulta> — chat; {PREFIX}ia genshin <consulta> — consulta de Teyvat.",
+            f"{PREFIX}ia estado — proveedor y sesión; {PREFIX}ia olvidar — borra contexto temporal.",
             f"{PREFIX}ia investigar|enlace|musica|traducir — investigación, páginas, búsqueda musical y traducción.",
             f"{PREFIX}investigar|investiga|investigacion <tema> — investigación; admite comparar, verificar, cronologia e informe.",
             f"{PREFIX}enlace|analizarenlace|leerweb <URL> — analiza una página pública.",
@@ -2668,7 +2669,7 @@ def build_commands_help_text() -> str:
             f"{PREFIX}antispam — protección; {PREFIX}advertir|advertencias|quitaradvertencia — moderación.",
             f"{PREFIX}respuestas|respuesta — reglas automáticas; {PREFIX}perfilbot — perfil; {PREFIX}avatarbot — avatar.",
             f"{PREFIX}eliminarmensajes — limpia mensajes propios identificados en esta ejecución.",
-            "Los comandos ADMIN requieren un UID permitido en ADMIN_UIDS. No se autoriza por nickname.",
+            "Los comandos ADMIN requieren un UID autorizado incluido en ADMIN_UIDS. No se autoriza por nickname.",
         ]),
     ]
     lines = [
