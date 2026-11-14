@@ -485,3 +485,60 @@ async def test_public_https_dns_pinning_rejects_private_and_mixed_answers(monkey
     monkeypatch.setattr(loop, "getaddrinfo", mixed_answer)
     with pytest.raises(ValueError, match="no pública"):
         await katherine.pin_public_https_url("https://example.org/article")
+
+
+
+def test_retention_indexes_cover_global_expiry_and_nickname_lookup(database):
+    with database.db_session() as db:
+        plans = {
+            "nickname": db.execute(
+                "EXPLAIN QUERY PLAN SELECT uid FROM users "
+                "WHERE lower(nickname)=lower(?) ORDER BY last_seen DESC LIMIT 1",
+                ("Viajero",),
+            ).fetchall(),
+            "daily": db.execute(
+                "EXPLAIN QUERY PLAN SELECT rowid FROM chat_activity_daily WHERE day_key < ?",
+                ("2026-01-01",),
+            ).fetchall(),
+            "hourly": db.execute(
+                "EXPLAIN QUERY PLAN SELECT rowid FROM chat_activity_hourly WHERE day_key < ?",
+                ("2026-01-01",),
+            ).fetchall(),
+            "audit": db.execute(
+                "EXPLAIN QUERY PLAN SELECT rowid FROM admin_audit_log WHERE created_at < ?",
+                (0,),
+            ).fetchall(),
+            "warnings": db.execute(
+                "EXPLAIN QUERY PLAN SELECT rowid FROM moderation_warnings WHERE moderator_uid IN (?) OR created_at < ?",
+                ("inactive-user", 0),
+            ).fetchall(),
+        }
+
+    rendered = {
+        key: " ".join(str(tuple(row)) for row in rows)
+        for key, rows in plans.items()
+    }
+    assert "idx_users_nickname_last_seen" in rendered["nickname"]
+    assert "idx_activity_daily_retention" in rendered["daily"]
+    assert "idx_activity_hourly_retention" in rendered["hourly"]
+    assert "idx_admin_audit_created_at" in rendered["audit"]
+    assert (
+        "idx_warnings_moderator_uid" in rendered["warnings"]
+        or "idx_warnings_created_at" in rendered["warnings"]
+    )
+
+
+def test_retry_after_parser_accepts_seconds_and_rejects_invalid_values():
+    assert katherine.retry_after_seconds("2.5") == 2.5
+    assert katherine.retry_after_seconds("0") == 0
+    assert katherine.retry_after_seconds("not-a-date") is None
+    assert katherine.retry_after_seconds("") is None
+
+
+def test_retry_after_parser_accepts_http_date():
+    from datetime import datetime, timezone
+    from email.utils import format_datetime
+
+    future = datetime.now(timezone.utc).replace(microsecond=0)
+    header = format_datetime(future)
+    assert katherine.retry_after_seconds(header) == 0
