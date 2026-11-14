@@ -3,6 +3,8 @@ import sqlite3
 import time
 from datetime import date
 
+import pytest
+
 from katherine_retention import cleanup_database_retention
 
 
@@ -37,9 +39,17 @@ def make_db():
     return db
 
 
-def test_retention_expires_profile_text_and_inactive_user_state():
+@pytest.fixture
+def db():
+    connection = make_db()
+    try:
+        yield connection
+    finally:
+        connection.close()
+
+
+def test_retention_expires_profile_text_and_inactive_user_state(db):
     now = time.time()
-    db = make_db()
     db.execute(
         "INSERT INTO users VALUES(?,?,?,?,?,?,?,?,?)",
         ("active", "Ana", "bio antigua", "estado antiguo", 100, 4,
@@ -70,9 +80,8 @@ def test_retention_expires_profile_text_and_inactive_user_state():
     assert counts["inactive_users_deleted"] == 1
 
 
-def test_retention_keeps_recent_records_but_prunes_old_activity_and_audits():
+def test_retention_keeps_recent_records_but_prunes_old_activity_and_audits(db):
     now = time.time()
-    db = make_db()
     db.execute("INSERT INTO users VALUES('u','Ana','','',0,0,?,?,NULL)", (now, now))
     db.execute("INSERT INTO gifts VALUES(1,'u','Ana','u','Ana','reciente',?)", (now,))
     db.execute("INSERT INTO chat_activity_daily VALUES('room','u','2026-11-12')")
@@ -93,9 +102,8 @@ def test_retention_keeps_recent_records_but_prunes_old_activity_and_audits():
     assert db.execute("SELECT COUNT(*) FROM translation_daily_usage").fetchone()[0] == 1
 
 
-def test_retention_anonymizes_old_playlist_and_auto_reply_creators():
+def test_retention_anonymizes_old_playlist_and_auto_reply_creators(db):
     now = time.time()
-    db = make_db()
     db.execute("INSERT INTO dj_playlists VALUES(1,'uid-123',?)", (now - 91 * 86400,))
     db.execute("INSERT INTO auto_reply_rules VALUES(1,'uid-456',?)", (now - 91 * 86400,))
     db.commit()
