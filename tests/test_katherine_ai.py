@@ -1469,3 +1469,92 @@ async def test_action_requests_keep_full_action_schema_and_standard_budget(monke
     assert result["kind"] == "command"
     assert captured["text"]["format"]["schema"] == ACTION_SCHEMA
     assert captured["max_output_tokens"] == 640
+
+
+def test_ai_tool_selection_is_specific_to_the_requested_music_action():
+    from katherine_ai import AI_PUBLIC_COMMANDS, select_ai_tool_commands
+
+    selected = select_ai_tool_commands(
+        "Katherine, pausa la música", AI_PUBLIC_COMMANDS, "action"
+    )
+    assert "pausa" in selected
+    assert "pausar" in selected
+    assert "dj" in selected
+    assert "saltar" not in selected
+    assert "reanudar" not in selected
+    assert "playlist" not in selected
+    assert "enciclopedia" not in selected
+
+
+def test_ai_tool_selection_keeps_admin_commands_inside_verified_allowlist():
+    from katherine_ai import AI_ADMIN_COMMANDS, AI_PUBLIC_COMMANDS, select_ai_tool_commands
+
+    request = "Katherine, desactiva el antispam"
+    public = select_ai_tool_commands(request, AI_PUBLIC_COMMANDS, "action")
+    privileged = select_ai_tool_commands(
+        request, AI_PUBLIC_COMMANDS | AI_ADMIN_COMMANDS, "action"
+    )
+    assert "antispam" not in public
+    assert privileged == frozenset({"antispam"})
+
+
+def test_ai_tool_selection_is_narrow_for_research_and_genshin():
+    from katherine_ai import AI_PUBLIC_COMMANDS, select_ai_tool_commands
+
+    research = select_ai_tool_commands(
+        "Investiga las novedades de Python", AI_PUBLIC_COMMANDS, "research"
+    )
+    assert research == frozenset({"investigar", "enlace"})
+
+    genshin = select_ai_tool_commands(
+        "¿Qué build y equipos recomiendas para Cyno en Genshin?",
+        AI_PUBLIC_COMMANDS,
+        "genshin",
+    )
+    assert "guia" in genshin
+    assert "equipos" in genshin
+    assert "sinergia" in genshin
+    assert "banner" not in genshin
+    assert "materiales" not in genshin
+    assert "pagar" not in genshin
+
+
+def test_retained_ai_history_is_bounded_without_truncating_live_text():
+    ai = KatherineAI()
+    user_text = "pregunta " + ("x" * 3000)
+    assistant_text = "respuesta " + ("y" * 3000)
+
+    ai._append_history("session", "user", user_text)
+    ai._append_history("session", "assistant", assistant_text)
+
+    history = ai._history("session")
+    assert len(history[0]["content"]) <= 2401
+    assert len(history[1]["content"]) <= 1601
+    assert history[0]["content"].startswith("pregunta")
+    assert history[1]["content"].startswith("respuesta")
+    assert user_text.startswith("pregunta") and len(user_text) > len(history[0]["content"])
+    assert assistant_text.startswith("respuesta") and len(assistant_text) > len(history[1]["content"])
+
+
+def test_admin_intent_hints_select_only_privileged_tools_when_authorized():
+    from katherine_ai import AI_ADMIN_COMMANDS, AI_PUBLIC_COMMANDS, select_ai_tool_commands
+
+    request = "Katherine, revisa la moderación de la sala"
+    public = select_ai_tool_commands(request, AI_PUBLIC_COMMANDS, "action")
+    admin = select_ai_tool_commands(
+        request, AI_PUBLIC_COMMANDS | AI_ADMIN_COMMANDS, "action"
+    )
+    assert public == frozenset()
+    assert admin == frozenset({"advertir", "advertencias", "quitaradvertencia"})
+
+
+def test_ai_tool_selection_does_not_match_incidental_command_words():
+    from katherine_ai import AI_PUBLIC_COMMANDS, select_ai_tool_commands
+
+    selected = select_ai_tool_commands(
+        "Katherine, crea una lista de libros para leer",
+        AI_PUBLIC_COMMANDS,
+        "action",
+    )
+    assert selected == frozenset()
+
