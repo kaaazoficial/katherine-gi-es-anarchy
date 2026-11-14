@@ -841,7 +841,6 @@ async def test_calling_katherine_without_a_question_gets_a_short_prompt(monkeypa
     sent = []
 
     monkeypatch.setattr(bot_main, "check_antispam_message", lambda *_: (False, None))
-    monkeypatch.setattr(bot_main.AI_CORE, "record_chat_message", lambda *args, **kwargs: None)
     monkeypatch.setattr(bot_main, "extract_message_urls", lambda *_: [])
 
     async def no_speech(*_args, **_kwargs):
