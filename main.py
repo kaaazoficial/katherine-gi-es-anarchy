@@ -11589,7 +11589,7 @@ async def start_dj_search_with_fallback(
         recoverable = is_recoverable_dj_failure(message)
         if dj_source_is_cooled(cooldown_key):
             blocked_sources.add(cooldown_key)
-        elif re.search(r"HTTP\\s*(?:401|403|429|500|502|503|504)", str(message), re.I):
+        elif re.search(r"HTTP\s*(?:401|403|429|500|502|503|504)", str(message), re.I):
             cool_down_dj_source(cooldown_key, 600)
             blocked_sources.add(cooldown_key)
         if not recoverable:
