@@ -55,3 +55,15 @@ Los eventos se crean libremente; solo su creador o un UID administrador puede ce
 - `!perfilbot [ambos|desarrollador|comunidad] Nombre | Estado`: actualiza el perfil de la identidad seleccionada. Por defecto actualiza ambas.
 - `!avatarbot [ambos|desarrollador|comunidad] URL`: actualiza el icono de la identidad seleccionada. Por defecto actualiza ambas, para mantener sincronizados el perfil de chat y la identidad que entra a las llamadas.
 - Los comandos siguen requiriendo un UID administrador exacto. Si una de las identidades falla, el resultado informa el éxito parcial en vez de afirmar que ambas se actualizaron.
+
+
+## Llamadas y música
+
+- `!join`: conecta a Katherine a la llamada de la sala.
+- `!dj detener` / `!dj stop`: detiene la reproducción y mantiene la conexión a la llamada.
+- `!salirsala`: salida explícita de Katherine de la llamada.
+- El final de una pista, una cola vacía o un fallo de TTS no deben provocar una salida de la llamada.
+
+## Respuestas a mensajes
+
+Al responder directamente a un mensaje de Katherine, el bot interpreta el texto como una continuación de la conversación. Solo se activa cuando el ID citado corresponde a un mensaje enviado y confirmado por Katherine en esa misma sala.

@@ -3255,7 +3255,7 @@ async def ensure_voice_room(thread_id: str):
                 "[VOZ] Estado LiveKit obsoleto en %s; limpiando antes de reconectar.",
                 thread_id,
             )
-            await stop_dj_room(thread_id, request_leave=True)
+            await stop_dj_room(thread_id, request_leave=False)
 
         ready = asyncio.Event()
         DJ_READY_EVENTS[thread_id] = ready
