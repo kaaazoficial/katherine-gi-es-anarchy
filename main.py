@@ -942,6 +942,9 @@ DJ_FAVORITES_TTL = 86400
 
 DJ_ARCHIVE_CACHE: dict[str, dict] = {}
 DJ_SOURCE_CACHE: dict[str, dict] = {}
+DJ_SOURCE_COOLDOWNS: dict[str, float] = {}
+DJ_REMOTE_AUDIO_MAX_BYTES = 80 * 1024 * 1024
+DJ_QUEUE_MAX_TRACKS = 10
 JAMENDO_CLIENT_ID = os.getenv("JAMENDO_CLIENT_ID", "").strip()
 IA_BASE = "https://archive.org"
 JAMENDO_API = "https://api.jamendo.com/v3.0/tracks/"
@@ -1146,6 +1149,10 @@ def cleanup_expired_state():
         for key, item in list(store.items()):
             if not isinstance(item, dict) or float(item.get("expires", 0) or 0) <= now:
                 store.pop(key, None)
+    monotonic_now = time.monotonic()
+    for host, expires_at in list(DJ_SOURCE_COOLDOWNS.items()):
+        if float(expires_at or 0) <= monotonic_now:
+            DJ_SOURCE_COOLDOWNS.pop(host, None)
     for key, item in list(DJ_SEARCH_RESULTS.items()):
         if not isinstance(item, dict) or float(item.get("expires", 0) or 0) <= now:
             DJ_SEARCH_RESULTS.pop(key, None)
@@ -2850,7 +2857,7 @@ async def search_archive_audio(query: str, limit: int = 5) -> list[dict]:
         ("fl[]", "identifier"),
         ("fl[]", "title"),
         ("fl[]", "creator"),
-        ("rows", "35"),
+        ("rows", str(max(10, min(20, limit * 3)))),
         ("page", "1"),
         ("output", "json"),
         ("sort[]", "downloads desc")
@@ -2888,7 +2895,9 @@ async def search_archive_audio(query: str, limit: int = 5) -> list[dict]:
                 logging.exception("[DJ] No se pudo validar el item IA %s", identifier)
                 return None
 
-    checked = await asyncio.gather(*(get_checked(identifier) for identifier in identifiers))
+    # Bound metadata fan-out; a five-result search does not need dozens of detail requests.
+    shortlist = identifiers[:max(5, min(12, limit * 2))]
+    checked = await asyncio.gather(*(get_checked(identifier) for identifier in shortlist))
     tracks = [track for track in checked if track]
     DJ_ARCHIVE_CACHE["search:" + normalized_query] = {
         "tracks": tracks,
@@ -2917,7 +2926,30 @@ def dj_audio_host_allowed(host: str) -> bool:
 
 def dj_audio_url_allowed(url: str) -> bool:
     parsed = urlparse(str(url or ""))
-    return parsed.scheme == "https" and dj_audio_host_allowed(parsed.hostname or "")
+    return (
+        parsed.scheme == "https"
+        and not parsed.username
+        and not parsed.password
+        and dj_audio_host_allowed(parsed.hostname or "")
+    )
+
+
+def dj_source_is_cooled(host: str, now: float | None = None) -> bool:
+    key = str(host or "").lower().rstrip(".")
+    expires_at = float(DJ_SOURCE_COOLDOWNS.get(key, 0) or 0)
+    return expires_at > (time.monotonic() if now is None else now)
+
+
+def cool_down_dj_source(host: str, seconds: int = 600) -> None:
+    key = str(host or "").lower().rstrip(".")
+    if (
+        key == "upload.wikimedia.org"
+        or key == "jamendo.com"
+        or key.endswith(".jamendo.com")
+    ):
+        DJ_SOURCE_COOLDOWNS[key] = time.monotonic() + max(30, min(1800, int(seconds)))
+        metrics["dj_source_cooldowns"] += 1
+        logging.warning("[DJ] Fuente %s en pausa temporal por fallos de descarga.", key)
 
 
 async def search_wikimedia_audio(query: str, limit: int = 5) -> list[dict]:
@@ -2951,6 +2983,8 @@ async def search_wikimedia_audio(query: str, limit: int = 5) -> list[dict]:
         timeout=25,
     )
     if not response.is_success:
+        if response.status_code in (403, 429, 500, 502, 503, 504):
+            cool_down_dj_source("upload.wikimedia.org", 600)
         raise RuntimeError(f"Wikimedia Commons respondió HTTP {response.status_code}.")
 
     try:
@@ -2979,7 +3013,7 @@ async def search_wikimedia_audio(query: str, limit: int = 5) -> list[dict]:
             size = int(info.get("size") or 0)
         except (TypeError, ValueError):
             size = 0
-        if size and size > 150 * 1024 * 1024:
+        if size and size > DJ_REMOTE_AUDIO_MAX_BYTES:
             continue
 
         metadata = info.get("extmetadata") or {}
@@ -3060,6 +3094,8 @@ async def search_jamendo_audio(query: str, limit: int = 5) -> list[dict]:
         timeout=25,
     )
     if not response.is_success:
+        if response.status_code in (403, 429, 500, 502, 503, 504):
+            cool_down_dj_source("prod-1.storage.jamendo.com", 600)
         raise RuntimeError(f"Jamendo respondió HTTP {response.status_code}.")
 
     try:
@@ -3083,8 +3119,15 @@ async def search_jamendo_audio(query: str, limit: int = 5) -> list[dict]:
         license_url = str(item.get("license_ccurl") or "")
         license_label = archive_license_label(license_url)
         track_id = str(item.get("id") or "")
-        download_url = build_jamendo_download_url(JAMENDO_CLIENT_ID, track_id)
-        if not license_label or not download_url or not dj_audio_url_allowed(download_url):
+        # Use the official audiodownload URL supplied by /tracks, rather than
+        # the /tracks/file redirect endpoint, which can yield HTML interstitials.
+        download_url = str(item.get("audiodownload") or "").strip()
+        if (
+            not license_label
+            or not track_id
+            or not download_url
+            or not dj_audio_url_allowed(download_url)
+        ):
             continue
         tracks.append({
             "identifier": track_id,
@@ -3116,22 +3159,36 @@ async def search_jamendo_audio(query: str, limit: int = 5) -> list[dict]:
 async def search_music_catalog(query: str, limit: int = 5) -> list[dict]:
     """Search every configured catalog concurrently and fairly mix their results."""
     providers = [
-        ("archive", search_archive_audio),
-        ("commons", search_wikimedia_audio),
+        ("archive", search_archive_audio, None),
+        ("commons", search_wikimedia_audio, "upload.wikimedia.org"),
     ]
     if JAMENDO_CLIENT_ID:
-        providers.append(("jamendo", search_jamendo_audio))
+        providers.append(("jamendo", search_jamendo_audio, "prod-1.storage.jamendo.com"))
+
+    active_providers = [
+        provider for provider in providers
+        if not provider[2] or not dj_source_is_cooled(provider[2])
+    ]
+    if not active_providers:
+        raise RuntimeError(
+            "Los catálogos de audio están en pausa temporal tras fallos de descarga. "
+            "Intenta de nuevo en unos minutos."
+        )
 
     results = await asyncio.gather(
-        *(searcher(query, max(limit, limit * 2)) for _, searcher in providers),
+        *(searcher(query, max(limit, limit * 2)) for _, searcher, _ in active_providers),
         return_exceptions=True,
     )
     buckets = []
     errors = []
-    for (provider_name, _), result in zip(providers, results):
+    for (provider_name, _, host), result in zip(active_providers, results):
         if isinstance(result, Exception):
             errors.append(provider_name)
             metrics[f"dj_search_errors_{provider_name}"] += 1
+            if host and any(
+                code in str(result) for code in ("403", "429", "500", "502", "503", "504")
+            ):
+                cool_down_dj_source(host, 600)
             logging.warning("[DJ] Falló el catálogo %s: %s", provider_name, type(result).__name__)
             buckets.append([])
         else:
@@ -3722,7 +3779,7 @@ async def download_dj_audio(url: str, file_extension: str | None = None) -> Path
     fd, temp_name = tempfile.mkstemp(prefix="katherine-dj-", suffix=suffix)
     temp_path = Path(temp_name)
     total_bytes = 0
-    max_bytes = 150 * 1024 * 1024
+    max_bytes = DJ_REMOTE_AUDIO_MAX_BYTES
 
     try:
         timeout = httpx.Timeout(60.0, connect=20.0)
@@ -3804,17 +3861,26 @@ async def download_dj_audio(url: str, file_extension: str | None = None) -> Path
                         if not dj_audio_url_allowed(current_url):
                             raise ValueError("La descarga terminó en un dominio no autorizado.")
                         content_type = response.headers.get("content-type", "").lower()
-                        if "text/html" in content_type or "application/json" in content_type:
+                        if (
+                            "text/html" in content_type
+                            or "application/json" in content_type
+                            or not (
+                                content_type.startswith("audio/")
+                                or "application/octet-stream" in content_type
+                                or "application/ogg" in content_type
+                            )
+                        ):
+                            cool_down_dj_source(urlsplit(current_url).hostname or "", 600)
                             raise RuntimeError(
                                 f"La fuente {urlsplit(current_url).hostname or 'musical'} "
-                                "devolvió una página web en vez del audio."
+                                "no devolvió un tipo de contenido de audio válido."
                             )
                         try:
                             content_length = int(response.headers.get("content-length", "0"))
                         except (TypeError, ValueError):
                             content_length = 0
                         if content_length > max_bytes:
-                            raise RuntimeError("La pista supera el límite de 150 MB.")
+                            raise RuntimeError("La pista supera el límite de 80 MB.")
 
                         with os.fdopen(fd, "wb") as output:
                             fd = -1
@@ -3823,7 +3889,7 @@ async def download_dj_audio(url: str, file_extension: str | None = None) -> Path
                                     continue
                                 total_bytes += len(chunk)
                                 if total_bytes > max_bytes:
-                                    raise RuntimeError("La pista supera el límite de 150 MB.")
+                                    raise RuntimeError("La pista supera el límite de 80 MB.")
                                 output.write(chunk)
                     finally:
                         await response.aclose()
@@ -4066,7 +4132,24 @@ async def start_dj_room(
 
     temporary_audio = None
     original_source = file_path
-    if isinstance(file_path, str) and file_path.lower().startswith("https://"):
+    is_remote = isinstance(file_path, str) and file_path.lower().startswith("https://")
+    if is_remote:
+        if not dj_audio_url_allowed(file_path):
+            return False, "El enlace no pertenece a una fuente musical autorizada."
+    else:
+        try:
+            file_path = validate_local_dj_audio(Path(file_path))
+        except Exception as exc:
+            metrics["dj_validation_errors"] += 1
+            return False, f"El archivo no pasó la validación de audio: {str(exc)[:140]}."
+
+    # Join first: don't consume bandwidth or temporary disk if Anarchy/LiveKit
+    # rejects the room connection.
+    ok, message = await ensure_voice_room(str(thread_id))
+    if not ok:
+        return False, message
+
+    if is_remote:
         try:
             temporary_audio = await download_dj_audio(
                 file_path,
@@ -4084,18 +4167,6 @@ async def start_dj_room(
                 "No pude descargar o validar la canción "
                 f"({type(exc).__name__}: {str(exc)[:140]})."
             )
-    else:
-        try:
-            file_path = validate_local_dj_audio(Path(file_path))
-        except Exception as exc:
-            metrics["dj_validation_errors"] += 1
-            return False, f"El archivo no pasó la validación de audio: {str(exc)[:140]}."
-
-    ok, message = await ensure_voice_room(str(thread_id))
-    if not ok:
-        if temporary_audio:
-            Path(temporary_audio).unlink(missing_ok=True)
-        return False, message
 
     state = DJ_ROOMS[str(thread_id)]
     display_name = (
@@ -4105,10 +4176,10 @@ async def start_dj_room(
     active_task = state.get("task")
 
     if enqueue and active_task and not active_task.done():
-        if len(state["queue"]) >= 50:
+        if len(state["queue"]) >= DJ_QUEUE_MAX_TRACKS:
             if temporary_audio:
                 Path(temporary_audio).unlink(missing_ok=True)
-            return False, "La cola alcanzó su límite de 50 canciones."
+            return False, f"La cola alcanzó su límite de {DJ_QUEUE_MAX_TRACKS} canciones."
         state["queue"].append({
             "path": str(file_path),
             "temporary": str(temporary_audio) if temporary_audio else None,
