@@ -68,12 +68,12 @@ GENSHIN_ONLY_TOOL_COMMANDS = frozenset({
 # interactive, payment, moderation and profile-edit commands remain available
 # as individual explicit actions only.
 AI_PLAN_SAFE_COMMANDS = frozenset({
-    "ayuda", "comandos", "estado", "fuentes", "saludfuentes", "fecha", "zona",
+    "ayuda", "comandos", "estado", "fuentes", "saludfuentes", "fecha", "zona", "calcular",
     "perfil", "puntos", "ranking", "actividad", "economia", "enciclopedia",
     "archivo", "teyvat", "guia", "equipos", "rotacion", "materiales",
     "reacciones", "buscargenshin", "banner", "calendario", "cobertura",
     "sinergia", "jefes", "lista", "enemigo", "geografia", "elemento",
-    "investigar", "enlace", "traducir", "multimedia", "media", "imagen",
+    "investigar", "enlace", "calcular", "traducir", "multimedia", "media", "imagen",
     "video", "audio",
 })
 
@@ -169,7 +169,8 @@ AI_COMMAND_CATALOG = {
     "elemento": "elemento: ficha de elemento.",
     "curiosidad": "sin argumentos: dato curioso de Genshin.",
     "investigar": "tema o pregunta: búsqueda pública con varias fuentes.",
-    "enlace": "URL HTTPS pública: analiza una página.",
+    "enlace": "URL HTTPS pública: analiza contenido y señales de riesgo.",
+    "calcular": "expresión: calculadora matemática segura, sin ejecutar código.",
     "traducir": "idioma | texto: traducción.",
     "multimedia": "imagen|video|audio búsqueda: recursos públicos.",
     "media": "alias de multimedia.",
@@ -703,6 +704,7 @@ AI_TOOL_REQUEST_HINTS = (
     ({"traducir"}, ("traduce", "traducir", "traduccion")),
     ({"multimedia", "media", "imagen", "video", "audio"}, ("multimedia", "imagen", "foto", "video", "audio", "buscar imagen", "buscar videos")),
     ({"investigar", "enlace"}, ("investiga", "investigar", "fuentes", "consulta web", "analiza este enlace", "resume este enlace", "pagina web", "articulo")),
+    ({"calcular"}, ("calcula ", "calcular ", "cuanto es ", "cuánto es ", "resuelve ", "raiz cuadrada de ")),
     ({"calcular"}, ("calcula ", "calcular ", "cuanto es ", "cuánto es ", "resuelve ", "raiz cuadrada de ")),
 )
 
