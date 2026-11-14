@@ -632,8 +632,12 @@ def compact_tool_result_for_context(value: Any, max_chars: int = 1600) -> str:
     content_budget = max(1, limit - len(marker))
     head_limit = int(content_budget * 0.68)
     tail_limit = content_budget - head_limit
-    head = clean[:head_limit].rsplit(" ", 1)[0].rstrip()
-    tail = clean[-tail_limit:].lstrip()
+    # Keep the beginning of the first and last meaningful lines. This
+    # preserves section names/IDs instead of cutting into the middle of a title.
+    first_line = lines[0] if lines else clean
+    last_line = lines[-1] if lines else clean
+    head = first_line[:head_limit].rstrip()
+    tail = last_line[:tail_limit].strip()
     compacted = f"{head}{marker}{tail}"
     return compacted[:limit]
 
