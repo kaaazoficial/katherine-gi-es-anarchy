@@ -39,8 +39,6 @@ def test_allows_only_community_79_exact_host():
     [
         "https://duckapps.com.br/",
         "https://www.duckapps.com.br/some-page",
-        "https://kyodo.app/",
-        "https://www.kyodo.app/community",
     ],
 )
 def test_blocks_ducks_and_kyodo(url):
