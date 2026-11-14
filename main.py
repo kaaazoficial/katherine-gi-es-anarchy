@@ -12014,12 +12014,6 @@ async def dispatch(event: dict, source: str):
         if author_is_bot:
             metrics["bot_messages_ignored"] += 1
             return
-        AI_CORE.record_chat_message(
-            str(event.get("threadId") or ""),
-            str(author_data.get("nickname") or author_data.get("name") or "Usuario"),
-            incoming_text,
-            is_bot=author_is_bot,
-        )
         # Automatic incoming-link moderation runs before chat context, speech,
         # AI routing or commands. No link history is retained.
         if incoming_text and extract_message_urls(incoming_text):
@@ -12064,6 +12058,13 @@ async def dispatch(event: dict, source: str):
                         source,
                     )
                 return
+
+        AI_CORE.record_chat_message(
+            str(event.get("threadId") or ""),
+            str(author_data.get("nickname") or author_data.get("name") or "Usuario"),
+            incoming_text,
+            is_bot=author_is_bot,
+        )
 
         await enqueue_message_for_speech(event, source)
 
