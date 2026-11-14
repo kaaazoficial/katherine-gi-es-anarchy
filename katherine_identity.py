@@ -23,8 +23,8 @@ NAME_ALIASES = frozenset({
 })
 
 _GREETING_RE = re.compile(
-    r"^[¡!¿?]*\\s*(?:oye|ey|hey|hola|buenas(?:\\s+(?:tardes|noches|dias))?|"
-    r"disculpa|perdona|escucha)\\s*[,!:;]?\\s+",
+    r"^[¡!¿?]*\s*(?:oye|ey|hey|hola|buenas(?:\s+(?:tardes|noches|dias))?|"
+    r"disculpa|perdona|escucha)\s*[,!:;]?\s+",
     flags=re.IGNORECASE,
 )
 _NAME_RE = re.compile(
