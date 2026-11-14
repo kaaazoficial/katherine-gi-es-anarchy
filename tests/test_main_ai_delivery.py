@@ -690,3 +690,112 @@ async def test_command_help_delivery_stops_after_first_failed_block(monkeypatch)
     await bot_main.send_command_help_blocks("room-help-failure", "developer")
 
     assert calls == ["bloque IA", "bloque Genshin"]
+
+
+
+def test_audio_dependencies_are_loaded_only_when_requested(monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+    fake_rtc = SimpleNamespace(Room=object)
+    fake_av = SimpleNamespace(open=object)
+    fake_numpy = SimpleNamespace(asarray=object)
+
+    monkeypatch.setattr(bot_main, "livekit_rtc", None)
+    monkeypatch.setattr(bot_main, "pyav", None)
+    monkeypatch.setattr(bot_main, "np", None)
+    monkeypatch.setattr(bot_main, "_LIVEKIT_IMPORT_ATTEMPTED", False)
+    monkeypatch.setattr(bot_main, "_AUDIO_IMPORT_ATTEMPTED", False)
+
+    def fake_import(name):
+        calls.append(name)
+        return {
+            "livekit.rtc": fake_rtc,
+            "av": fake_av,
+            "numpy": fake_numpy,
+        }[name]
+
+    monkeypatch.setattr(bot_main.importlib, "import_module", fake_import)
+
+    assert bot_main.load_audio_dependencies() is True
+    assert bot_main.livekit_rtc is fake_rtc
+    assert bot_main.pyav is fake_av
+    assert bot_main.np is fake_numpy
+    assert calls == ["av", "numpy", "livekit.rtc"]
+
+    assert bot_main.load_audio_dependencies() is True
+    assert calls == ["av", "numpy", "livekit.rtc"]
+
+
+def test_tts_dependency_is_loaded_only_when_reading_is_requested(monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+    fake_edge_tts = SimpleNamespace(Communicate=object)
+    monkeypatch.setattr(bot_main, "edge_tts", None)
+    monkeypatch.setattr(bot_main, "_TTS_IMPORT_ATTEMPTED", False)
+
+    def fake_import(name):
+        calls.append(name)
+        assert name == "edge_tts"
+        return fake_edge_tts
+
+    monkeypatch.setattr(bot_main.importlib, "import_module", fake_import)
+
+    assert bot_main.load_tts_dependency() is True
+    assert bot_main.edge_tts is fake_edge_tts
+    assert bot_main.load_tts_dependency() is True
+    assert calls == ["edge_tts"]
+
+
+def test_optional_audio_import_failure_is_contained(monkeypatch):
+    monkeypatch.setattr(bot_main, "livekit_rtc", None)
+    monkeypatch.setattr(bot_main, "_LIVEKIT_IMPORT_ATTEMPTED", False)
+    monkeypatch.setattr(bot_main, "DJ_IMPORT_ERROR", "")
+
+    def fail_import(name):
+        raise ImportError("optional audio module unavailable")
+
+    monkeypatch.setattr(bot_main.importlib, "import_module", fail_import)
+
+    assert bot_main.load_livekit_dependency() is False
+    assert bot_main.livekit_rtc is None
+    assert "optional audio module unavailable" in bot_main.DJ_IMPORT_ERROR
+
+
+
+def test_concurrent_audio_dependency_loading_is_single_initialization(monkeypatch):
+    import concurrent.futures
+    import threading
+    import time as time_module
+    from types import SimpleNamespace
+
+    calls = []
+    calls_lock = threading.Lock()
+    fake_rtc = SimpleNamespace(Room=object)
+    fake_av = SimpleNamespace(open=object)
+    fake_numpy = SimpleNamespace(asarray=object)
+
+    monkeypatch.setattr(bot_main, "livekit_rtc", None)
+    monkeypatch.setattr(bot_main, "pyav", None)
+    monkeypatch.setattr(bot_main, "np", None)
+    monkeypatch.setattr(bot_main, "_LIVEKIT_IMPORT_ATTEMPTED", False)
+    monkeypatch.setattr(bot_main, "_AUDIO_IMPORT_ATTEMPTED", False)
+
+    def fake_import(name):
+        with calls_lock:
+            calls.append(name)
+        time_module.sleep(0.01)
+        return {
+            "livekit.rtc": fake_rtc,
+            "av": fake_av,
+            "numpy": fake_numpy,
+        }[name]
+
+    monkeypatch.setattr(bot_main.importlib, "import_module", fake_import)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda _: bot_main.load_audio_dependencies(), range(4)))
+
+    assert results == [True, True, True, True]
+    assert sorted(calls) == ["av", "livekit.rtc", "numpy"]
