@@ -1,3 +1,9 @@
+"""Plain-text command help and category filtering for Katherine."""
+from __future__ import annotations
+
+import unicodedata
+
+
 def _command_help_groups(prefix: str) -> tuple[str, list[tuple[str, list[str]]]]:
     """Return the canonical command catalog grouped by category."""
     prefix = str(prefix or "!").strip() or "!"
