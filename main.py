@@ -3,6 +3,7 @@
 import os
 import re
 import json
+import importlib
 import time
 import hmac
 import hashlib
@@ -26,23 +27,78 @@ try:
 except ImportError:
     psutil = None
 
-try:
-    import av as pyav
-    import numpy as np
-    from livekit import rtc as livekit_rtc
-    DJ_IMPORT_ERROR = ""
-except Exception as exc:
-    pyav = None
-    np = None
-    livekit_rtc = None
-    DJ_IMPORT_ERROR = str(exc)
+# Optional media dependencies are intentionally loaded only when a voice or DJ
+# feature is requested. Keeping them out of the module import path shortens
+# every cold start and avoids their memory cost when audio is unused.
+pyav = None
+np = None
+livekit_rtc = None
+edge_tts = None
+DJ_IMPORT_ERROR = ""
+TTS_IMPORT_ERROR = ""
+_LIVEKIT_IMPORT_ATTEMPTED = False
+_AUDIO_IMPORT_ATTEMPTED = False
+_TTS_IMPORT_ATTEMPTED = False
 
-try:
-    import edge_tts
-    TTS_IMPORT_ERROR = ""
-except Exception as exc:
-    edge_tts = None
-    TTS_IMPORT_ERROR = str(exc)
+
+def load_livekit_dependency() -> bool:
+    """Load LiveKit only when a voice room is actually requested."""
+    global livekit_rtc, DJ_IMPORT_ERROR, _LIVEKIT_IMPORT_ATTEMPTED
+    if livekit_rtc is not None:
+        return True
+    if _LIVEKIT_IMPORT_ATTEMPTED:
+        return False
+    _LIVEKIT_IMPORT_ATTEMPTED = True
+    try:
+        livekit_rtc = importlib.import_module("livekit.rtc")
+        DJ_IMPORT_ERROR = ""
+        return True
+    except Exception as exc:
+        livekit_rtc = None
+        DJ_IMPORT_ERROR = str(exc)[:240]
+        logging.warning("[VOZ] LiveKit no está disponible: %s", type(exc).__name__)
+        return False
+
+
+def load_audio_dependencies() -> bool:
+    """Load PyAV and NumPy on demand for actual audio decoding/playback."""
+    global pyav, np, DJ_IMPORT_ERROR, _AUDIO_IMPORT_ATTEMPTED
+    if pyav is not None and np is not None:
+        return load_livekit_dependency()
+    if _AUDIO_IMPORT_ATTEMPTED:
+        return False
+    _AUDIO_IMPORT_ATTEMPTED = True
+    try:
+        loaded_av = importlib.import_module("av")
+        loaded_numpy = importlib.import_module("numpy")
+    except Exception as exc:
+        pyav = None
+        np = None
+        DJ_IMPORT_ERROR = str(exc)[:240]
+        logging.warning("[DJ] Dependencias de audio no disponibles: %s", type(exc).__name__)
+        return False
+    pyav = loaded_av
+    np = loaded_numpy
+    return load_livekit_dependency()
+
+
+def load_tts_dependency() -> bool:
+    """Load Edge TTS only when reading aloud is enabled."""
+    global edge_tts, TTS_IMPORT_ERROR, _TTS_IMPORT_ATTEMPTED
+    if edge_tts is not None:
+        return True
+    if _TTS_IMPORT_ATTEMPTED:
+        return False
+    _TTS_IMPORT_ATTEMPTED = True
+    try:
+        edge_tts = importlib.import_module("edge_tts")
+        TTS_IMPORT_ERROR = ""
+        return True
+    except Exception as exc:
+        edge_tts = None
+        TTS_IMPORT_ERROR = str(exc)[:240]
+        logging.warning("[TTS] Edge TTS no está disponible: %s", type(exc).__name__)
+        return False
 
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from contextvars import ContextVar
@@ -52,6 +108,7 @@ from typing import Any
 from html.parser import HTMLParser
 from urllib.parse import urljoin, quote, urlparse, urlsplit, urlunsplit
 
+BOOT_IMPORT_STARTED_AT = time.perf_counter()
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, Response
@@ -96,6 +153,7 @@ from katherine_help import (
 )
 
 AI_CORE = KatherineAI()
+BOOT_IMPORT_DURATION_SECONDS = time.perf_counter() - BOOT_IMPORT_STARTED_AT
 AI_TOOL_OUTPUT_CAPTURE: ContextVar[list[str] | None] = ContextVar(
     "katherine_ai_tool_output_capture", default=None
 )
@@ -3264,7 +3322,7 @@ async def ensure_voice_room(thread_id: str):
         return False, "No pude identificar la sala de esta conversación."
     if not COMMUNITY_TOKEN:
         return False, "Falta COMMUNITY_BOT_TOKEN en las variables de Render."
-    if livekit_rtc is None:
+    if not await asyncio.to_thread(load_livekit_dependency):
         return False, "LiveKit no está disponible en Render. Revisa las dependencias."
 
     lock = VOICE_CONNECT_LOCKS.setdefault(thread_id, asyncio.Lock())
@@ -3543,7 +3601,9 @@ def clean_speech_text(content: str, include_links: bool = False, include_mention
 
 async def stream_speech_file(thread_id: str, file_path: str):
     state = DJ_ROOMS.get(str(thread_id))
-    if not state or pyav is None or np is None:
+    if not state:
+        return
+    if not await asyncio.to_thread(load_audio_dependencies):
         return
     container = pyav.open(file_path, mode="r")
     try:
@@ -3601,7 +3661,7 @@ async def stream_speech_file(thread_id: str, file_path: str):
 
 async def speech_queue_worker(thread_id: str):
     state = DJ_ROOMS.get(str(thread_id))
-    if not state or edge_tts is None:
+    if not state or not load_tts_dependency():
         return
     while not state["stop_event"].is_set():
         queue = state.get("speech_priority_queue")
@@ -3677,10 +3737,12 @@ async def speech_queue_worker(thread_id: str):
 
 
 async def enable_room_reading(thread_id: str):
-    if edge_tts is None:
-        return False, "Falta edge-tts en Render; revisa la instalación de requirements.txt."
-    if pyav is None or np is None or livekit_rtc is None:
-        return False, "Faltan las dependencias de audio para activar la lectura."
+    if not await asyncio.to_thread(load_tts_dependency):
+        detail = f" ({TTS_IMPORT_ERROR})" if TTS_IMPORT_ERROR else ""
+        return False, "Falta edge-tts en Render; revisa la instalación de requirements.txt." + detail
+    if not await asyncio.to_thread(load_audio_dependencies):
+        detail = f" ({DJ_IMPORT_ERROR})" if DJ_IMPORT_ERROR else ""
+        return False, "Faltan las dependencias de audio para activar la lectura." + detail
     ok, message = await ensure_voice_room(thread_id)
     if not ok:
         return False, message
@@ -4121,6 +4183,8 @@ async def dj_playback_loop(
 
 
 def validate_local_dj_audio(path: Path):
+    if not load_audio_dependencies():
+        raise RuntimeError("Faltan las dependencias de audio para validar la pista.")
     resolved = Path(path).resolve()
     music_root = DJ_MUSIC_DIR.resolve()
     if not resolved.is_relative_to(music_root):
@@ -4153,8 +4217,9 @@ async def start_dj_room(
     track_metadata: dict | None = None,
     enqueue: bool = False
 ):
-    if pyav is None or livekit_rtc is None or np is None:
-        return False, "Faltan dependencias de LiveKit, PyAV o NumPy en Render."
+    if not await asyncio.to_thread(load_audio_dependencies):
+        detail = f" ({DJ_IMPORT_ERROR})" if DJ_IMPORT_ERROR else ""
+        return False, "Faltan dependencias de LiveKit, PyAV o NumPy en Render." + detail
 
     temporary_audio = None
     original_source = file_path
@@ -11290,15 +11355,6 @@ Uso: !enciclopedia <nombre>""",
                 reply
             )
             return
-        if pyav is None or livekit_rtc is None or np is None:
-            await send_message(
-                thread,
-                "El reproductor DJ no está instalado correctamente en Render.",
-                dj_source,
-                reply
-            )
-            return
-
         if args and args[0].lower() in ("fuentes", "fuente", "sources"):
             jamendo_status = (
                 "configurado" if JAMENDO_CLIENT_ID else
@@ -12331,20 +12387,42 @@ async def health_head():
 # ---------------------------------------------------------------------------
 async def startup():
     global HTTP_CLIENT, CLEANUP_TASK
+    startup_started_at = time.perf_counter()
+    logging.info(
+        "[STARTUP_TIMING] imports_principales=%.3fs",
+        BOOT_IMPORT_DURATION_SECONDS,
+    )
+
+    phase_started_at = time.perf_counter()
     HTTP_CLIENT = httpx.AsyncClient(
         timeout=httpx.Timeout(20.0, connect=8.0),
         limits=httpx.Limits(max_connections=40, max_keepalive_connections=20),
         headers={"User-Agent": "Katherine-AnarchyBot/3.0"}
     )
+    logging.info(
+        "[STARTUP_TIMING] http_client=%.3fs",
+        time.perf_counter() - phase_started_at,
+    )
+
+    phase_started_at = time.perf_counter()
     init_db()
+    logging.info(
+        "[STARTUP_TIMING] sqlite_init=%.3fs",
+        time.perf_counter() - phase_started_at,
+    )
+
+    phase_started_at = time.perf_counter()
     cleanup_expired_state()
+    logging.info(
+        "[STARTUP_TIMING] cleanup_inicial=%.3fs",
+        time.perf_counter() - phase_started_at,
+    )
     CLEANUP_TASK = asyncio.create_task(cleanup_loop())
 
     logging.info("SQLite activo en %s", DB_PATH)
     DJ_MUSIC_DIR.mkdir(parents=True, exist_ok=True)
     logging.info(
-        "Katherine DJ: %s | directorio: %s",
-        "disponible" if livekit_rtc is not None and pyav is not None and np is not None else "dependencias ausentes",
+        "Katherine DJ: dependencias de audio bajo demanda | directorio: %s",
         DJ_MUSIC_DIR
     )
 
@@ -12371,33 +12449,46 @@ async def startup():
         bool(COMMUNITY_SECRET)
     )
 
-    for source in ("developer", "community"):
-        if token_for(source):
-            me = await api("GET", "/me", source)
+    async def load_bot_identity(source: str) -> None:
+        me = await api("GET", "/me", source)
+        if me["ok"]:
+            bot = me["data"].get("bot", {})
+            if isinstance(bot, dict):
+                BOT_IDENTITIES[source] = {
+                    "bot_id": str(bot.get("botId") or ""),
+                    "uid": str(bot.get("uid") or bot.get("id") or bot.get("userId") or ""),
+                    "name": str(bot.get("name") or "")
+                }
+            logging.info(
+                "[BOT %s] %s | chats: %s",
+                source.upper(),
+                bot.get("name") if isinstance(bot, dict) else "Katherine",
+                me["data"].get("threadIds", [])
+            )
+        else:
+            logging.error(
+                "[BOT %s] HTTP %s: %s",
+                source.upper(),
+                me["status"],
+                me["data"]
+            )
 
-            if me["ok"]:
-                bot = me["data"].get("bot", {})
-                if isinstance(bot, dict):
-                    BOT_IDENTITIES[source] = {
-                        "bot_id": str(bot.get("botId") or ""),
-                        "uid": str(bot.get("uid") or bot.get("id") or bot.get("userId") or ""),
-                        "name": str(bot.get("name") or "")
-                    }
+    identity_sources = [
+        source for source in ("developer", "community") if token_for(source)
+    ]
+    if identity_sources:
+        phase_started_at = time.perf_counter()
+        await asyncio.gather(*(load_bot_identity(source) for source in identity_sources))
+        logging.info(
+            "[STARTUP_TIMING] bot_identity_checks=%.3fs count=%s",
+            time.perf_counter() - phase_started_at,
+            len(identity_sources),
+        )
 
-                logging.info(
-                    "[BOT %s] %s | chats: %s",
-                    source.upper(),
-                    bot.get("name") if isinstance(bot, dict) else "Katherine",
-                    me["data"].get("threadIds", [])
-                )
-
-            else:
-                logging.error(
-                    "[BOT %s] HTTP %s: %s",
-                    source.upper(),
-                    me["status"],
-                    me["data"]
-                )
+    logging.info(
+        "[STARTUP_TIMING] startup_preparacion=%.3fs",
+        time.perf_counter() - startup_started_at,
+    )
 
 
 async def shutdown():
