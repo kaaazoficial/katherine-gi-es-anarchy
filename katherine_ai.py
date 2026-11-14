@@ -24,7 +24,7 @@ AI_PUBLIC_COMMANDS = frozenset({
     # Ayuda, consulta e investigación
     "ayuda", "comandos", "menu",
     "fecha", "zona", "miuid", "perfil", "puntos", "ranking", "actividad", "economia",
-    "investigar", "enlace", "calcular", "traducir", "multimedia", "media", "imagen",
+    "investigar", "calcular", "traducir", "multimedia", "media", "imagen",
     "video", "audio",
     # Comunidad y perfiles propios
     "bio", "miestado", "afinidad", "amistad", "interaccion", "regalo", "muro",
@@ -169,7 +169,6 @@ AI_COMMAND_CATALOG = {
     "elemento": "elemento: ficha de elemento.",
     "curiosidad": "sin argumentos: dato curioso de Genshin.",
     "investigar": "tema o pregunta: búsqueda pública con varias fuentes.",
-    "enlace": "URL HTTPS pública: analiza contenido y señales de riesgo.",
     "calcular": "expresión: calculadora matemática segura, sin ejecutar código.",
     "traducir": "idioma | texto: traducción.",
     "multimedia": "imagen|video|audio búsqueda: recursos públicos.",
@@ -703,7 +702,7 @@ AI_TOOL_REQUEST_HINTS = (
     ({"volumen", "volume", "subirvolumen", "bajarvolumen", "silencio"}, ("volumen", "sube el volumen", "baja el volumen", "silencia el dj")),
     ({"traducir"}, ("traduce", "traducir", "traduccion")),
     ({"multimedia", "media", "imagen", "video", "audio"}, ("multimedia", "imagen", "foto", "video", "audio", "buscar imagen", "buscar videos")),
-    ({"investigar", "enlace"}, ("investiga", "investigar", "fuentes", "consulta web", "analiza este enlace", "resume este enlace", "pagina web", "articulo")),
+    ({"investigar"}, ("investiga", "investigar", "fuentes", "consulta web", "pagina web", "articulo")),
     ({"calcular"}, ("calcula ", "calcular ", "cuanto es ", "cuánto es ", "resuelve ", "raiz cuadrada de ")),
     ({"calcular"}, ("calcula ", "calcular ", "cuanto es ", "cuánto es ", "resuelve ", "raiz cuadrada de ")),
     ({"calcular"}, ("calcula ", "calcular ", "cuanto es ", "cuánto es ", "resuelve ", "raiz cuadrada de ")),
