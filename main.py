@@ -2126,11 +2126,11 @@ def schedule_pending_delivery(
     return True
 
 
-def build_outgoing_mention_map(message: dict | None) -> dict[str, str]:
-    """Build ephemeral aliases from Anarchy's structured mentions array."""
+def build_outgoing_mention_map(message: dict | None) -> dict[str, dict[str, str]]:
+    """Build ephemeral alias -> mention entity data from Anarchy's webhook."""
     if not isinstance(message, dict):
         return {}
-    aliases: dict[str, str] = {}
+    aliases: dict[str, dict[str, str]] = {}
     for mention in message.get("mentions") or []:
         if not isinstance(mention, dict):
             continue
@@ -2140,6 +2140,13 @@ def build_outgoing_mention_map(message: dict | None) -> dict[str, str]:
         ).strip()
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", user_id):
             continue
+        display_name = str(
+            mention.get("nickname") or mention.get("displayName")
+            or mention.get("display_name") or mention.get("username")
+            or mention.get("name") or mention.get("userName")
+            or mention.get("handle") or user_id
+        ).strip().lstrip("@")[:80]
+        entity = {"uid": user_id, "nickname": display_name}
         for field in (
             "nickname", "username", "displayName", "display_name",
             "name", "userName", "handle",
@@ -2147,26 +2154,36 @@ def build_outgoing_mention_map(message: dict | None) -> dict[str, str]:
             alias = str(mention.get(field) or "").strip().lstrip("@").strip()
             if not alias or len(alias) > 80 or any(ord(ch) < 32 for ch in alias):
                 continue
-            aliases.setdefault(alias.casefold(), user_id)
+            aliases.setdefault(alias.casefold(), entity)
     return aliases
 
 
-def render_outgoing_user_mentions(content: Any) -> str:
-    """Turn @names from the current event into native <@UID> mention tokens."""
-    text = str(content or "")
+def outgoing_mention_entities(content: Any) -> list[dict[str, str]]:
+    """Return structured user references for @names explicitly present in text.
+
+    Keep the visible @name intact. The user reference is carried separately in
+    the message's mentions field rather than encoded as Discord-style markup.
+    """
     aliases = OUTGOING_MENTION_MAP.get() or {}
     if not aliases:
-        return text
+        return []
     ordered = sorted(aliases, key=len, reverse=True)
     alternatives = "|".join(re.escape(alias) for alias in ordered)
     pattern = re.compile(
         rf"(?<![<\w@])@({alternatives})(?![\w@-]|\.[A-Za-z0-9])",
         re.IGNORECASE,
     )
-    return pattern.sub(
-        lambda match: f"<@{aliases.get(match.group(1).casefold(), '')}>",
-        text,
-    )
+    entities: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for match in pattern.finditer(str(content or "")):
+        entity = aliases.get(match.group(1).casefold())
+        if not entity:
+            continue
+        user_id = entity["uid"]
+        if user_id not in seen:
+            seen.add(user_id)
+            entities.append(dict(entity))
+    return entities
 
 
 async def send_message(
@@ -2182,7 +2199,7 @@ async def send_message(
     if not thread_id:
         return None
 
-    content = render_outgoing_user_mentions(content)
+    # Keep @Name visible; attach verified profile references separately.
     content = sanitize_chat_text(content, allow_safe_links=allow_safe_links)
     trace_capture = AI_TRACE_CAPTURE.get()
     if trace_capture is not None and content and len(trace_capture) < 10:
@@ -2245,6 +2262,11 @@ async def send_message(
                 await asyncio.sleep(wait)
 
             body = {"content": part}
+            mention_entities = outgoing_mention_entities(part)
+            if mention_entities:
+                # Anarchy renders profile links from structured mention entities,
+                # not from inline text tokens such as <@UID>.
+                body["mentions"] = mention_entities
 
             # La respuesta al mensaje original se aplica solo al primer bloque.
             if reply_id and index == 0:

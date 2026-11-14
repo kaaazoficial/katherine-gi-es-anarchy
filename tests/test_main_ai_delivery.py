@@ -545,38 +545,40 @@ def test_command_help_lists_all_groups_and_legacy_aliases_without_button_menu():
     assert len(help_text) > 1800
 
 
-def test_outgoing_mention_map_only_uses_real_uids_from_structured_mentions():
+def test_outgoing_mention_map_preserves_structured_uid_and_display_name():
     mapping = bot_main.build_outgoing_mention_map({
         "mentions": [
             {"uid": "user-123", "nickname": "Ana", "username": "ana_dev"},
             {"uid": "", "nickname": "Texto sin UID"},
         ]
     })
-    assert mapping == {"ana": "user-123", "ana_dev": "user-123"}
+    expected = {"uid": "user-123", "nickname": "Ana"}
+    assert mapping == {"ana": expected, "ana_dev": expected}
 
 
-def test_outgoing_mention_renderer_produces_native_uid_tokens_and_keeps_unknown_names():
+def test_outgoing_mentions_keep_plain_display_text_and_build_profile_entities():
     token = bot_main.OUTGOING_MENTION_MAP.set({
-        "ana": "user-123",
-        "ana maria": "user-456",
+        "ana": {"uid": "user-123", "nickname": "Ana"},
+        "ana maria": {"uid": "user-456", "nickname": "Ana Maria"},
     })
     try:
-        rendered = bot_main.render_outgoing_user_mentions(
-            "Hola @Ana y @Ana Maria, pero deja @Desconocido y correo ana@example.com, "
-            "no @Ana.com ni @Anagrama. Fin @Ana."
-        )
+        text = "Hola @Ana y @Ana Maria, pero deja @Desconocido y correo ana@example.com, no @Ana.com ni @Anagrama."
+        entities = bot_main.outgoing_mention_entities(text)
     finally:
         bot_main.OUTGOING_MENTION_MAP.reset(token)
-    assert rendered == (
-        "Hola <@user-123> y <@user-456>, pero deja @Desconocido "
-        "y correo ana@example.com, no @Ana.com ni @Anagrama. Fin <@user-123>."
-    )
+    assert entities == [
+        {"uid": "user-123", "nickname": "Ana"},
+        {"uid": "user-456", "nickname": "Ana Maria"},
+    ]
+    assert "@Ana" in text and "<@user-123>" not in text
 
 
 @pytest.mark.asyncio
-async def test_send_message_posts_native_user_mention_token(monkeypatch):
+async def test_send_message_posts_visible_name_and_structured_mention_entity(monkeypatch):
     captured = []
-    mention_token = bot_main.OUTGOING_MENTION_MAP.set({"ana": "user-123"})
+    mention_token = bot_main.OUTGOING_MENTION_MAP.set({
+        "ana": {"uid": "user-123", "nickname": "Ana"}
+    })
     monkeypatch.setattr(bot_main, "last_bot_send", 0.0)
     monkeypatch.setitem(bot_main.last_chat_send, "developer:mention-test", 0.0)
 
@@ -593,5 +595,6 @@ async def test_send_message_posts_native_user_mention_token(monkeypatch):
         bot_main.OUTGOING_MENTION_MAP.reset(mention_token)
 
     assert result["ok"] is True
-    assert captured[0]["content"] == "Hola <@user-123>, aquí tienes tu respuesta."
+    assert captured[0]["content"] == "Hola @Ana, aquí tienes tu respuesta."
+    assert captured[0]["mentions"] == [{"uid": "user-123", "nickname": "Ana"}]
     assert "buttons" not in captured[0]

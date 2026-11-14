@@ -76,4 +76,4 @@ La batería determinista del enrutador se ejecuta con `pytest -q tests/test_kath
 
 ## Menciones de usuarios en respuestas
 
-Cuando el evento contiene `message.mentions` con un UID y un nombre, Katherine convierte referencias `@nombre` de sus respuestas al formato nativo `<@UID>`. La asociación se limita al mensaje que originó la respuesta y permanece solo en el contexto de ejecución; no se guarda una agenda permanente. Si la plataforma no entrega un UID verificable, el texto se mantiene como texto y no se inventa una mención.
+Cuando el evento contiene `message.mentions` con UID y nombre, Katherine conserva `@nombre` en el texto y adjunta la referencia estructurada en el campo `mentions` del mensaje saliente. No usa sintaxis de otra plataforma como `<@UID>`. La asociación se limita al mensaje que originó la respuesta y solo vive en memoria; si no hay UID verificable, no inventa una mención.
