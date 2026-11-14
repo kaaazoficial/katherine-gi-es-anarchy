@@ -1346,7 +1346,8 @@ async def test_simple_answer_cache_isolated_by_user_identity(monkeypatch):
     ai._request_json = fake_request
     await ai.assist("¿Qué es una API?", "session-a", lambda *args, **kwargs: None, rate_key="user-a")
     await ai.assist("¿Qué es una API?", "session-b", lambda *args, **kwargs: None, rate_key="user-b")
-    assert len(calls) == 2
+    assert len(calls) == 1
+    assert ai.metrics["ai_shared_cache_hits"] == 1
     assert ai.metrics["ai_cache_hits"] == 0
 
 
