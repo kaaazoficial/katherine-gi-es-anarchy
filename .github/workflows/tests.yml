@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - "main.py"
+      - "katherine_identity.py"
       - "requirements.txt"
       - "katherine_nexus.py"
       - "katherine_astra.py"
@@ -27,6 +28,7 @@ on:
       - main
     paths:
       - "main.py"
+      - "katherine_identity.py"
       - "requirements.txt"
       - "tests/**"
       - "requirements-test.txt"
