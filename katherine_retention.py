@@ -38,8 +38,6 @@ def cleanup_database_retention(
     creator_cutoff = float(now) - CONFIG_CREATOR_ID_RETENTION_DAYS * 86400
     activity_cutoff = (today - timedelta(days=ACTIVITY_RETENTION_DAYS - 1)).isoformat()
     today_key = today.isoformat()
-    stale_users = "SELECT uid FROM users WHERE last_seen < ?"
-
     counts: dict[str, int] = {}
 
     cursor = db.execute(
