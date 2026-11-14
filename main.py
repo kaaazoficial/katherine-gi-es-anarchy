@@ -11357,7 +11357,7 @@ Uso: !enciclopedia <nombre>""",
             else:
                 logging.warning(
                     "[DJ_PROBE] No se pudo iniciar reproducción | error=%s",
-                    sanitize_ai_trace_text(result_message, 180),
+                    str(result_message).replace("\\n", " ")[:180],
                 )
                 await send_message(
                     thread,
