@@ -130,7 +130,7 @@ def _help_intro(prefix: str, *, continuation: bool = False) -> str:
     return (
         f"{heading}\n"
         f"Prefijo principal: {prefix} · También acepta ! y -.\n"
-        "Usa !ayuda <categoría> para consultar una sola sección."
+        f"Usa {prefix}ayuda <categoría> para consultar una sola sección."
     )
 
 
