@@ -62,7 +62,7 @@ from katherine_research import (
     is_safe_public_url,
  )
 from katherine_utilities import calculate_expression, format_calculation_result
-from katherine_link_analysis import inspect_link_signals, format_link_signals
+from katherine_link_analysis import (\n    inspect_link_signals, format_link_signals, inspect_message_links,\n)
 from katherine_game_queries import (
     infer_genshin_data_folder,
     strip_game_scope_qualifier,
@@ -12059,6 +12059,51 @@ async def dispatch(event: dict, source: str):
             incoming_text,
             is_bot=author_is_bot,
         )
+        # Automatic incoming-link moderation runs before chat context, speech,
+        # AI routing or commands. No link history is retained.
+        if incoming_text and extract_message_urls(incoming_text):
+            try:
+                link_verdict = await inspect_message_links(
+                    incoming_text,
+                    lambda url: fetch_public_page(url, external_request),
+                )
+            except Exception:
+                logging.exception("[LINK_GUARD] Error revisando enlaces entrantes.")
+                link_verdict = {
+                    "blocked": True,
+                    "reason": "No se pudo verificar el enlace de forma segura.",
+                    "category": "inspection_error",
+                }
+            if link_verdict.get("blocked"):
+                message_id = str(
+                    message_data.get("id")
+                    or message_data.get("messageId")
+                    or message_data.get("message_id")
+                    or ""
+                ).strip()
+                deleted = False
+                if message_id:
+                    deletion = await api(
+                        "DELETE",
+                        f"/threads/{event.get('threadId')}/messages/{message_id}",
+                        source,
+                    )
+                    deleted = bool(deletion.get("ok") or deletion.get("status") == 404)
+                metrics["automatic_link_blocks"] = metrics.get("automatic_link_blocks", 0) + 1
+                logging.warning(
+                    "[LINK_GUARD] Mensaje bloqueado | categoria=%s | eliminado=%s",
+                    link_verdict.get("category", "blocked"),
+                    deleted,
+                )
+                if not deleted:
+                    await send_message(
+                        str(event.get("threadId") or ""),
+                        "🛡️ No se permitió el enlace: "
+                        + str(link_verdict.get("reason") or "destino no permitido."),
+                        source,
+                    )
+                return
+
         await enqueue_message_for_speech(event, source)
 
         # NEXUS conserva el enrutamiento determinista cuando IA no está configurada.
