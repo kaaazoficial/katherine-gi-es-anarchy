@@ -2782,9 +2782,9 @@ async def archive_item_details(identifier: str) -> dict | None:
             file_size = int(audio_file.get("size") or 0)
         except (TypeError, ValueError):
             file_size = 0
-        if file_size and file_size > 150 * 1024 * 1024:
+        if file_size and file_size > DJ_REMOTE_AUDIO_MAX_BYTES:
             continue
-        if audio_file.get("private") == "true":
+        if audio_file.get("private") is True or str(audio_file.get("private") or "").lower() == "true":
             continue
         allowed_files.append((filename, file_size))
 
@@ -2795,10 +2795,11 @@ async def archive_item_details(identifier: str) -> dict | None:
         ".mp3": 0, ".ogg": 1, ".m4a": 2,
         ".opus": 3, ".wav": 4, ".flac": 5
     }
+    # Prefer smaller files to reduce download time, RAM/disk pressure and decode risk.
     allowed_files.sort(
         key=lambda pair: (
+            pair[1] if pair[1] else 10**15,
             extension_priority.get(Path(pair[0]).suffix.lower(), 99),
-            pair[1] if pair[1] else 10**15
         )
     )
     filename = allowed_files[0][0]
@@ -2938,22 +2939,46 @@ def dj_audio_url_allowed(url: str) -> bool:
     )
 
 
-def dj_source_is_cooled(host: str, now: float | None = None) -> bool:
+def dj_source_cooldown_key(host: str) -> str:
+    """Normalize catalog and CDN hosts to one provider-level cooldown key."""
     key = str(host or "").lower().rstrip(".")
+    if key == "upload.wikimedia.org":
+        return key
+    if key == "archive.org" or key.endswith(".archive.org"):
+        return "archive.org"
+    if key == "jamendo.com" or key.endswith(".jamendo.com"):
+        return "jamendo.com"
+    return key
+
+
+def dj_source_is_cooled(host: str, now: float | None = None) -> bool:
+    key = dj_source_cooldown_key(host)
     expires_at = float(DJ_SOURCE_COOLDOWNS.get(key, 0) or 0)
     return expires_at > (time.monotonic() if now is None else now)
 
 
+def dj_source_cooldown_remaining(host: str, now: float | None = None) -> int:
+    key = dj_source_cooldown_key(host)
+    current = time.monotonic() if now is None else now
+    expires_at = float(DJ_SOURCE_COOLDOWNS.get(key, 0) or 0)
+    return max(0, int(expires_at - current + 0.999))
+
+
 def cool_down_dj_source(host: str, seconds: int = 600) -> None:
-    key = str(host or "").lower().rstrip(".")
-    if (
-        key == "upload.wikimedia.org"
-        or key == "jamendo.com"
-        or key.endswith(".jamendo.com")
-    ):
+    key = dj_source_cooldown_key(host)
+    if key in {"upload.wikimedia.org", "archive.org", "jamendo.com"}:
         DJ_SOURCE_COOLDOWNS[key] = time.monotonic() + max(30, min(1800, int(seconds)))
         metrics["dj_source_cooldowns"] += 1
         logging.warning("[DJ] Fuente %s en pausa temporal por fallos de descarga.", key)
+
+
+def cool_down_dj_source_on_http_failure(host: str, status_code: int) -> bool:
+    """Pause a catalog after access/rate/server failures, not missing individual files."""
+    if int(status_code) not in (401, 403, 429, 500, 502, 503, 504):
+        return False
+    before = dj_source_is_cooled(host)
+    cool_down_dj_source(host, 600)
+    return dj_source_is_cooled(host) or before
 
 
 async def search_wikimedia_audio(query: str, limit: int = 5) -> list[dict]:
@@ -3163,11 +3188,11 @@ async def search_jamendo_audio(query: str, limit: int = 5) -> list[dict]:
 async def search_music_catalog(query: str, limit: int = 5) -> list[dict]:
     """Search every configured catalog concurrently and fairly mix their results."""
     providers = [
-        ("archive", search_archive_audio, None),
+        ("archive", search_archive_audio, "archive.org"),
         ("commons", search_wikimedia_audio, "upload.wikimedia.org"),
     ]
     if JAMENDO_CLIENT_ID:
-        providers.append(("jamendo", search_jamendo_audio, "prod-1.storage.jamendo.com"))
+        providers.append(("jamendo", search_jamendo_audio, "jamendo.com"))
 
     active_providers = [
         provider for provider in providers
@@ -3840,6 +3865,13 @@ async def download_dj_audio(url: str, file_extension: str | None = None) -> Path
                         else:
                             host_state["failures"] = int(host_state.get("failures", 0)) + 1
                             host_state["last_error"] = f"HTTP {response.status_code}"
+                            if cool_down_dj_source_on_http_failure(
+                                current_host, response.status_code
+                            ):
+                                logging.warning(
+                                    "[DJ] Descarga bloqueada por proveedor | host=%s | HTTP %s",
+                                    current_host, response.status_code,
+                                )
                             if response.status_code in (429, 500, 502, 503, 504):
                                 host_state["consecutive_failures"] = int(host_state.get("consecutive_failures", 0)) + 1
                                 if host_state["consecutive_failures"] >= 6:
@@ -4140,6 +4172,13 @@ async def start_dj_room(
     if is_remote:
         if not dj_audio_url_allowed(file_path):
             return False, "El enlace no pertenece a una fuente musical autorizada."
+        remote_host = urlsplit(file_path).hostname or ""
+        if dj_source_is_cooled(remote_host):
+            remaining = dj_source_cooldown_remaining(remote_host)
+            return False, (
+                "La fuente musical está en pausa temporal tras un error HTTP. "
+                f"Volveré a consultarla en aproximadamente {max(1, (remaining + 59) // 60)} min."
+            )
     else:
         try:
             file_path = validate_local_dj_audio(Path(file_path))
@@ -11239,13 +11278,28 @@ Uso: !enciclopedia <nombre>""",
                 "configurado" if JAMENDO_CLIENT_ID else
                 "pendiente: añade JAMENDO_CLIENT_ID en Render"
             )
+            archive_status = (
+                f"en pausa ({max(1, (dj_source_cooldown_remaining('archive.org') + 59) // 60)} min)"
+                if dj_source_is_cooled("archive.org") else "sin pausa temporal"
+            )
+            commons_status = (
+                f"en pausa ({max(1, (dj_source_cooldown_remaining('upload.wikimedia.org') + 59) // 60)} min)"
+                if dj_source_is_cooled("upload.wikimedia.org") else "sin pausa temporal"
+            )
+            if JAMENDO_CLIENT_ID:
+                jamendo_status = (
+                    f"en pausa ({max(1, (dj_source_cooldown_remaining('jamendo.com') + 59) // 60)} min)"
+                    if dj_source_is_cooled("jamendo.com") else "configurado, sin pausa temporal"
+                )
             await send_message(
                 thread,
                 "FUENTES MUSICALES DE KATHERINE\n"
-                "• Internet Archive: búsqueda y validación de licencia automática.\n"
-                "• Wikimedia Commons: audio libre con licencia verificable.\n"
-                f"• Jamendo: {jamendo_status}; requiere Client ID gratuito.\n"
-                "Las búsquedas combinan los catálogos disponibles, validan las pistas antes de reproducirlas y pueden usar recomendaciones por ambiente: estudiar, trabajar, relajarse, dormir, jugar, combate, triste o feliz.",
+                f"• Internet Archive: {archive_status}.\n"
+                f"• Wikimedia Commons: {commons_status}; puede pausarse si el CDN bloquea la descarga.\n"
+                f"• Jamendo: {jamendo_status}.\n"
+                "Una pista solo se inicia si supera los controles de licencia, tamaño, descarga, formato y decodificación. "
+                "Si un proveedor devuelve 401/403/429/5xx, se pausa temporalmente y Katherine prueba otra fuente.\n"
+                "Búsqueda por ambiente: !dj ambiente estudiar|trabajar|relajarse|dormir|jugar|combate|triste|feliz.",
                 dj_source,
                 reply
             )
@@ -11503,8 +11557,20 @@ async def start_dj_search_with_fallback(
     start = max(0, min(len(tracks) - 1, int(selected_index)))
     last_error = "No pude preparar ninguna pista."
     candidate_order = list(range(start, len(tracks))) + list(range(0, start))
+    blocked_sources: set[str] = set()
+    source_hosts = {
+        "archive": "archive.org",
+        "commons": "upload.wikimedia.org",
+        "jamendo": "jamendo.com",
+    }
     for index in candidate_order:
         track = tracks[index]
+        source_key = str(track.get("source_key") or "").strip().lower()
+        track_host = source_hosts.get(source_key) or (urlsplit(str(track.get("url") or "")).hostname or "")
+        cooldown_key = dj_source_cooldown_key(track_host)
+        if cooldown_key in blocked_sources or dj_source_is_cooled(cooldown_key):
+            metrics["dj_fallback_tracks_skipped"] += 1
+            continue
         ok, message = await start_dj_room(
             thread_id,
             track["url"],
@@ -11522,6 +11588,11 @@ async def start_dj_search_with_fallback(
             return True, message, track, index
         last_error = message
         recoverable = is_recoverable_dj_failure(message)
+        if dj_source_is_cooled(cooldown_key):
+            blocked_sources.add(cooldown_key)
+        elif re.search(r"HTTP\s*(?:401|403|429|500|502|503|504)", str(message), re.I):
+            cool_down_dj_source(cooldown_key, 600)
+            blocked_sources.add(cooldown_key)
         if not recoverable:
             break
         metrics["dj_fallback_tracks_skipped"] += 1

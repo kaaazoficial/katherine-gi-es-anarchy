@@ -214,3 +214,79 @@ def test_dj_search_fallback_skips_invalid_track_and_starts_next(monkeypatch):
     assert "alternativa" in message
     assert calls == [tracks[0]["url"], tracks[1]["url"]]
 
+
+
+
+def test_archive_search_rejects_files_over_actual_download_limit(monkeypatch):
+    class FakeResponse:
+        is_success = True
+
+        @staticmethod
+        def json():
+            return {
+                "metadata": {
+                    "title": "Oversized audio",
+                    "licenseurl": "https://creativecommons.org/licenses/by/4.0/",
+                },
+                "files": [
+                    {"name": "large.mp3", "size": str(katherine.DJ_REMOTE_AUDIO_MAX_BYTES + 1)}
+                ],
+            }
+
+    async def fake_request(*args, **kwargs):
+        return FakeResponse()
+
+    katherine.DJ_ARCHIVE_CACHE.pop("oversized-audio", None)
+    monkeypatch.setattr(katherine, "external_request", fake_request)
+    assert asyncio.run(katherine.archive_item_details("oversized-audio")) is None
+
+
+def test_dj_source_cooldown_normalizes_provider_cdn_hosts(monkeypatch):
+    katherine.DJ_SOURCE_COOLDOWNS.clear()
+    monkeypatch.setattr(katherine.time, "monotonic", lambda: 100.0)
+    katherine.cool_down_dj_source("prod-1.storage.jamendo.com", 600)
+    assert katherine.dj_source_is_cooled("api.jamendo.com")
+    assert katherine.dj_source_is_cooled("prod-1.storage.jamendo.com")
+    katherine.cool_down_dj_source("ia601500.us.archive.org", 600)
+    assert katherine.dj_source_is_cooled("archive.org")
+    katherine.cool_down_dj_source("upload.wikimedia.org", 600)
+    assert katherine.dj_source_is_cooled("upload.wikimedia.org")
+    katherine.DJ_SOURCE_COOLDOWNS.clear()
+
+
+def test_http_access_failures_trigger_provider_cooldown(monkeypatch):
+    katherine.DJ_SOURCE_COOLDOWNS.clear()
+    monkeypatch.setattr(katherine.time, "monotonic", lambda: 200.0)
+    assert katherine.cool_down_dj_source_on_http_failure("upload.wikimedia.org", 403)
+    assert katherine.dj_source_is_cooled("upload.wikimedia.org")
+    assert not katherine.cool_down_dj_source_on_http_failure("upload.wikimedia.org", 404)
+    katherine.DJ_SOURCE_COOLDOWNS.clear()
+
+
+def test_music_fallback_skips_remaining_tracks_from_blocked_provider(monkeypatch):
+    calls = []
+
+    async def fake_start(thread_id, url, looping, track_metadata=None, enqueue=False):
+        calls.append(url)
+        if track_metadata.get("source_key") == "commons":
+            return False, "No pude descargar o validar la canción (RuntimeError: HTTP 403)."
+        return True, "Reproducción iniciada."
+
+    monkeypatch.setattr(katherine, "start_dj_room", fake_start)
+    katherine.DJ_SOURCE_COOLDOWNS.clear()
+    tracks = [
+        {"url": "https://upload.wikimedia.org/one.ogg", "title": "Bloqueada 1", "source_key": "commons"},
+        {"url": "https://upload.wikimedia.org/two.ogg", "title": "Bloqueada 2", "source_key": "commons"},
+        {"url": "https://archive.org/download/item/good.mp3", "title": "Alternativa", "source_key": "archive"},
+    ]
+    ok, _, selected, index = asyncio.run(
+        katherine.start_dj_search_with_fallback("room-403", tracks, 0)
+    )
+    assert ok is True
+    assert selected["title"] == "Alternativa"
+    assert index == 2
+    assert calls == [
+        "https://upload.wikimedia.org/one.ogg",
+        "https://archive.org/download/item/good.mp3",
+    ]
+    katherine.DJ_SOURCE_COOLDOWNS.clear()
