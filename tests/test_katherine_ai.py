@@ -1535,3 +1535,15 @@ def test_retained_ai_history_is_bounded_without_truncating_live_text():
     assert user_text.startswith("pregunta") and len(user_text) > len(history[0]["content"])
     assert assistant_text.startswith("respuesta") and len(assistant_text) > len(history[1]["content"])
 
+
+def test_admin_intent_hints_select_only_privileged_tools_when_authorized():
+    from katherine_ai import AI_ADMIN_COMMANDS, AI_PUBLIC_COMMANDS, select_ai_tool_commands
+
+    request = "Katherine, revisa la moderación de la sala"
+    public = select_ai_tool_commands(request, AI_PUBLIC_COMMANDS, "action")
+    admin = select_ai_tool_commands(
+        request, AI_PUBLIC_COMMANDS | AI_ADMIN_COMMANDS, "action"
+    )
+    assert public == frozenset()
+    assert admin == frozenset({"advertir", "advertencias", "quitaradvertencia"})
+

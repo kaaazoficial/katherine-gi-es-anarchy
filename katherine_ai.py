@@ -754,7 +754,11 @@ def select_ai_tool_commands(
         if re.search(rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])", text):
             selected.add(name)
 
-    hint_groups = AI_GENSIN_REQUEST_HINTS if intent == "genshin" else AI_TOOL_REQUEST_HINTS
+    hint_groups = (
+        AI_GENSIN_REQUEST_HINTS
+        if intent == "genshin"
+        else (*AI_TOOL_REQUEST_HINTS, *AI_ADMIN_REQUEST_HINTS)
+    )
     if intent == "research":
         selected.update({"investigar", "enlace"})
     else:
