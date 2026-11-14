@@ -87,6 +87,8 @@ from katherine_game_queries import (
     unwrap_genshin_db_response,
 )
 from katherine_retention import cleanup_database_retention
+from katherine_storage import create_sqlite_backup, verify_sqlite_database
+from katherine_help import build_commands_help_text as _build_commands_help_text, filter_commands_help_text
 
 AI_CORE = KatherineAI()
 AI_TOOL_OUTPUT_CAPTURE: ContextVar[list[str] | None] = ContextVar(
@@ -141,7 +143,7 @@ def parse_admin_uids(value: str | None) -> set[str]:
 
 ADMIN_UIDS = parse_admin_uids(SETTINGS.admin_uids)
 ADMIN_ONLY_COMMANDS = frozenset({
-    "!estado", "!fuentes", "!saludfuentes", "!metricas", "!autotest",
+    "!estado", "!fuentes", "!saludfuentes", "!metricas", "!autotest", "!diagnostico",
     "!centro", "!nexus",
     "!admin", "!paneladmin", "!guardian",
     "!respuestas", "!respuesta", "!advertir", "!advertencias",
@@ -2562,87 +2564,8 @@ async def remove_pressed_buttons(event: dict, source: str, remove=True):
 
 
 def build_commands_help_text() -> str:
-    """Complete command index in compact plain text; no interactive buttons."""
-    groups = [
-        ("AYUDA E INTELIGENCIA ARTIFICIAL", [
-            f"{PREFIX}ayuda / {PREFIX}comandos / {PREFIX}menu / {PREFIX}menú — muestra esta guía.",
-            f"{PREFIX}asistente <consulta> — conversación y solicitudes en lenguaje natural.",
-            f"{PREFIX}ia ayuda — guía; {PREFIX}ia preguntar <consulta> — chat; {PREFIX}ia genshin <consulta> — consulta de Teyvat.",
-            f"{PREFIX}ia estado — proveedor y sesión; {PREFIX}ia olvidar — borra contexto temporal.",
-            f"{PREFIX}ia investigar <tema> | {PREFIX}ia enlace <URL> | {PREFIX}ia musica <estilo> | {PREFIX}ia traducir <idioma> | <texto>.",
-            f"{PREFIX}investigar <tema> | {PREFIX}investiga <tema> | {PREFIX}investigacion <tema> | {PREFIX}investigación <tema> — investigación: comparar, verificar, cronologia o informe.",
-            f"{PREFIX}enlace <URL> | {PREFIX}analizarenlace <URL> | {PREFIX}leerweb <URL> — analiza una página pública.",
-            f"{PREFIX}ia probar | {PREFIX}ia trazas | {PREFIX}ia guardian | {PREFIX}ia analista | {PREFIX}ia diagnostico — diagnóstico y controles [ADMIN].",
-        ]),
-        ("GENSHIN IMPACT", [
-            f"{PREFIX}guia <personaje> — build y talentos; {PREFIX}materiales <personaje> — materiales.",
-            f"{PREFIX}equipos <personaje> | {PREFIX}rotacion <personaje> | {PREFIX}sinergia <personaje> — equipos, rotación y sinergias.",
-            f"{PREFIX}jefes — jefes; {PREFIX}banner — banners; {PREFIX}calendario — eventos y calendario.",
-            f"{PREFIX}cobertura <personaje> — contenido; {PREFIX}reacciones <elemento> — reacciones.",
-            f"{PREFIX}enciclopedia <nombre> | {PREFIX}archivo <nombre> | {PREFIX}teyvat <nombre> — consulta la base de datos.",
-            f"{PREFIX}buscargenshin <texto> — búsqueda; {PREFIX}lista <categoría> [página] — listados.",
-            f"{PREFIX}enemigo <nombre> | {PREFIX}geografia <nombre> | {PREFIX}elemento <nombre> — fichas de datos; {PREFIX}curiosidad — dato aleatorio.",
-            f"{PREFIX}deseo — simulador; {PREFIX}pity — consulta contador; {PREFIX}resetpity — reinicia el contador.",
-        ]),
-        ("SOCIAL Y PERFILES", [
-            f"{PREFIX}perfil [@usuario] — consulta perfil; {PREFIX}bio <texto> — edita biografía.",
-            f"{PREFIX}miestado <texto> — actualiza estado; {PREFIX}actividad [hoy|semana] — actividad.",
-            f"{PREFIX}interaccion @usuario — acciones sociales; también puedes usar comandos directos:",
-            f"{PREFIX}abrazo|{PREFIX}abrazar|{PREFIX}beso|{PREFIX}besar|{PREFIX}patada|{PREFIX}golpe|{PREFIX}cachetada @usuario.",
-            f"{PREFIX}acariciar|{PREFIX}mimar|{PREFIX}morder|{PREFIX}consolar|{PREFIX}felicitar|{PREFIX}saludar|{PREFIX}proteger @usuario.",
-            f"{PREFIX}bailar|{PREFIX}cosquillas|{PREFIX}chocar|{PREFIX}highfive|{PREFIX}ayudar|{PREFIX}regalar|{PREFIX}acompañar @usuario.",
-            f"{PREFIX}asustar|{PREFIX}curar|{PREFIX}cargar|{PREFIX}empujar|{PREFIX}regañar|{PREFIX}admirar|{PREFIX}apoyar @usuario.",
-            f"{PREFIX}dormir|{PREFIX}ignorar|{PREFIX}mirar|{PREFIX}invitar @usuario.",
-            f"{PREFIX}roast @usuario — broma; {PREFIX}afinidad @usuario | {PREFIX}amistad @usuario — vínculo.",
-            f"{PREFIX}regalo @usuario [mensaje] — envía regalo; {PREFIX}muro — regalos recibidos.",
-        ]),
-        ("JUEGOS, ECONOMÍA Y COMUNIDAD", [
-            f"{PREFIX}trivia / {PREFIX}responder <1-4> — trivia; {PREFIX}adivina / {PREFIX}intento <número> — adivinanza.",
-            f"{PREFIX}puntos | {PREFIX}reputacion — saldo; {PREFIX}ranking | {PREFIX}top — clasificación; {PREFIX}diario | {PREFIX}daily — recompensa diaria.",
-            f"{PREFIX}trabajar — recompensa; {PREFIX}pagar @usuario <cantidad> | {PREFIX}transferir @usuario <cantidad> — transfiere puntos; {PREFIX}economia — resumen.",
-            f"{PREFIX}encuesta <pregunta> | <opciones> — votación; {PREFIX}elige <opciones> — elección aleatoria.",
-            f"{PREFIX}duelo @usuario — reta; {PREFIX}ship <usuario1> <usuario2> — compatibilidad.",
-            f"{PREFIX}azar <mínimo> <máximo> — número; {PREFIX}verdad — pregunta; {PREFIX}dado / {PREFIX}moneda — azar.",
-            f"{PREFIX}8ball <pregunta> — respuesta; {PREFIX}chiste / {PREFIX}frase / {PREFIX}reto / {PREFIX}suerte — entretenimiento.",
-            f"{PREFIX}evento|{PREFIX}eventos — eventos de comunidad; crear, consultar estado o cerrar según permisos.",
-        ]),
-        ("MÚSICA Y VOZ", [
-            f"{PREFIX}join — entra a la llamada; {PREFIX}salirsala — sale; {PREFIX}salas — lista salas.",
-            f"{PREFIX}dj buscar <tema> — busca música; {PREFIX}reproducir <pista> — reproduce archivo local.",
-            f"{PREFIX}dj pausa|reanudar|saltar|cola|actual|detener — controles de reproducción.",
-            f"{PREFIX}pausa | {PREFIX}pausar | {PREFIX}reanudar | {PREFIX}continuar | {PREFIX}saltar | {PREFIX}cola — accesos rápidos; {PREFIX}djdetener | {PREFIX}djstop — detiene música sin salir.",
-            f"{PREFIX}playlist <acción> — listas; {PREFIX}volumen | {PREFIX}volume <0-100> — volumen.",
-            f"{PREFIX}subirvolumen | {PREFIX}bajarvolumen | {PREFIX}silencio — controles rápidos; {PREFIX}leer | {PREFIX}noleer — lectura de chat.",
-            f"{PREFIX}silenciolectura | {PREFIX}subirvolumenlectura | {PREFIX}bajarvolumenlectura — ajustes de lectura.",
-            f"{PREFIX}tts voces|voz|velocidad|volumen — configuración de voz y lectura.",
-        ]),
-        ("UTILIDADES Y MULTIMEDIA", [
-            f"{PREFIX}fecha — fecha y hora; {PREFIX}zona <Area/Ciudad> — hora de otra zona.",
-            f"{PREFIX}traducir <idioma> | <texto> — traducción; {PREFIX}multimedia imagen|video|audio <búsqueda> — busca recursos.",
-            f"{PREFIX}media <tipo> <búsqueda> — alias multimedia; {PREFIX}imagen <búsqueda> | {PREFIX}video <búsqueda> | {PREFIX}audio <búsqueda> — accesos directos.",
-        ]),
-        ("ADMINISTRACIÓN · UID AUTORIZADO", [
-            f"{PREFIX}miuid | {PREFIX}mi-id | {PREFIX}mi_uid — consulta UID; {PREFIX}estado — estado general.",
-            f"{PREFIX}fuentes | {PREFIX}saludfuentes — proveedores; {PREFIX}metricas — métricas; {PREFIX}autotest — pruebas internas.",
-            f"{PREFIX}centro | {PREFIX}nexus — panel de investigación; {PREFIX}admin | {PREFIX}paneladmin | {PREFIX}guardian — herramientas administrativas.",
-            f"{PREFIX}antispam — protección; {PREFIX}advertir | {PREFIX}advertencias | {PREFIX}quitaradvertencia — moderación.",
-            f"{PREFIX}respuestas | {PREFIX}respuesta — reglas automáticas; {PREFIX}perfilbot — perfil; {PREFIX}avatarbot — avatar.",
-            f"{PREFIX}eliminarmensajes — limpia mensajes propios identificados en esta ejecución.",
-            "Los comandos ADMIN requieren un UID autorizado incluido en ADMIN_UIDS. No se autoriza por nickname.",
-        ]),
-    ]
-    lines = [
-        "KATHERINE · LISTA COMPLETA DE COMANDOS",
-        f"Prefijo principal: {PREFIX} · También acepta ! y -.",
-        "Los argumentos entre < > son obligatorios; [ ] son opcionales.",
-        "",
-    ]
-    for title, entries in groups:
-        lines.append(f"── {title} ──")
-        lines.extend(entries)
-        lines.append("")
-    lines.append("Guía de texto: !ayuda, !comandos y !menu. sin paneles ni botones.")
-    return "\n".join(lines)
+    """Delegate command catalog generation to the focused help module."""
+    return _build_commands_help_text(PREFIX)
 
 
 MENU_ROOT_CHOICES = [
@@ -8900,7 +8823,11 @@ async def _handle_command_impl(event: dict, source: str):
     # AYUDA
     # -----------------------------------------------------------------------
     if command in ("!ayuda", "!comandos"):
-        await send_message(thread, build_commands_help_text(), source, reply)
+        help_text = build_commands_help_text()
+        topic = " ".join(args).strip() if args else ""
+        if topic:
+            help_text = filter_commands_help_text(help_text, topic)
+        await send_message(thread, help_text, source, reply)
         return
 
     if command in ("!menu", "!menú"):
@@ -10598,6 +10525,35 @@ Uso: !enciclopedia <nombre>""",
     if command == "!estado":
         answer = await build_status_message(source, nickname, thread)
         await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!diagnostico":
+        integrity = await asyncio.to_thread(verify_sqlite_database, DB_PATH)
+        db_size = int(integrity.get("size_bytes", 0) or 0)
+        storage_state = (
+            "integridad correcta" if integrity.get("ok")
+            else f"REVISAR ({integrity.get('integrity', 'desconocido')})"
+        )
+        persistent = has_persistent_storage(DATA_DIR)
+        provider_lines = [
+            item for item in AI_CORE.status().splitlines()
+            if any(provider in item for provider in ("Gemini", "Groq", "OpenRouter"))
+        ]
+        diagnostic = [
+            "KATHERINE · DIAGNÓSTICO",
+            f"SQLite: {storage_state} · {db_size} bytes",
+            f"Almacenamiento persistente: {'sí' if persistent else 'no (filesystem efímero)'}",
+            f"Ruta de datos: {DATA_DIR}",
+            f"Proveedor IA: {'configurado' if AI_CORE.is_enabled else 'sin credencial'}",
+            *provider_lines[:3],
+            "Contexto conversacional: temporal en RAM; no se guarda en SQLite.",
+        ]
+        if not persistent:
+            diagnostic.append(
+                "Aviso: los datos locales pueden perderse al reiniciar o desplegar. "
+                "El respaldo local no sustituye una copia externa."
+            )
+        await send_message(thread, "\\n".join(diagnostic), source, reply)
         return
 
     if command == "!metricas":
