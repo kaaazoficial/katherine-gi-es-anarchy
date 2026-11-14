@@ -233,8 +233,10 @@ def test_source_context_includes_six_numbered_sources():
     } for index in range(1, 9)]
     context = research.build_source_context("test", sources)
     assert "FUENTE [6]" in context
-    assert "FUENTE [7]" not in context
-    assert "source6.example" in context
+    assert "FUENTE [7]" in context
+    assert "FUENTE [8]" in context
+    assert "FUENTE [9]" not in context
+    assert "source8.example" in context
 
 
 def test_parse_research_modes_and_preserve_subject():
@@ -269,9 +271,9 @@ def test_source_context_bounds_source_count_and_large_excerpts():
     } for index in range(1, 9)]
     context = research.build_source_context("test", sources)
     assert len(context) < 18_000
-    assert all(f"FUENTE [{index}]" in context for index in range(1, 7))
-    assert "FUENTE [7]" not in context
-    assert "source8.example" not in context
+    assert all(f"FUENTE [{index}]" in context for index in range(1, 9))
+    assert "FUENTE [9]" not in context
+    assert "source8.example" in context
 
 
 def test_public_page_fetch_uses_dns_pinning_and_stream_byte_limit():
@@ -327,6 +329,10 @@ def test_source_coverage_counts_dates_domains_and_source_kinds():
         "academic_sources": 1,
         "official_sources": 1,
         "community_sources": 1,
+        "news_sources": 0,
+        "preprint_sources": 0,
+        "biomedical_sources": 0,
+        "documentation_sources": 0,
     }
 
 
@@ -339,3 +345,217 @@ def test_source_context_discloses_coverage_limitations():
     assert "unique_domains=1" in context
     assert "undated_sources=1" in context
     assert "declara esa limitación" in context
+
+
+
+def test_biomedical_and_news_intents_enable_specialized_sources():
+    biomedical = research.classify_research_intent(
+        "Investiga estudios clínicos sobre diabetes y tratamientos"
+    )
+    news = research.classify_research_intent(
+        "Últimas noticias de energía en Chile esta semana"
+    )
+
+    assert biomedical["academic"] is True
+    assert biomedical["biomedical"] is True
+    assert news["news"] is True
+    assert news["biomedical"] is False
+
+
+def test_arxiv_search_parses_atom_metadata_and_abstract():
+    atom = """<?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <id>http://arxiv.org/abs/2401.12345v2</id>
+        <title>Efficient Language Models</title>
+        <summary>A study of efficient model architectures.</summary>
+        <published>2024-01-20T00:00:00Z</published>
+        <updated>2024-02-01T00:00:00Z</updated>
+        <author><name>Ada Lovelace</name></author>
+      </entry>
+    </feed>"""
+
+    async def request(method, url, **kwargs):
+        assert url == "https://export.arxiv.org/api/query"
+        assert kwargs["params"]["max_results"] == 2
+        return FakeResponse(text=atom)
+
+    results = run(research.search_arxiv("efficient language models", request))
+    assert results[0]["url"] == "https://arxiv.org/abs/2401.12345v2"
+    assert results[0]["source_type"] == "arxiv"
+    assert results[0]["authors"] == "Ada Lovelace"
+    assert "efficient model architectures" in results[0]["excerpt"]
+
+
+def test_arxiv_search_rejects_untrusted_entry_urls():
+    atom = """<feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <id>http://evil.example/abs/2401.12345</id>
+        <title>Untrusted</title>
+        <summary>Not a valid arXiv result.</summary>
+      </entry>
+    </feed>"""
+
+    async def request(method, url, **kwargs):
+        return FakeResponse(text=atom)
+
+    assert run(research.search_arxiv("test topic", request)) == []
+
+
+def test_europe_pmc_search_returns_bibliographic_metadata_and_abstract():
+    async def request(method, url, **kwargs):
+        assert url == "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+        assert kwargs["params"]["resultType"] == "core"
+        return FakeResponse({"resultList": {"result": [{
+            "title": "A study of respiratory health",
+            "doi": "10.1234/respiratory.2026",
+            "authorString": "Ada Lovelace et al.",
+            "journalTitle": "Journal of Clinical Research",
+            "firstPublicationDate": "2026-04-02",
+            "abstractText": "A controlled study of respiratory health outcomes.",
+        }]}})
+
+    results = run(research.search_europe_pmc("respiratory health", request))
+    assert results[0]["url"] == "https://doi.org/10.1234/respiratory.2026"
+    assert results[0]["source_type"] == "europe_pmc"
+    assert results[0]["publication_date"] == "2026-04-02"
+    assert "controlled study" in results[0]["excerpt"]
+
+
+def test_gdelt_news_search_keeps_only_public_https_article_urls():
+    async def request(method, url, **kwargs):
+        assert url == "https://api.gdeltproject.org/api/v2/doc/doc"
+        assert kwargs["params"]["timespan"] == "3m"
+        return FakeResponse({"articles": [
+            {
+                "title": "Energy policy update",
+                "url": "https://news.example.org/energy",
+                "seendate": "20261114T030000Z",
+                "language": "Spanish",
+                "sourcecountry": "Chile",
+            },
+            {
+                "title": "Private endpoint",
+                "url": "https://127.0.0.1/admin",
+                "seendate": "20261114T030000Z",
+            },
+        ]})
+
+    results = run(research.search_gdelt_news("energy policy Chile", request))
+    assert len(results) == 1
+    assert results[0]["domain"] == "news.example.org"
+    assert results[0]["source_type"] == "gdelt_news"
+    assert results[0]["indexed_at"] == "2026-11-14 03:00:00 UTC"
+
+
+def test_software_document_targets_are_narrow_and_topic_specific():
+    targets = research._software_document_targets(
+        "Deploy FastAPI with Python, GitHub Actions and Render"
+    )
+    domains = [domain for domain, _ in targets]
+
+    assert "docs.python.org" in domains
+    assert "fastapi.tiangolo.com" in domains
+    assert "docs.github.com" in domains
+    assert len(targets) == 3
+    assert research._software_document_targets("Cyno Genshin lore") == []
+
+
+def test_topic_router_queries_europe_pmc_for_biomedical_requests(monkeypatch):
+    calls = []
+
+    async def empty(query, request_func, limit=2):
+        return []
+
+    async def record(query, request_func, limit=2):
+        calls.append("europe_pmc")
+        return [{
+            "title": "Clinical source",
+            "url": "https://europepmc.org/article/MED/123",
+            "domain": "europepmc.org",
+            "snippet": "Clinical abstract",
+            "excerpt": "Clinical abstract",
+            "source_type": "europe_pmc",
+        }]
+
+    monkeypatch.setattr(research, "search_wikidata", empty)
+    monkeypatch.setattr(research, "search_wikipedia", empty)
+    monkeypatch.setattr(research, "_search_general_web", empty)
+    monkeypatch.setattr(research, "search_openalex", empty)
+    monkeypatch.setattr(research, "search_crossref", empty)
+    monkeypatch.setattr(research, "search_arxiv", empty)
+    monkeypatch.setattr(research, "search_europe_pmc", record)
+
+    results = run(research.search_web(
+        "Investiga estudios clínicos sobre diabetes",
+        lambda *a, **k: None,
+        limit=8,
+    ))
+    assert calls == ["europe_pmc"]
+    assert results[0]["source_type"] == "europe_pmc"
+
+
+def test_topic_router_queries_gdelt_for_news_without_other_specialist_sources(monkeypatch):
+    calls = []
+
+    async def empty(query, request_func, limit=2):
+        return []
+
+    async def record(query, request_func, limit=3):
+        calls.append("gdelt")
+        return [{
+            "title": "Latest report",
+            "url": "https://news.example.org/article",
+            "domain": "news.example.org",
+            "snippet": "News metadata",
+            "excerpt": "News metadata",
+            "source_type": "gdelt_news",
+        }]
+
+    monkeypatch.setattr(research, "search_wikidata", empty)
+    monkeypatch.setattr(research, "search_wikipedia", empty)
+    monkeypatch.setattr(research, "_search_general_web", empty)
+    monkeypatch.setattr(research, "search_gdelt_news", record)
+    monkeypatch.setattr(research, "search_fandom_wikis", empty)
+
+    results = run(research.search_web(
+        "Últimas noticias sobre energía en Chile",
+        lambda *a, **k: None,
+        limit=8,
+    ))
+    assert calls == ["gdelt"]
+    assert results[0]["source_type"] == "gdelt_news"
+
+
+def test_topic_router_queries_official_docs_for_software_topics(monkeypatch):
+    domains = []
+
+    async def empty(query, request_func, limit=2):
+        return []
+
+    async def scoped(query, domain, request_func, **kwargs):
+        domains.append(domain)
+        return [{
+            "title": "Official documentation",
+            "url": f"https://{domain}/guide",
+            "domain": domain,
+            "snippet": "Official docs result",
+            "excerpt": "Official docs result",
+            "source_type": kwargs["source_type"],
+            "attribution": kwargs["attribution"],
+        }]
+
+    monkeypatch.setattr(research, "search_wikidata", empty)
+    monkeypatch.setattr(research, "search_wikipedia", empty)
+    monkeypatch.setattr(research, "_search_general_web", empty)
+    monkeypatch.setattr(research, "search_scoped_site", scoped)
+
+    results = run(research.search_web(
+        "Cómo desplegar FastAPI con Python y GitHub Actions",
+        lambda *a, **k: None,
+        limit=8,
+    ))
+    assert "docs.python.org" in domains
+    assert "fastapi.tiangolo.com" in domains
+    assert "docs.github.com" in domains
+    assert all(item["source_type"] == "official_software_docs" for item in results)

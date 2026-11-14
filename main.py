@@ -8367,7 +8367,7 @@ async def _handle_command_impl(event: dict, source: str):
             await send_message(thread, "Uso: !investigar <tema o pregunta>. Consultaré varias fuentes públicas y separaré hechos de dudas.", source, reply)
             return
         try:
-            sources = await search_web(research_query, external_request, limit=4)
+            sources = await search_web(research_query, external_request, limit=8)
             if not sources:
                 answer = "No encontré fuentes públicas suficientes para esa consulta. Prueba con términos más concretos."
             else:
@@ -8382,10 +8382,12 @@ async def _handle_command_impl(event: dict, source: str):
                     logging.exception("[RESEARCH] No se pudo sintetizar; se mostrarán extractos.")
                     summary = "No pude generar una síntesis con IA; estos son los extractos recuperados para que puedas revisarlos."
                 refs = ["FUENTES CONSULTADAS"]
-                for index, item in enumerate(sources[:4], 1):
+                for index, item in enumerate(sources[:8], 1):
                     publication_date = (
                         item.get("publication_date") or item.get("published_at")
-                        or item.get("date") or item.get("year") or "fecha no indicada"
+                        or item.get("date") or item.get("year")
+                        or (f"indexación GDELT: {item.get('indexed_at')}" if item.get("indexed_at") else "")
+                        or "fecha no indicada"
                     )
                     source_type = item.get("source_type") or "public_web"
                     refs.append(
@@ -8403,7 +8405,7 @@ async def _handle_command_impl(event: dict, source: str):
                 answer = (
                     f"CENTRO DE INVESTIGACIÓN AVANZADA · {research_mode_label} · {research_query}"
                     + "\n\n" + summary + "\n\n" + "\n".join(refs)
-                ) + "\n\nAlcance: se analizaron hasta cuatro resultados y sus extractos recuperados; no implica lectura íntegra de cada documento. La búsqueda puede omitir páginas bloqueadas o no indexadas. Verifica los datos críticos en los documentos originales."
+                ) + "\n\nAlcance: se analizaron hasta ocho resultados y sus extractos recuperados; no implica lectura íntegra de cada documento. La búsqueda puede omitir páginas bloqueadas o no indexadas. Verifica los datos críticos en los documentos originales."
         except Exception as exc:
             logging.warning("[RESEARCH] Falló investigación pública: %s", type(exc).__name__)
             answer = "No pude completar la investigación web en este momento. Los comandos clásicos siguen disponibles."
