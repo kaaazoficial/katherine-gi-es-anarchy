@@ -100,6 +100,51 @@ def test_provider_token_usage_snapshot_excludes_entries_older_than_last_hour():
     assert len(ai._token_usage_minute_buckets) <= 60
 
 
+def test_token_usage_helper_updates_global_totals_and_provider_costs(monkeypatch):
+    monkeypatch.delenv("KATHERINE_AI_COST_RATES", raising=False)
+    ai = KatherineAI()
+    ai._token_usage_started_at = 1000.0
+    ai._record_provider_token_usage(1_000_000, 1_000_000, now=1100.0)
+
+    usage = ai.token_usage_snapshot(now=1100.0)
+    costs = ai.provider_usage_snapshot()
+
+    assert usage["input_tokens"] == 1_000_000
+    assert usage["output_tokens"] == 1_000_000
+    assert usage["usage_responses"] == 1
+    assert len(costs) == 1
+    assert costs[0]["cost_known"] is True
+    assert costs[0]["estimated_cost_usd"] == pytest.approx(2.80)
+
+
+def test_unknown_provider_model_cost_is_not_reported_as_zero(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_COST_RATES", "{")
+    ai = KatherineAI()
+    ai._provider_usage[("Custom Provider", "unknown-model")] = {
+        "responses": 1, "input_tokens": 100, "output_tokens": 50
+    }
+
+    costs = ai.provider_usage_snapshot()
+
+    assert costs[0]["cost_known"] is False
+    assert "estimated_cost_usd" not in costs[0]
+
+
+def test_configured_provider_model_cost_rate_overrides_defaults(monkeypatch):
+    monkeypatch.setenv(
+        "KATHERINE_AI_COST_RATES",
+        '{"Google Gemini|gemini-3.5-flash-lite":{"input":1.0,"output":4.0}}',
+    )
+    ai = KatherineAI()
+    ai._provider_usage[("Google Gemini", "gemini-3.5-flash-lite")] = {
+        "responses": 1, "input_tokens": 1_000_000, "output_tokens": 1_000_000
+    }
+
+    costs = ai.provider_usage_snapshot()
+
+    assert costs[0]["estimated_cost_usd"] == pytest.approx(5.0)
+
+
 def test_metrics_command_is_admin_only_and_read_only():
     from katherine_ai import AI_ADMIN_COMMANDS, AI_PLAN_SAFE_COMMANDS
     assert validate_ai_tool_call("metricas", "") is None
