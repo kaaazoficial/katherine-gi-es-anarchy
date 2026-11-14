@@ -520,12 +520,12 @@ def test_command_help_is_complete_and_keeps_main_categories():
     assert len(help_text) > 1800
     assert "GENSHIN IMPACT" in help_text and "MÚSICA Y VOZ" in help_text
     assert "!menu" in help_text and "UID autorizado" in help_text
-    assert "!salirsala" in help_text and "!djstop" in help_text
+    assert "!salirsala" in help_text and "!djstop" not in help_text
     assert "sin paneles ni botones" in help_text
 
 
 
-def test_command_help_lists_all_groups_and_legacy_aliases_without_button_menu():
+def test_command_help_lists_core_commands_without_button_menu():
     help_text = bot_main.build_commands_help_text()
     required = (
         "!asistente", "!ia preguntar", "!investigar", "!analizartexto", "!calcular",
