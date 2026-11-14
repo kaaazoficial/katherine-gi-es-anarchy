@@ -1,6 +1,8 @@
 """Heuristic link inspection. Signals are advisory, not antivirus verdicts."""
 from __future__ import annotations
 
+import asyncio
+import html
 import ipaddress
 import re
 from urllib.parse import urlsplit
@@ -41,7 +43,7 @@ def _host(value: str) -> str:
 def _looks_adult(host: str, title: str, content: str) -> bool:
     if any(marker in host for marker in _ADULT_DOMAINS):
         return True
-    text = f"{title} {content[:5000]}".casefold()
+    text = f"{host} {title} {content[:5000]}".casefold()
     matches = sum(1 for marker in _ADULT_MARKERS if marker in text)
     return matches >= 1
 
@@ -186,3 +188,195 @@ def format_link_signals(result: dict) -> str:
             lines.append(label + ":")
             lines.extend(f"• {item}" for item in values[:5])
     return "\n".join(lines)
+
+
+# Automatic moderation policy. Only the explicitly approved Anarchy community
+# can be shared; ordinary external URLs are inspected but not blanket-blocked.
+_ALLOWED_ANARCHY_HOST = "app.anarchyapps.org"
+_ALLOWED_ANARCHY_COMMUNITY_ID = "79"
+_ANARCHY_HOSTS = {
+    "app.anarchyapps.org",
+    "anarchyapps.org",
+    "www.anarchyapps.org",
+}
+_BLOCKED_COMMUNITY_HOSTS = (
+    "duckapps.com.br",
+    "kyodo.app",
+)
+_MAX_MESSAGE_URLS = 8
+_LINK_FETCH_TIMEOUT_SECONDS = 6.0
+_URL_RE = re.compile(
+    r"(?i)\\b(?:https?://|www\\.)[^\\s<>\\"'\\[\\]{}]+"
+)
+_TRAILING_URL_PUNCTUATION = ".,!?;:)]}>"
+
+
+def extract_message_urls(content: str, *, limit: int = _MAX_MESSAGE_URLS) -> list[str]:
+    """Extract distinct clickable URLs from one message, without retaining them."""
+    raw = html.unescape(str(content or ""))
+    results: list[str] = []
+    seen: set[str] = set()
+    max_urls = max(1, min(_MAX_MESSAGE_URLS, int(limit)))
+    for match in _URL_RE.finditer(raw):
+        candidate = match.group(0).rstrip(_TRAILING_URL_PUNCTUATION)
+        if candidate.casefold().startswith("www."):
+            candidate = "https://" + candidate
+        candidate = candidate.strip()
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            results.append(candidate)
+            if len(results) >= max_urls:
+                break
+    return results
+
+
+def classify_link_policy(url: str) -> dict:
+    """Apply explicit destination rules before any network request."""
+    raw = str(url or "").strip()
+    try:
+        parsed = urlsplit(raw)
+        host = (parsed.hostname or "").rstrip(".").encode("idna").decode("ascii").casefold()
+        path = parsed.path or "/"
+    except (ValueError, UnicodeError):
+        return {"blocked": True, "reason": "La dirección del enlace no es válida."}
+
+    if parsed.scheme.casefold() != "https" or not host:
+        return {"blocked": True, "reason": "Solo se permiten enlaces HTTPS públicos."}
+
+    for blocked_root in _BLOCKED_COMMUNITY_HOSTS:
+        if host == blocked_root or host.endswith("." + blocked_root):
+            label = "Ducks" if blocked_root == "duckapps.com.br" else "Kyodo"
+            return {
+                "blocked": True,
+                "reason": f"Los enlaces a {label} no están permitidos en esta comunidad.",
+                "category": "blocked_platform",
+            }
+
+    root_is_anarchy = host in _ANARCHY_HOSTS or host.endswith(".anarchyapps.org")
+    if root_is_anarchy and re.match(r"^/c(?:/|$)", path, flags=re.IGNORECASE):
+        segments = [segment for segment in path.split("/") if segment]
+        community_id = segments[1] if len(segments) > 1 else ""
+        exact_allowed = (
+            host == _ALLOWED_ANARCHY_HOST
+            and community_id == _ALLOWED_ANARCHY_COMMUNITY_ID
+        )
+        if not exact_allowed:
+            return {
+                "blocked": True,
+                "reason": (
+                    "Solo se permiten invitaciones a la comunidad de Anarchy "
+                    f"/c/{_ALLOWED_ANARCHY_COMMUNITY_ID}; los enlaces a otras comunidades "
+                    "de Anarchy están bloqueados."
+                ),
+                "category": "other_anarchy_community",
+            }
+
+    # Also catch an explicitly named Katherine community/page when it uses a
+    # readable slug. Numeric Anarchy community IDs are already covered above.
+    path_segments = [segment.casefold() for segment in path.split("/") if segment]
+    if "katherine" in path_segments or host.startswith("katherine."):
+        return {
+            "blocked": True,
+            "reason": "Los enlaces a la página de Katherine están bloqueados.",
+            "category": "blocked_page",
+        }
+
+    if (
+        host == _ALLOWED_ANARCHY_HOST
+        and path.rstrip("/") == f"/c/{_ALLOWED_ANARCHY_COMMUNITY_ID}"
+    ):
+        return {"blocked": False, "trusted": True, "reason": "Comunidad permitida."}
+
+    return {"blocked": False, "trusted": False, "reason": ""}
+
+
+async def inspect_message_links(
+    content: str,
+    fetch_page,
+    *,
+    timeout: float = _LINK_FETCH_TIMEOUT_SECONDS,
+) -> dict:
+    """Inspect every extracted URL in an incoming message and return a moderation verdict.
+
+    The function retains no content or URLs after returning. Each outbound fetch
+    is bounded, uses the caller's public-HTTPS-only fetcher, and runs concurrently.
+    """
+    urls = extract_message_urls(content)
+    if not urls:
+        return {"has_links": False, "blocked": False, "urls_checked": 0, "reason": ""}
+
+    # The anti-spam guard normally rejects five or more links. Keep a separate
+    # hard cap so disabling that guard cannot turn one webhook into an unbounded fan-out.
+    if len(urls) >= _MAX_MESSAGE_URLS:
+        return {
+            "has_links": True, "blocked": True, "urls_checked": len(urls),
+            "reason": "El mensaje contiene demasiados enlaces para revisarlos con seguridad.",
+            "category": "excessive_links",
+        }
+
+    async def inspect_one(url: str) -> dict:
+        policy = classify_link_policy(url)
+        if policy.get("blocked"):
+            return {"url": url, **policy}
+
+        if policy.get("trusted"):
+            return {"url": url, "blocked": False, "trusted": True}
+
+        page = {}
+        fetch_error = None
+        try:
+            page = await asyncio.wait_for(fetch_page(url), timeout=max(0.5, float(timeout)))
+        except asyncio.TimeoutError:
+            fetch_error = "La página tardó demasiado en responder."
+        except Exception as exc:
+            fetch_error = f"No se pudo verificar el contenido ({type(exc).__name__})."
+
+        title = str(page.get("title") or "")
+        text = str(page.get("excerpt") or page.get("snippet") or "")
+        if re.search(r"\\bkatherine\\b", title, flags=re.IGNORECASE):
+            return {
+                "url": url,
+                "blocked": True,
+                "category": "blocked_page",
+                "reason": "El destino es una página identificada como Katherine.",
+            }
+
+        signals = inspect_link_signals(
+            url,
+            final_url=str(page.get("final_url") or page.get("url") or url),
+            redirect_chain=page.get("redirect_chain") or [url],
+            title=title,
+            page_text=text,
+        )
+        # +18 content and medium/high risk indicators are blocked automatically.
+        if signals.get("adult"):
+            return {
+                "url": url, "blocked": True, "category": "adult_content",
+                "reason": "El enlace conduce a contenido identificado como +18.",
+                "signals": signals,
+            }
+        if signals.get("risk") in {"medio", "alto"} or signals.get("malicious_suspected"):
+            return {
+                "url": url, "blocked": True, "category": "suspicious_link",
+                "reason": "El enlace presenta señales de riesgo o redirecciones sospechosas.",
+                "signals": signals,
+            }
+        return {
+            "url": url,
+            "blocked": False,
+            "verified": bool(page),
+            "reason": fetch_error or "",
+            "signals": signals,
+        }
+
+    results = await asyncio.gather(*(inspect_one(url) for url in urls))
+    blocked = next((item for item in results if item.get("blocked")), None)
+    return {
+        "has_links": True,
+        "blocked": bool(blocked),
+        "urls_checked": len(results),
+        "reason": str(blocked.get("reason") or "") if blocked else "",
+        "category": str(blocked.get("category") or "") if blocked else "",
+        "blocked_url": str(blocked.get("url") or "") if blocked else "",
+        "results": results,
+    }
