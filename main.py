@@ -2784,7 +2784,7 @@ async def archive_item_details(identifier: str) -> dict | None:
             file_size = 0
         if file_size and file_size > DJ_REMOTE_AUDIO_MAX_BYTES:
             continue
-        if audio_file.get("private") == "true":
+        if audio_file.get("private") is True or str(audio_file.get("private") or "").lower() == "true":
             continue
         allowed_files.append((filename, file_size))
 
@@ -2795,10 +2795,11 @@ async def archive_item_details(identifier: str) -> dict | None:
         ".mp3": 0, ".ogg": 1, ".m4a": 2,
         ".opus": 3, ".wav": 4, ".flac": 5
     }
+    # Prefer smaller files to reduce download time, RAM/disk pressure and decode risk.
     allowed_files.sort(
         key=lambda pair: (
+            pair[1] if pair[1] else 10**15,
             extension_priority.get(Path(pair[0]).suffix.lower(), 99),
-            pair[1] if pair[1] else 10**15
         )
     )
     filename = allowed_files[0][0]
