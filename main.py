@@ -8520,48 +8520,6 @@ async def _handle_command_impl(event: dict, source: str):
         await send_message(thread, answer, source, reply, allow_safe_links=True)
         return
 
-    if command in ("!enlace", "!analizarenlace", "!leerweb"):
-        target_url = query.strip()
-        if not target_url:
-            await send_message(thread, "Uso: !enlace https://sitio-publico.com/articulo", source, reply)
-            return
-        try:
-            page = await fetch_public_page(target_url, external_request)
-            link_signals = inspect_link_signals(
-                target_url,
-                final_url=page.get("final_url", page.get("url", "")),
-                redirect_chain=page.get("redirect_chain", []),
-                title=page.get("title", ""),
-                page_text=page.get("excerpt", ""),
-            )
-            context = build_source_context(
-                "Analiza esta página: " + page["title"],
-                [page]
-            )
-            try:
-                summary = await AI_CORE.summarize_research(
-                    "Resume y analiza esta página, distingue afirmaciones, datos y posibles sesgos.",
-                    context, external_request,
-                    rate_key=build_ai_session_key(source, thread, author, message_id)
-                )
-            except Exception:
-                logging.exception("[RESEARCH] Falló análisis IA del enlace")
-                summary = page.get("excerpt", "")[:2500]
-            answer = (
-                f"ANÁLISIS DE ENLACE\n{page['title']}\nDominio: {page['domain']}\n\n"
-                f"{format_link_signals(link_signals)}\n\n"
-                f"{summary}\n\nFuente: {page['domain']}\n"
-                "El contenido de la página se trató como material externo no confiable.\n"
-                "La evaluación es heurística: no sustituye un antivirus ni garantiza seguridad."
-            )
-        except ValueError as exc:
-            answer = str(exc)
-        except Exception as exc:
-            logging.warning("[RESEARCH] No se pudo leer enlace: %s", type(exc).__name__)
-            answer = "No pude leer esa página. Puede estar bloqueada, requerir acceso o no ofrecer contenido HTML público."
-        await send_message(thread, answer, source, reply)
-        return
-
     if command == "!ia":
         sub = args[0].casefold() if args else "ayuda"
         rest = " ".join(args[1:]).strip()
