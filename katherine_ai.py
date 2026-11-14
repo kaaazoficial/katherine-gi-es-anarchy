@@ -1606,6 +1606,7 @@ class KatherineAI:
                 window.popleft()
             if not window:
                 self._user_request_windows.pop(key, None)
+    @staticmethod
     def _provider_retry_delay(response: Any, attempt: int) -> float:
         """Respect provider retry/reset headers, then use exponential backoff."""
         headers = getattr(response, "headers", {}) or {}
