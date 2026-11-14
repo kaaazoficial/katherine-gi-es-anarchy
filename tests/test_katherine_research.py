@@ -308,3 +308,34 @@ def test_provider_failure_is_logged_and_does_not_abort_other_sources(monkeypatch
     results = run(research.search_web("generic question about public topic", lambda *a, **k: None, limit=3))
     assert results
     assert "Fuente" in caplog.text
+
+
+
+def test_source_coverage_counts_dates_domains_and_source_kinds():
+    sources = [
+        {"domain": "nasa.gov", "source_type": "nasa_official", "publication_date": "2026-01-01"},
+        {"domain": "openalex.org", "source_type": "openalex"},
+        {"domain": "community.example", "source_type": "fandom", "year": "2025"},
+        {"domain": "nasa.gov", "source_type": "public_web"},
+    ]
+    coverage = research.summarize_source_coverage(sources)
+    assert coverage == {
+        "sources": 4,
+        "unique_domains": 3,
+        "dated_sources": 2,
+        "undated_sources": 2,
+        "academic_sources": 1,
+        "official_sources": 1,
+        "community_sources": 1,
+    }
+
+
+def test_source_context_discloses_coverage_limitations():
+    context = research.build_source_context(
+        "tema de prueba",
+        [{"title": "Fuente", "domain": "example.org", "source_type": "public_web"}],
+    )
+    assert "sources=1" in context
+    assert "unique_domains=1" in context
+    assert "undated_sources=1" in context
+    assert "declara esa limitación" in context
