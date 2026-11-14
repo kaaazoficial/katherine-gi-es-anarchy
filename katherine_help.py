@@ -283,4 +283,4 @@ def filter_commands_help_text(help_text: str, topic: str | None = None) -> str:
     prefix = prefix_match.group(1).strip() if prefix_match else "!"
     _, groups = _command_help_groups(prefix)
     title, entries = groups[category_index]
-    return "\\n".join([*_intro_lines(prefix), *_format_section(title, entries)])
+    return "\n".join([*_intro_lines(prefix), *_format_section(title, entries)])
