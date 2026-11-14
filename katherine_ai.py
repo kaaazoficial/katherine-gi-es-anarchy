@@ -706,6 +706,7 @@ AI_TOOL_REQUEST_HINTS = (
     ({"investigar", "enlace"}, ("investiga", "investigar", "fuentes", "consulta web", "analiza este enlace", "resume este enlace", "pagina web", "articulo")),
     ({"calcular"}, ("calcula ", "calcular ", "cuanto es ", "cuánto es ", "resuelve ", "raiz cuadrada de ")),
     ({"calcular"}, ("calcula ", "calcular ", "cuanto es ", "cuánto es ", "resuelve ", "raiz cuadrada de ")),
+    ({"calcular"}, ("calcula ", "calcular ", "cuanto es ", "cuánto es ", "resuelve ", "raiz cuadrada de ")),
 )
 
 AI_GENSIN_REQUEST_HINTS = (
