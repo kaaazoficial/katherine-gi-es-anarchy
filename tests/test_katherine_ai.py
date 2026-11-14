@@ -731,15 +731,16 @@ async def test_katherine_identity_questions_with_name_prefix(monkeypatch, questi
         assert result["answer"] == expected
 
 
-def test_research_tools_are_allowed_and_validated():
+def test_research_and_calculator_tools_are_allowed_but_link_analysis_is_automatic():
+    from katherine_ai import AI_PUBLIC_COMMANDS
+
     assert validate_ai_tool_call("investigar", "cambios recientes de Python") == (
         "investigar cambios recientes de Python"
     )
-    assert validate_ai_tool_call("enlace", "https://example.com/articulo") == (
-        "enlace https://example.com/articulo"
-    )
+    assert validate_ai_tool_call("calcular", "2+2") == "calcular 2+2"
+    assert "enlace" not in AI_PUBLIC_COMMANDS
+    assert validate_ai_tool_call("enlace", "https://example.com/articulo") is None
     assert validate_ai_tool_call("enlace", "http://example.com") is None
-    assert validate_ai_tool_call("enlace", "https://127.0.0.1/admin") is None
     assert validate_ai_tool_call("investigar", "https://example.com") is None
 
 
@@ -797,19 +798,19 @@ async def test_ai_plan_validates_all_steps_before_returning_plan(monkeypatch):
             "args": "",
             "steps": [
                 {"command": "investigar", "args": "cambios recientes de Python"},
-                {"command": "enlace", "args": "https://example.com/articulo"},
+                {"command": "calcular", "args": "2+2"},
             ],
         }))
 
     result = await ai.assist(
-        "investiga los cambios de Python y analiza este artículo",
+        "investiga los cambios de Python y calcula 2+2",
         "room:user",
         fake_request,
     )
     assert result["kind"] == "plan"
     assert result["steps"] == [
         "investigar cambios recientes de Python",
-        "enlace https://example.com/articulo",
+        "calcular 2+2",
     ]
 
 
@@ -1141,7 +1142,7 @@ def test_ai_tool_catalog_is_scoped_to_intent_and_topic():
     research = select_ai_tool_commands(
         "investiga las novedades", AI_PUBLIC_COMMANDS, "research"
     )
-    assert research == frozenset({"investigar", "enlace"})
+    assert research == frozenset({"investigar"})
 
 
 def test_groq_provider_lock_does_not_share_gemini_lock():

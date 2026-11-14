@@ -63,7 +63,7 @@ from katherine_research import (
  )
 from katherine_utilities import calculate_expression, format_calculation_result
 from katherine_link_analysis import (
-    inspect_link_signals, format_link_signals, inspect_message_links,
+    inspect_message_links,
     extract_message_urls,
 )
 from katherine_game_queries import (

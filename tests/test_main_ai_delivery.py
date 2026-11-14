@@ -529,7 +529,7 @@ def test_command_help_is_complete_and_keeps_main_categories():
 def test_command_help_lists_all_groups_and_legacy_aliases_without_button_menu():
     help_text = bot_main.build_commands_help_text()
     required = (
-        "!asistente", "!ia preguntar", "!investigar", "!enlace",
+        "!asistente", "!ia preguntar", "!investigar", "!analizartexto", "!calcular",
         "!guia", "!materiales", "!equipos", "!rotacion", "!buscargenshin",
         "!enemigo", "!elemento", "!curiosidad", "!deseo", "!resetpity",
         "!interaccion", "!afinidad", "!regalo", "!actividad",
