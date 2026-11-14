@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, Gauge, generate_latest
@@ -14,6 +14,9 @@ _COUNTERS = (
     ("katherine_commands_received", "commands_received", "Commands received by this process."),
     ("katherine_ai_requests", "ai_requests", "AI requests handled by this process."),
     ("katherine_ai_errors", "ai_errors", "AI provider errors and fallbacks recorded by this process."),
+    ("katherine_ai_cache_hits", "ai_cache_hits", "Short-lived safe AI answer cache hits."),
+    ("katherine_ai_cache_misses", "ai_cache_misses", "New eligible AI cache requests."),
+    ("katherine_ai_singleflight_waits", "ai_singleflight_waits", "Concurrent requests sharing an in-flight AI call."),
     ("katherine_messages_sent", "messages_sent", "Messages sent by this process."),
     ("katherine_api_requests", "api_requests", "Anarchy API requests made by this process."),
     ("katherine_api_errors", "api_errors", "Anarchy API request errors recorded by this process."),
@@ -44,6 +47,7 @@ def render_prometheus_metrics(
     uptime_seconds: float = 0.0,
     memory_bytes: float | None = None,
     cpu_percent: float | None = None,
+    provider_usage: Iterable[Mapping[str, Any]] | None = None,
 ) -> tuple[bytes, str]:
     """Render aggregate-only metrics; never attach user, room or message labels."""
     registry = CollectorRegistry()
@@ -76,6 +80,33 @@ def render_prometheus_metrics(
         Counter(metric_name, description, registry=registry).inc(
             _finite_number(counters.get(key, 0))
         )
+
+    provider_input_tokens = Counter(
+        "katherine_ai_provider_model_input_tokens",
+        "Input tokens reported for each provider and model.",
+        ["provider", "model"],
+        registry=registry,
+    )
+    provider_output_tokens = Counter(
+        "katherine_ai_provider_model_output_tokens",
+        "Output tokens reported for each provider and model.",
+        ["provider", "model"],
+        registry=registry,
+    )
+    provider_responses = Counter(
+        "katherine_ai_provider_model_responses",
+        "Successful AI responses reported for each provider and model.",
+        ["provider", "model"],
+        registry=registry,
+    )
+    for item in list(provider_usage or [])[:12]:
+        if not isinstance(item, Mapping):
+            continue
+        provider = str(item.get("provider") or "unknown")[:48]
+        model = str(item.get("model") or "unknown")[:96]
+        provider_input_tokens.labels(provider, model).inc(_finite_number(item.get("input_tokens")))
+        provider_output_tokens.labels(provider, model).inc(_finite_number(item.get("output_tokens")))
+        provider_responses.labels(provider, model).inc(_finite_number(item.get("responses")))
 
     Gauge(
         "katherine_ai_provider_queue_wait_seconds",

@@ -1,3 +1,4 @@
+import asyncio
 """Tests for the bounded Katherine AI integration."""
 import json
 import time
@@ -1307,3 +1308,92 @@ def test_anarchy_apps_semantic_faq_does_not_require_llm():
 def test_common_greeting_is_answered_locally():
     from katherine_ai import resolve_community_faq
     assert resolve_community_faq("Hola Katherine") == "¡Hola! ¿Qué hacemos hoy?"
+
+
+
+@pytest.mark.asyncio
+async def test_simple_standalone_answers_use_short_ram_cache(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    ai = KatherineAI()
+    calls = []
+
+    async def fake_request(instructions, messages, request_func, **kwargs):
+        calls.append(messages)
+        return {"kind": "answer", "answer": "Una API permite que dos sistemas se comuniquen.", "command": "", "args": ""}
+
+    ai._request_json = fake_request
+    first = await ai.assist("¿Qué es una API?", "session-user-room", lambda *args, **kwargs: None, rate_key="user-room-1")
+    second = await ai.assist("¿Qué es una API?", "session-user-room", lambda *args, **kwargs: None, rate_key="user-room-1")
+    assert first["answer"] == second["answer"]
+    assert len(calls) == 1
+    assert ai.metrics["ai_cache_hits"] == 1
+    assert len(ai._simple_answer_cache) == 1
+
+
+@pytest.mark.asyncio
+async def test_simple_answer_cache_isolated_by_user_identity(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    ai = KatherineAI()
+    calls = []
+
+    async def fake_request(instructions, messages, request_func, **kwargs):
+        calls.append(messages)
+        return {"kind": "answer", "answer": "Respuesta general.", "command": "", "args": ""}
+
+    ai._request_json = fake_request
+    await ai.assist("¿Qué es una API?", "session-a", lambda *args, **kwargs: None, rate_key="user-a")
+    await ai.assist("¿Qué es una API?", "session-b", lambda *args, **kwargs: None, rate_key="user-b")
+    assert len(calls) == 2
+    assert ai.metrics["ai_cache_hits"] == 0
+
+
+@pytest.mark.asyncio
+async def test_personal_questions_are_never_cached(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    ai = KatherineAI()
+    calls = []
+
+    async def fake_request(instructions, messages, request_func, **kwargs):
+        calls.append(messages)
+        return {"kind": "answer", "answer": "Cuéntame un poco más.", "command": "", "args": ""}
+
+    ai._request_json = fake_request
+    await ai.assist("¿Qué opinas de mi situación?", "session", lambda *args, **kwargs: None, rate_key="user")
+    await ai.assist("¿Qué opinas de mi situación?", "session", lambda *args, **kwargs: None, rate_key="user")
+    assert len(calls) == 2
+    assert ai.metrics["ai_cache_hits"] == 0
+
+
+def test_followup_detector_only_keeps_context_for_referential_questions():
+    assert KatherineAI.is_contextual_followup(
+        "¿Y por qué?", [{"role": "assistant", "content": "Respuesta anterior"}]
+    )
+    assert not KatherineAI.is_contextual_followup(
+        "¿Qué es una API?", [{"role": "assistant", "content": "Respuesta anterior"}]
+    )
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_simple_queries_share_one_provider_request(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    ai = KatherineAI()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def fake_request(instructions, messages, request_func, **kwargs):
+        calls.append(1)
+        entered.set()
+        await release.wait()
+        return {"kind": "answer", "answer": "Respuesta compartida.", "command": "", "args": ""}
+
+    ai._request_json = fake_request
+    first = asyncio.create_task(ai.assist("¿Qué es una API?", "session-one", lambda *args, **kwargs: None, rate_key="user-one"))
+    await entered.wait()
+    second = asyncio.create_task(ai.assist("¿Qué es una API?", "session-one", lambda *args, **kwargs: None, rate_key="user-one"))
+    await asyncio.sleep(0)
+    release.set()
+    results = await asyncio.gather(first, second)
+    assert len(calls) == 1
+    assert all(item["answer"] == "Respuesta compartida." for item in results)
+    assert ai.metrics["ai_singleflight_waits"] == 1

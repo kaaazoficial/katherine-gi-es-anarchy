@@ -55,3 +55,18 @@ def test_metrics_export_includes_ai_provider_and_delivery_signals():
     assert "katherine_message_send_failures_total 1.0" in text
     assert "katherine_message_send_retry_wait_seconds 12.5" in text
     assert "uid=" not in text and "thread=" not in text
+
+
+
+def test_metrics_export_includes_bounded_provider_model_token_totals():
+    payload, _ = render_prometheus_metrics(provider_usage=[{
+        "provider": "Google Gemini", "model": "gemini-test-model",
+        "responses": 3, "input_tokens": 120, "output_tokens": 45,
+    }])
+    rendered = payload.decode("utf-8")
+    assert "katherine_ai_provider_model_input_tokens_total" in rendered
+    assert 'model="gemini-test-model"' in rendered
+    assert 'provider="Google Gemini"' in rendered
+    assert " 120.0" in rendered
+    assert " 45.0" in rendered
+    assert "user=" not in rendered and "thread=" not in rendered
