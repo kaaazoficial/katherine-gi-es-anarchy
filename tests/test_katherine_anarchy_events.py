@@ -35,7 +35,9 @@ def test_room_join_and_speaker_events_track_transient_participants():
     assert len(participants) == 1
     assert participants[0]["name"] == "Viajero"
     assert participants[0]["speaking"] is True
-    assert "Viajero" in format_voice_state("room-1", now=102) if False else True
+    output = format_voice_state("room-1")
+    assert "Viajero" in output
+    assert "secret" not in output
 
 
 def test_room_leave_removes_only_the_departing_participant():
