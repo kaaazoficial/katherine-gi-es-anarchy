@@ -187,9 +187,11 @@ def get_voice_participants(thread_id: str, now: float | None = None) -> list[dic
     )
 
 
-def format_voice_state(thread_id: str, mode: str = "participantes") -> str:
+def format_voice_state(
+    thread_id: str, mode: str = "participantes", now: float | None = None
+) -> str:
     """Format current participant state without exposing internal identifiers."""
-    participants = get_voice_participants(thread_id)
+    participants = get_voice_participants(thread_id, now=now)
     selected_mode = str(mode or "participantes").strip().casefold()
     if selected_mode in {"hablando", "speakers", "speaking"}:
         selected = [item for item in participants if item.get("speaking")]
