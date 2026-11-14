@@ -1552,9 +1552,22 @@ class KatherineAI:
 
     def cleanup(self, now: float | None = None) -> None:
         current = time.time() if now is None else float(now)
+        monotonic_now = time.monotonic()
         for key, item in list(self._memory.items()):
             if float(item.get("expires", 0)) <= current:
                 self._memory.pop(key, None)
+        for key, (expires_at, _) in list(self._simple_answer_cache.items()):
+            if expires_at <= monotonic_now:
+                self._simple_answer_cache.pop(key, None)
+        for key, task in list(self._simple_request_inflight.items()):
+            if task.done():
+                self._simple_request_inflight.pop(key, None)
+        rate_cutoff = monotonic_now - self.user_request_window_seconds
+        for key, window in list(self._user_request_windows.items()):
+            while window and window[0] <= rate_cutoff:
+                window.popleft()
+            if not window:
+                self._user_request_windows.pop(key, None)
         for key, enabled_at in list(self._analyst_enabled_at.items()):
             if current - float(enabled_at) >= self.analyst_ttl:
                 self._analyst_enabled.discard(key)
