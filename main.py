@@ -67,6 +67,11 @@ from katherine_link_analysis import (
     inspect_message_links,
     extract_message_urls,
 )
+from katherine_anarchy_events import (
+    clear_voice_room,
+    format_voice_state,
+    update_voice_room_event,
+)
 from katherine_game_queries import (
     infer_genshin_data_folder,
     strip_game_scope_qualifier,
@@ -10722,6 +10727,20 @@ Uso: !enciclopedia <nombre>""",
         await send_message(thread, "\\n".join(lines), source, reply)
         return
 
+    if command == "!voz":
+        mode = (args[0].casefold() if args else "participantes")
+        if mode in {"participantes", "lista", "estado", "status"}:
+            response = format_voice_state(thread, "participantes")
+        elif mode in {"hablando", "speakers", "activos"}:
+            response = format_voice_state(thread, "hablando")
+        else:
+            response = (
+                "Uso: !voz [participantes|hablando|estado]. "
+                "Muestra únicamente los participantes detectados por los eventos recientes de la llamada."
+            )
+        await send_message(thread, response, source, reply)
+        return
+
     if command == "!join":
         ok, message = await ensure_voice_room(thread)
         await send_message(
@@ -11997,15 +12016,95 @@ async def dispatch(event: dict, source: str):
     ):
         thread_id = str(event.get("threadId") or "")
         metrics[f"event_{kind}"] += 1
+        if kind in {"room.join", "room.speaker", "room.leave", "room.end", "room.kicked"}:
+            try:
+                update_voice_room_event(event)
+            except Exception:
+                logging.exception("[VOZ] No se pudo actualizar el estado efímero de participantes.")
         if kind == "room.ready":
             ready = DJ_READY_EVENTS.get(thread_id)
             if ready:
                 ready.set()
         elif kind in ("room.end", "room.kicked"):
+            clear_voice_room(thread_id)
             await stop_dj_room(thread_id, request_leave=False)
         logging.info("[SALA] Evento de sala: %s", kind)
 
-    elif kind in ("thread.added", "thread.removed", "message.edited", "message.deleted"):
+    elif kind == "message.edited":
+        metrics[f"event_{kind}"] += 1
+        # Revalidar el contenido editado evita que un enlace prohibido se
+        # introduzca después de que el mensaje original haya sido publicado.
+        if source == "developer":
+            message_data = event.get("message") or {}
+            if not isinstance(message_data, dict):
+                message_data = {}
+            author_data = message_data.get("author") or {}
+            edited_text = str(message_data.get("content") or "").strip()
+            if (
+                edited_text
+                and extract_message_urls(edited_text)
+                and not is_bot_author(
+                    author_data, (BOT_IDENTITIES.get(source) or {}).get("uid")
+                )
+            ):
+                try:
+                    verdict = await inspect_message_links(
+                        edited_text,
+                        lambda url: fetch_public_page(url, external_request),
+                    )
+                except Exception:
+                    logging.exception("[LINK_GUARD] Error revisando un mensaje editado.")
+                    verdict = {
+                        "blocked": True,
+                        "reason": "No se pudo verificar el enlace de forma segura.",
+                        "category": "inspection_error",
+                    }
+                if verdict.get("blocked"):
+                    message_id = str(
+                        message_data.get("id")
+                        or message_data.get("messageId")
+                        or message_data.get("message_id")
+                        or ""
+                    ).strip()
+                    deleted = False
+                    if message_id:
+                        deletion = await api(
+                            "DELETE",
+                            f"/threads/{event.get('threadId')}/messages/{message_id}",
+                            source,
+                        )
+                        deleted = bool(
+                            deletion.get("ok") or deletion.get("status") == 404
+                        )
+                    metrics["automatic_link_blocks"] = (
+                        metrics.get("automatic_link_blocks", 0) + 1
+                    )
+                    metrics["edited_link_blocks"] = (
+                        metrics.get("edited_link_blocks", 0) + 1
+                    )
+                    logging.warning(
+                        "[LINK_GUARD] Edición bloqueada | categoria=%s | eliminado=%s",
+                        verdict.get("category", "blocked"),
+                        deleted,
+                    )
+                    if not deleted:
+                        await send_message(
+                            str(event.get("threadId") or ""),
+                            "🛡️ No se permitió el enlace añadido al editar el mensaje: "
+                            + str(verdict.get("reason") or "destino no permitido."),
+                            source,
+                        )
+        logging.info("[EVENTO] %s", kind)
+
+    elif kind == "thread.removed":
+        metrics[f"event_{kind}"] += 1
+        thread_id = str(event.get("threadId") or "")
+        clear_voice_room(thread_id)
+        if thread_id in DJ_ROOMS:
+            await stop_dj_room(thread_id, request_leave=False)
+        logging.info("[EVENTO] %s; estado temporal de sala eliminado.", kind)
+
+    elif kind in ("thread.added", "message.deleted"):
         metrics[f"event_{kind}"] += 1
         logging.info("[EVENTO] %s", kind)
 
