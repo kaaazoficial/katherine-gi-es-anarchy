@@ -271,7 +271,7 @@ def filter_commands_help_text(help_text: str, topic: str | None = None) -> str:
     category_index = _CATEGORY_ALIASES.get(requested)
     if category_index is None:
         available = "ia, genshin, social, juegos, musica, multimedia, admin"
-        prefix_match = re.search(r"Prefijo principal:\\s*(.+?)\\s*\\(", str(help_text))
+        prefix_match = re.search(r"Prefijo principal:\s*(.+?)\s*\(", str(help_text))
         prefix = prefix_match.group(1).strip() if prefix_match else "!"
         return (
             "[CB] KATHERINE · AYUDA POR CATEGORÍA\\n"
@@ -279,7 +279,7 @@ def filter_commands_help_text(help_text: str, topic: str | None = None) -> str:
             f"[C] Ejemplo: {prefix}ayuda genshin."
         )
 
-    prefix_match = re.search(r"Prefijo principal:\\s*(.+?)\\s*\\(", str(help_text))
+    prefix_match = re.search(r"Prefijo principal:\s*(.+?)\s*\(", str(help_text))
     prefix = prefix_match.group(1).strip() if prefix_match else "!"
     _, groups = _command_help_groups(prefix)
     title, entries = groups[category_index]
