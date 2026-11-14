@@ -206,7 +206,7 @@ _BLOCKED_COMMUNITY_HOSTS = (
 _MAX_MESSAGE_URLS = 8
 _LINK_FETCH_TIMEOUT_SECONDS = 6.0
 _URL_RE = re.compile(
-    r"(?i)\\b(?:https?://|www\\.)[^\\s<>\\"'\\[\\]{}]+"
+    r"""(?i)\b(?:https?://|www\.)[^\s<>"'\[\]{}]+"""
 )
 _TRAILING_URL_PUNCTUATION = ".,!?;:)]}>"
 
@@ -333,7 +333,7 @@ async def inspect_message_links(
 
         title = str(page.get("title") or "")
         text = str(page.get("excerpt") or page.get("snippet") or "")
-        if re.search(r"\\bkatherine\\b", title, flags=re.IGNORECASE):
+        if re.search(r"\bkatherine\b", title, flags=re.IGNORECASE):
             return {
                 "url": url,
                 "blocked": True,
