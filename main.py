@@ -10753,6 +10753,31 @@ Uso: !enciclopedia <nombre>""",
             f"Proveedor IA: {'activo' if AI_CORE.is_enabled else 'sin credencial'} · {AI_CORE.provider_name if AI_CORE.is_enabled else 'no configurada'} · {AI_CORE.model if AI_CORE.is_enabled else '—'}",
             f"IA proveedor: {int(AI_CORE.metrics.get('ai_provider_requests', 0))} solicitudes · {int(AI_CORE.metrics.get('ai_provider_429', 0))} límites 429 · {int(AI_CORE.metrics.get('ai_provider_retries', 0))} reintentos",
             f"IA tokens: {int(AI_CORE.metrics.get('ai_provider_input_tokens', 0))} entrada · {int(AI_CORE.metrics.get('ai_provider_output_tokens', 0))} salida · {AI_CORE.metrics.get('ai_provider_queue_wait_seconds', 0):.1f} s de espera acumulada",
+            *(
+                lambda usage: [
+                    (
+                        f"Promedio por respuesta ({usage['usage_responses']} con uso informado): "
+                        f"{usage['avg_input_tokens_per_response']:.0f} entrada · "
+                        f"{usage['avg_output_tokens_per_response']:.0f} salida · "
+                        f"{usage['avg_total_tokens_per_response']:.0f} total"
+                        if usage["usage_responses"] else
+                        "Promedio por respuesta: aún sin respuestas con uso de tokens informado"
+                    ),
+                    (
+                        f"Últimos 60 min: {usage['last_hour_tokens']} tokens "
+                        f"({usage['last_hour_input_tokens']} entrada · "
+                        f"{usage['last_hour_output_tokens']} salida) · "
+                        f"{usage['last_hour_responses']} respuestas"
+                    ),
+                    (
+                        f"Ritmo medio desde inicio: {usage['tokens_per_hour_since_start']:.0f} tokens/h · "
+                        f"estimación diaria: {usage['estimated_daily_tokens']:,} tokens "
+                        "(proyección, no consumo real)".replace(",", ".")
+                        if usage["estimated_daily_tokens"] is not None else
+                        "Estimación diaria: disponible tras 5 min y 3 respuestas con uso informado"
+                    ),
+                ]
+            )(AI_CORE.token_usage_snapshot()),
             f"Mensajería: {int(metrics['message_send_retries'])} reintentos 429 · {int(metrics['message_send_recovered'])} bloques recuperados · {int(metrics['message_send_failures'])} bloques fallidos",
             f"Pendientes: {int(metrics['message_send_pending_queued'])} bloques encolados · {int(metrics['message_send_pending_expired'])} expirados · {int(metrics['message_send_pending_abandoned'])} abandonados",
             "Prometheus: endpoint /metrics (contadores agregados, sin datos de usuarios ni conversaciones).",

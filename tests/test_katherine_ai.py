@@ -51,6 +51,55 @@ def test_allowlist_rejects_sensitive_or_malformed_actions(command, args):
     assert validate_ai_tool_call(command, args) is None
 
 
+def test_provider_token_usage_snapshot_calculates_averages_and_recent_hour():
+    ai = KatherineAI()
+    ai._token_usage_started_at = 1000.0
+    ai._record_provider_token_usage(100, 20, now=1100.0)
+    ai._record_provider_token_usage(60, 40, now=1190.0)
+
+    usage = ai.token_usage_snapshot(now=1195.0)
+
+    assert usage["input_tokens"] == 160
+    assert usage["output_tokens"] == 60
+    assert usage["total_tokens"] == 220
+    assert usage["usage_responses"] == 2
+    assert usage["avg_input_tokens_per_response"] == 80
+    assert usage["avg_output_tokens_per_response"] == 30
+    assert usage["avg_total_tokens_per_response"] == 110
+    assert usage["last_hour_tokens"] == 220
+    assert usage["last_hour_responses"] == 2
+    assert usage["estimated_daily_tokens"] is None
+
+
+def test_provider_token_usage_snapshot_daily_projection_requires_minimum_sample():
+    ai = KatherineAI()
+    ai._token_usage_started_at = 1000.0
+    ai._record_provider_token_usage(40, 60, now=1100.0)
+    ai._record_provider_token_usage(40, 60, now=1200.0)
+
+    assert ai.token_usage_snapshot(now=1300.0)["estimated_daily_tokens"] is None
+
+    ai._record_provider_token_usage(40, 60, now=1299.0)
+    usage = ai.token_usage_snapshot(now=1300.0)
+
+    assert usage["estimated_daily_tokens"] == 86400
+    assert usage["tokens_per_hour_since_start"] == 3600
+
+
+def test_provider_token_usage_snapshot_excludes_entries_older_than_last_hour():
+    ai = KatherineAI()
+    ai._token_usage_started_at = 0.0
+    ai._record_provider_token_usage(10, 5, now=100.0)
+    ai._record_provider_token_usage(20, 10, now=4000.0)
+
+    usage = ai.token_usage_snapshot(now=4000.0)
+
+    assert usage["total_tokens"] == 45
+    assert usage["last_hour_tokens"] == 30
+    assert usage["last_hour_responses"] == 1
+    assert len(ai._token_usage_minute_buckets) <= 60
+
+
 def test_metrics_command_is_admin_only_and_read_only():
     from katherine_ai import AI_ADMIN_COMMANDS, AI_PLAN_SAFE_COMMANDS
     assert validate_ai_tool_call("metricas", "") is None
