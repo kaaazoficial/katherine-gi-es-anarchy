@@ -338,4 +338,4 @@ def test_source_context_discloses_coverage_limitations():
     assert "sources=1" in context
     assert "unique_domains=1" in context
     assert "undated_sources=1" in context
-    assert "declare esa limitación" in context
+    assert "declara esa limitación" in context
