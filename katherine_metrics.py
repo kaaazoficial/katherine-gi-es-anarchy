@@ -10,6 +10,9 @@ from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, G
 
 _COUNTERS = (
     ("katherine_webhook_events", "webhook_events", "Webhook events accepted by this process."),
+    ("katherine_webhook_dispatch_completed", "webhook_dispatch_completed", "Webhook events dispatched successfully."),
+    ("katherine_webhook_dispatch_failures", "webhook_dispatch_failures", "Webhook event dispatch failures."),
+    ("katherine_webhook_dispatch_queue_waits", "webhook_dispatch_queue_waits", "Events that waited for per-room dispatch ordering."),
     ("katherine_text_messages_received", "text_messages_received", "Text messages received by this process."),
     ("katherine_commands_received", "commands_received", "Commands received by this process."),
     ("katherine_ai_requests", "ai_requests", "AI requests handled by this process."),
@@ -107,6 +110,17 @@ def render_prometheus_metrics(
         provider_input_tokens.labels(provider, model).inc(_finite_number(item.get("input_tokens")))
         provider_output_tokens.labels(provider, model).inc(_finite_number(item.get("output_tokens")))
         provider_responses.labels(provider, model).inc(_finite_number(item.get("responses")))
+
+    Counter(
+        "katherine_webhook_dispatch_queue_wait_seconds",
+        "Cumulative seconds spent waiting for per-room webhook dispatch.",
+        registry=registry,
+    ).inc(_finite_number(counters.get("webhook_dispatch_queue_wait_seconds", 0)))
+    Counter(
+        "katherine_webhook_dispatch_processing_seconds",
+        "Cumulative seconds spent dispatching webhook events.",
+        registry=registry,
+    ).inc(_finite_number(counters.get("webhook_dispatch_processing_seconds", 0)))
 
     Gauge(
         "katherine_ai_provider_queue_wait_seconds",

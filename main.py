@@ -100,10 +100,6 @@ AI_TRACE_WINDOW_SECONDS = 900
 AI_TRACE_CAPTURE: ContextVar[list[str] | None] = ContextVar(
     "katherine_ai_trace_capture", default=None
 )
-OUTGOING_MENTION_MAP: ContextVar[dict[str, str]] = ContextVar(
-    "katherine_outgoing_mention_map", default={}
-)
-
 
 def log_ai_conversation_trace(question: str, answer: str, route: str = "assistant") -> None:
     """Log a redacted Q/A pair only during the administrator-enabled RAM window."""
@@ -914,6 +910,8 @@ def get_recent_gifts(target_uid: str, limit: int = 5):
 # ---------------------------------------------------------------------------
 seen_events = deque(maxlen=3000)
 seen_event_set = set()
+# FIFO-by-room dispatch: events in one chat stay ordered without blocking other rooms.
+event_dispatch_locks: dict[tuple[str, str], dict[str, Any]] = {}
 last_bot_send = 0.0
 last_chat_send = defaultdict(float)
 send_lock = asyncio.Lock()
@@ -2126,66 +2124,6 @@ def schedule_pending_delivery(
     return True
 
 
-def build_outgoing_mention_map(message: dict | None) -> dict[str, dict[str, str]]:
-    """Build ephemeral alias -> mention entity data from Anarchy's webhook."""
-    if not isinstance(message, dict):
-        return {}
-    aliases: dict[str, dict[str, str]] = {}
-    for mention in message.get("mentions") or []:
-        if not isinstance(mention, dict):
-            continue
-        user_id = str(
-            mention.get("uid") or mention.get("userId")
-            or mention.get("id") or ""
-        ).strip()
-        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", user_id):
-            continue
-        display_name = str(
-            mention.get("nickname") or mention.get("displayName")
-            or mention.get("display_name") or mention.get("username")
-            or mention.get("name") or mention.get("userName")
-            or mention.get("handle") or user_id
-        ).strip().lstrip("@")[:80]
-        entity = {"uid": user_id, "nickname": display_name}
-        for field in (
-            "nickname", "username", "displayName", "display_name",
-            "name", "userName", "handle",
-        ):
-            alias = str(mention.get(field) or "").strip().lstrip("@").strip()
-            if not alias or len(alias) > 80 or any(ord(ch) < 32 for ch in alias):
-                continue
-            aliases.setdefault(alias.casefold(), entity)
-    return aliases
-
-
-def outgoing_mention_entities(content: Any) -> list[dict[str, str]]:
-    """Return structured user references for @names explicitly present in text.
-
-    Keep the visible @name intact. The user reference is carried separately in
-    the message's mentions field rather than encoded as Discord-style markup.
-    """
-    aliases = OUTGOING_MENTION_MAP.get() or {}
-    if not aliases:
-        return []
-    ordered = sorted(aliases, key=len, reverse=True)
-    alternatives = "|".join(re.escape(alias) for alias in ordered)
-    pattern = re.compile(
-        rf"(?<![<\w@])@({alternatives})(?![\w@-]|\.[A-Za-z0-9])",
-        re.IGNORECASE,
-    )
-    entities: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for match in pattern.finditer(str(content or "")):
-        entity = aliases.get(match.group(1).casefold())
-        if not entity:
-            continue
-        user_id = entity["uid"]
-        if user_id not in seen:
-            seen.add(user_id)
-            entities.append(dict(entity))
-    return entities
-
-
 async def send_message(
     thread_id: str,
     content: str,
@@ -2199,7 +2137,8 @@ async def send_message(
     if not thread_id:
         return None
 
-    # Keep @Name visible; attach verified profile references separately.
+    # Outgoing native mentions are not part of Anarchy's documented message schema.
+    # Keep @names as readable text until the platform exposes a supported field.
     content = sanitize_chat_text(content, allow_safe_links=allow_safe_links)
     trace_capture = AI_TRACE_CAPTURE.get()
     if trace_capture is not None and content and len(trace_capture) < 10:
@@ -2262,11 +2201,6 @@ async def send_message(
                 await asyncio.sleep(wait)
 
             body = {"content": part}
-            mention_entities = outgoing_mention_entities(part)
-            if mention_entities:
-                # Anarchy renders profile links from structured mention entities,
-                # not from inline text tokens such as <@UID>.
-                body["mentions"] = mention_entities
 
             # La respuesta al mensaje original se aplica solo al primer bloque.
             if reply_id and index == 0:
@@ -11977,13 +11911,8 @@ async def handle_interaction(event: dict, source: str):
 # EVENTOS Y WEBHOOKS
 # ---------------------------------------------------------------------------
 async def handle_command(event: dict, source: str):
-    """Process one command with a scoped, ephemeral map of mentioned users."""
-    message = event.get("message") if isinstance(event, dict) else None
-    token = OUTGOING_MENTION_MAP.set(build_outgoing_mention_map(message))
-    try:
-        return await _handle_command_impl(event, source)
-    finally:
-        OUTGOING_MENTION_MAP.reset(token)
+    """Process one command through the existing command handler."""
+    return await _handle_command_impl(event, source)
 
 
 async def dispatch(event: dict, source: str):
@@ -12117,14 +12046,58 @@ async def dispatch(event: dict, source: str):
 
 
 async def safe_dispatch(event: dict, source: str):
+    """Dispatch messages/interactions FIFO per chat while keeping rooms concurrent."""
+    kind = str(event.get("type") or "")
+    thread_id = str(event.get("threadId") or "").strip()
+    key = (str(source), thread_id) if thread_id and kind in {"message", "interaction"} else None
+    entry = None
+    queued_at = time.monotonic()
+
+    if key is not None:
+        # No await occurs between lookup and reference increment, so a single
+        # asyncio event loop cannot lose a waiter during lock lifecycle cleanup.
+        entry = event_dispatch_locks.get(key)
+        if entry is None:
+            entry = {"lock": asyncio.Lock(), "users": 0}
+            event_dispatch_locks[key] = entry
+        entry["users"] += 1
+
     try:
-        await dispatch(event, source)
+        if entry is not None:
+            was_queued = entry["lock"].locked()
+            async with entry["lock"]:
+                waited = max(0.0, time.monotonic() - queued_at)
+                metrics["webhook_dispatch_queue_wait_seconds"] += waited
+                if was_queued:
+                    metrics["webhook_dispatch_queue_waits"] += 1
+                started = time.monotonic()
+                try:
+                    await dispatch(event, source)
+                finally:
+                    metrics["webhook_dispatch_processing_seconds"] += max(
+                        0.0, time.monotonic() - started
+                    )
+        else:
+            await dispatch(event, source)
+        metrics["webhook_dispatch_completed"] += 1
+    except asyncio.CancelledError:
+        raise
     except Exception:
+        metrics["webhook_dispatch_failures"] += 1
         logging.exception(
             "Error procesando evento %s en origen %s",
-            event.get("type"),
-            source
+            kind or "desconocido",
+            source,
         )
+    finally:
+        if entry is not None and key is not None:
+            entry["users"] -= 1
+            if (
+                entry["users"] <= 0
+                and not entry["lock"].locked()
+                and event_dispatch_locks.get(key) is entry
+            ):
+                event_dispatch_locks.pop(key, None)
 
 
 def verify_webhook(raw: bytes, headers, secret: str):
