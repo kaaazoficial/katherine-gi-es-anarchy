@@ -721,10 +721,10 @@ def test_audio_dependencies_are_loaded_only_when_requested(monkeypatch):
     assert bot_main.livekit_rtc is fake_rtc
     assert bot_main.pyav is fake_av
     assert bot_main.np is fake_numpy
-    assert calls == ["livekit.rtc", "av", "numpy"]
+    assert calls == ["av", "numpy", "livekit.rtc"]
 
     assert bot_main.load_audio_dependencies() is True
-    assert calls == ["livekit.rtc", "av", "numpy"]
+    assert calls == ["av", "numpy", "livekit.rtc"]
 
 
 def test_tts_dependency_is_loaded_only_when_reading_is_requested(monkeypatch):
