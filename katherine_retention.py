@@ -52,28 +52,42 @@ def cleanup_database_retention(
     )
     counts["profile_texts_expired"] = max(0, cursor.rowcount)
 
+    # Keep every table and predicate static. Only bound values vary at runtime.
     # Remove user-linked state before deleting inactive account rows.
-    for table, condition, params in (
+    expiration_queries = (
         (
             "affinities",
-            f"uid IN ({stale_users}) OR target_uid IN ({stale_users})",
+            "DELETE FROM affinities WHERE uid IN (SELECT uid FROM users WHERE last_seen < ?) "
+            "OR target_uid IN (SELECT uid FROM users WHERE last_seen < ?)",
             (user_cutoff, user_cutoff),
         ),
         (
             "gifts",
-            f"sender_uid IN ({stale_users}) OR target_uid IN ({stale_users}) OR created_at < ?",
+            "DELETE FROM gifts WHERE sender_uid IN (SELECT uid FROM users WHERE last_seen < ?) "
+            "OR target_uid IN (SELECT uid FROM users WHERE last_seen < ?) OR created_at < ?",
             (user_cutoff, user_cutoff, gift_cutoff),
         ),
-        ("wish_state", f"uid IN ({stale_users})", (user_cutoff,)),
-        ("reward_claims", f"uid IN ({stale_users})", (user_cutoff,)),
+        (
+            "wish_state",
+            "DELETE FROM wish_state WHERE uid IN (SELECT uid FROM users WHERE last_seen < ?)",
+            (user_cutoff,),
+        ),
+        (
+            "reward_claims",
+            "DELETE FROM reward_claims WHERE uid IN (SELECT uid FROM users WHERE last_seen < ?)",
+            (user_cutoff,),
+        ),
         (
             "moderation_warnings",
-            f"target_uid IN ({stale_users}) OR moderator_uid IN ({stale_users}) OR created_at < ?",
+            "DELETE FROM moderation_warnings "
+            "WHERE target_uid IN (SELECT uid FROM users WHERE last_seen < ?) "
+            "OR moderator_uid IN (SELECT uid FROM users WHERE last_seen < ?) OR created_at < ?",
             (user_cutoff, user_cutoff, moderation_cutoff),
         ),
-    ):
-        cursor = db.execute(f"DELETE FROM {table} WHERE {condition}", params)
-        counts[f"{table}_expired"] = max(0, cursor.rowcount)
+    )
+    for table_name, statement, parameters in expiration_queries:
+        cursor = db.execute(statement, parameters)
+        counts[f"{table_name}_expired"] = max(0, cursor.rowcount)
 
     cursor = db.execute("DELETE FROM users WHERE last_seen < ?", (user_cutoff,))
     counts["inactive_users_deleted"] = max(0, cursor.rowcount)
