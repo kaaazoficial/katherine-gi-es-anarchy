@@ -88,7 +88,11 @@ from katherine_game_queries import (
 )
 from katherine_retention import cleanup_database_retention
 from katherine_storage import verify_sqlite_database
-from katherine_help import build_commands_help_text as _build_commands_help_text, filter_commands_help_text
+from katherine_help import (
+    build_commands_help_blocks,
+    build_commands_help_text as _build_commands_help_text,
+    filter_commands_help_text,
+)
 
 AI_CORE = KatherineAI()
 AI_TOOL_OUTPUT_CAPTURE: ContextVar[list[str] | None] = ContextVar(
@@ -2566,6 +2570,27 @@ async def remove_pressed_buttons(event: dict, source: str, remove=True):
 def build_commands_help_text() -> str:
     """Delegate command catalog generation to the focused help module."""
     return _build_commands_help_text(PREFIX)
+
+
+async def send_command_help_blocks(
+    thread_id: str,
+    source: str,
+    reply_id: str | None = None,
+) -> None:
+    """Send each command category as its own ordered Anarchy message."""
+    for index, block in enumerate(build_commands_help_blocks(PREFIX)):
+        result = await send_message(
+            thread_id,
+            block,
+            source,
+            reply_id if index == 0 else None,
+        )
+        if result is not None and not result.get("ok", False):
+            logging.warning(
+                "[AYUDA] Se detuvo el envío después del bloque %s por un error de entrega.",
+                index + 1,
+            )
+            break
 
 
 MENU_ROOT_CHOICES = [
@@ -8819,15 +8844,16 @@ async def _handle_command_impl(event: dict, source: str):
     # AYUDA
     # -----------------------------------------------------------------------
     if command in ("!ayuda", "!comandos"):
-        help_text = build_commands_help_text()
         topic = " ".join(args).strip() if args else ""
         if topic:
-            help_text = filter_commands_help_text(help_text, topic)
-        await send_message(thread, help_text, source, reply)
+            help_text = filter_commands_help_text(build_commands_help_text(), topic)
+            await send_message(thread, help_text, source, reply)
+        else:
+            await send_command_help_blocks(thread, source, reply)
         return
 
     if command in ("!menu", "!menú"):
-        await send_message(thread, build_commands_help_text(), source, reply)
+        await send_command_help_blocks(thread, source, reply)
         return
 
     if command == "!autotest":

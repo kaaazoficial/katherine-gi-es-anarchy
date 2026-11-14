@@ -4,8 +4,8 @@ from __future__ import annotations
 import unicodedata
 
 
-def build_commands_help_text(prefix: str = "!") -> str:
-    """Complete command index in compact plain text; no interactive buttons."""
+def _command_help_groups(prefix: str) -> tuple[str, list[tuple[str, list[str]]]]:
+    """Return the canonical command catalog grouped by category."""
     prefix = str(prefix or "!").strip() or "!"
     groups = [
         ("AYUDA E INTELIGENCIA ARTIFICIAL", [
@@ -76,6 +76,17 @@ def build_commands_help_text(prefix: str = "!") -> str:
             "Los comandos ADMIN requieren un UID autorizado incluido en ADMIN_UIDS. No se autoriza por nickname.",
         ]),
     ]
+
+    return prefix, groups
+
+def _utf16_length(value: str) -> int:
+    """Count message length the same way Anarchy's UTF-16 API does."""
+    return len(value.encode("utf-16-le")) // 2
+
+
+def build_commands_help_text(prefix: str = "!") -> str:
+    """Complete command index in compact plain-text; no interactive buttons."""
+    prefix, groups = _command_help_groups(prefix)
     lines = [
         "KATHERINE · LISTA COMPLETA DE COMANDOS",
         f"Prefijo principal: {prefix} · También acepta ! y -.",
@@ -86,8 +97,61 @@ def build_commands_help_text(prefix: str = "!") -> str:
         lines.append(f"── {title} ──")
         lines.extend(entries)
         lines.append("")
-    lines.append(f"Guía de texto: {prefix}ayuda, {prefix}comandos y {prefix}menu. sin paneles ni botones.")
+    lines.append(
+        f"Guía de texto: {prefix}ayuda, {prefix}comandos y {prefix}menu. "
+        "sin paneles ni botones."
+    )
     return "\n".join(lines)
+
+
+def build_commands_help_blocks(prefix: str = "!", max_units: int = 1800) -> list[str]:
+    """Build ordered standalone messages, never mixing adjacent categories."""
+    if max_units < 100:
+        raise ValueError("El tamaño mínimo de bloque debe ser al menos 100 unidades UTF-16.")
+
+    prefix, groups = _command_help_groups(prefix)
+    intro = (
+        "KATHERINE · LISTA DE COMANDOS\n"
+        f"Prefijo principal: {prefix} · También acepta ! y -.\n"
+        "Los argumentos entre < > son obligatorios; [ ] son opcionales."
+    )
+    blocks: list[str] = []
+
+    for title, entries in groups:
+        current_header = f"{intro}\n\n── {title} ──"
+        current_lines: list[str] = []
+
+        for entry in entries:
+            candidate_lines = [*current_lines, entry]
+            candidate = current_header + "\n" + "\n".join(candidate_lines)
+            if _utf16_length(candidate) <= max_units:
+                current_lines.append(entry)
+                continue
+
+            if not current_lines:
+                raise ValueError(
+                    f"Una línea de la categoría {title!r} supera el límite de bloque."
+                )
+
+            blocks.append(current_header + "\n" + "\n".join(current_lines))
+            current_header = (
+                "KATHERINE · LISTA DE COMANDOS (CONTINUACIÓN)\n"
+                f"Prefijo principal: {prefix} · También acepta ! y -.\n"
+                f"── {title} · CONTINUACIÓN ──"
+            )
+            current_lines = [entry]
+            continued = current_header + "\n" + entry
+            if _utf16_length(continued) > max_units:
+                raise ValueError(
+                    f"Una línea de continuación de {title!r} supera el límite de bloque."
+                )
+
+        if current_lines:
+            blocks.append(current_header + "\n" + "\n".join(current_lines))
+
+    return blocks
+
+
 
 
 _CATEGORIES = {
