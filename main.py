@@ -248,7 +248,13 @@ app = FastAPI(
 # En Render, define DATA_DIR=/var/data y monta un Persistent Disk en /var/data
 # para conservar datos entre despliegues. Sin disco, Render borra el archivo
 # al reiniciar o desplegar; el bot seguirá funcionando, pero reiniciará datos.
-# ------------------------------------------------------------def db_connect():
+# ---------------------------------------------------------------------------
+DATA_DIR = SETTINGS.data_dir
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = DATA_DIR / "katherine.sqlite3"
+
+
+def db_connect():
     return connect_database(DB_PATH)
 
 
@@ -260,12 +266,6 @@ def db_session():
 
 def init_db():
     initialize_database(db_session)
-
-
-nslation_daily_usage (
-            day_key TEXT PRIMARY KEY,
-            characters_used INTEGER NOT NULL DEFAULT 0
-        )""")
 
 
 def record_user(uid: str, nickname: str, count_message: bool = False):
