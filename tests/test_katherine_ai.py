@@ -1558,3 +1558,31 @@ def test_ai_tool_selection_does_not_match_incidental_command_words():
     )
     assert selected == frozenset()
 
+
+
+
+def test_cleanup_expires_ai_cache_and_rate_windows_without_touching_live_tasks():
+    from collections import deque
+
+    ai = KatherineAI()
+    now = time.monotonic()
+    ai._simple_answer_cache["expired"] = (now - 1, {"kind": "answer", "answer": "old"})
+    ai._simple_answer_cache["fresh"] = (now + 60, {"kind": "answer", "answer": "new"})
+    ai._user_request_windows["expired-user"] = deque([now - 120])
+    ai._user_request_windows["active-user"] = deque([now - 5, now])
+
+    class PendingTask:
+        def done(self):
+            return False
+
+    class CompletedTask:
+        def done(self):
+            return True
+
+    ai._simple_request_inflight["pending"] = PendingTask()
+    ai._simple_request_inflight["completed"] = CompletedTask()
+    ai.cleanup()
+
+    assert set(ai._simple_answer_cache) == {"fresh"}
+    assert set(ai._user_request_windows) == {"active-user"}
+    assert set(ai._simple_request_inflight) == {"pending"}
