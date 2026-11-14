@@ -12116,7 +12116,7 @@ async def safe_dispatch(event: dict, source: str):
     """Dispatch messages/interactions FIFO per chat while keeping rooms concurrent."""
     kind = str(event.get("type") or "")
     thread_id = str(event.get("threadId") or "").strip()
-    key = (str(source), thread_id) if thread_id and kind in {"message", "interaction"} else None
+    key = (str(source), thread_id) if thread_id and kind in {"message", "interaction", "message.edited", "message.deleted"} else None
     entry = None
     queued_at = time.monotonic()
 
