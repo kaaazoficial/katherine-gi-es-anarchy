@@ -628,11 +628,14 @@ def compact_tool_result_for_context(value: Any, max_chars: int = 1600) -> str:
     limit = max(300, min(4000, int(max_chars)))
     if len(clean) <= limit:
         return clean
-    head_limit = int(limit * 0.68)
-    tail_limit = limit - head_limit
+    marker = " …[contenido intermedio omitido solo en el contexto]… "
+    content_budget = max(1, limit - len(marker))
+    head_limit = int(content_budget * 0.68)
+    tail_limit = content_budget - head_limit
     head = clean[:head_limit].rsplit(" ", 1)[0].rstrip()
     tail = clean[-tail_limit:].lstrip()
-    return f"{head} …[contenido intermedio omitido solo en el contexto]… {tail}"
+    compacted = f"{head}{marker}{tail}"
+    return compacted[:limit]
 
 
 def select_ai_tool_commands(
