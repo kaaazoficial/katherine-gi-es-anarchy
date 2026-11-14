@@ -1,221 +1,259 @@
-"""Plain-text command help and category filtering for Katherine."""
+"""Anarchy-formatted command guide for Katherine."""
 from __future__ import annotations
 
+import re
 import unicodedata
 
 
-def _command_help_groups(prefix: str) -> tuple[str, list[tuple[str, list[str]]]]:
-    """Return the canonical command catalogue in readable, functional groups."""
+_SEPARATOR = "[C] ══════════════════════════════"
+_CATEGORY_TITLES = (
+    "1. AYUDA E INTELIGENCIA ARTIFICIAL",
+    "2. GENSHIN IMPACT",
+    "3. SOCIAL Y PERFILES",
+    "4. JUEGOS, ECONOMÍA Y COMUNIDAD",
+    "5. MÚSICA Y VOZ",
+    "6. UTILIDADES Y MULTIMEDIA",
+    "7. ADMINISTRACIÓN (UID AUTORIZADO)",
+)
+
+
+def _command_help_groups(prefix: str) -> tuple[str, list[tuple[str, list[tuple[bool, str]]]]]:
+    """Return the command catalog grouped exactly as the public help presents it."""
     prefix = str(prefix or "!").strip() or "!"
-    groups = [
-        ("AYUDA E INTELIGENCIA ARTIFICIAL", [
-            "AYUDA Y NAVEGACIÓN",
-            f"• {prefix}ayuda [categoría] — muestra una sección concreta; sin categoría, muestra toda la guía.",
-            f"• {prefix}comandos / {prefix}menu / {prefix}menú — muestran el catálogo completo.",
-            "ASISTENTE",
-            f"• {prefix}asistente <consulta> — conversación y solicitudes en lenguaje natural.",
-            f"• {prefix}ia ayuda — guía de IA; {prefix}ia preguntar <consulta> — consulta al asistente.",
-            f"• {prefix}ia genshin <consulta> — consulta especializada de Teyvat.",
-            f"• {prefix}ia estado — proveedor y sesión; {prefix}ia olvidar — borra el contexto temporal.",
-            "INVESTIGACIÓN Y HERRAMIENTAS",
-            f"• {prefix}investigar <tema> — investigación con opciones comparar, verificar, cronología e informe.",
-            f"• {prefix}analizartexto resumir|corregir|reescribir|extraer|contradicciones <texto> — análisis puntual.",
-            f"• {prefix}calcular <operación> — porcentajes, raíces, trigonometría y operaciones matemáticas.",
-            "ADMINISTRACIÓN DE IA",
-            f"• {prefix}ia probar | {prefix}ia guardian | {prefix}ia diagnostico — diagnóstico y controles [ADMIN].",
+
+    def cmd(name: str) -> str:
+        return f"{prefix}{name}"
+
+    groups: list[tuple[str, list[tuple[bool, str]]]] = [
+        (_CATEGORY_TITLES[0], [
+            (True, "▸ Ayuda y Navegación"),
+            (False, f"• {cmd('ayuda')} <categoría> — Muestra una sección concreta; sin categoría muestra toda la guía."),
+            (False, f"• {cmd('comandos')} / {cmd('menu')} / {cmd('menú')} — Muestra el catálogo completo."),
+            (True, "▸ Asistente IA"),
+            (False, f"• {cmd('asistente')} <consulta> — Conversación y solicitudes en lenguaje natural."),
+            (False, f"• {cmd('ia ayuda')} — Guía de IA."),
+            (False, f"• {cmd('ia preguntar')} <consulta> — Consulta directa al asistente."),
+            (False, f"• {cmd('ia genshin')} <consulta> — Consulta especializada de Teyvat."),
+            (False, f"• {cmd('ia estado')} — Revisa el proveedor y la sesión actual."),
+            (False, f"• {cmd('ia olvidar')} — Borra el contexto temporal de la charla."),
+            (True, "▸ Investigación y Herramientas"),
+            (False, f"• {cmd('investigar')} <tema> — Investigación: comparar, verificar, cronología o informe."),
+            (False, f"• {cmd('analizartexto')} <modo> <texto> — Resumir, corregir, reescribir, extraer o contradicciones."),
+            (False, f"• {cmd('calcular')} <operación> — Porcentajes, raíces, trigonometría y matemáticas."),
+            (True, "▸ Administración de IA [ADMIN]"),
+            (False, f"• {cmd('ia probar')} | {cmd('ia guardian')} | {cmd('ia diagnostico')} — Diagnóstico y controles del sistema."),
         ]),
-        ("GENSHIN IMPACT", [
-            "PERSONAJES Y EQUIPOS",
-            f"• {prefix}guia <personaje> — builds y talentos; {prefix}materiales <personaje> — materiales.",
-            f"• {prefix}equipos <personaje> — equipos; {prefix}rotacion <personaje> — rotaciones.",
-            f"• {prefix}sinergia <personaje> — sinergias y compañeros recomendados.",
-            "MUNDO Y DATOS",
-            f"• {prefix}jefes — jefes; {prefix}banner — banners; {prefix}calendario — eventos y fechas.",
-            f"• {prefix}cobertura <personaje> — contenido; {prefix}reacciones <elemento> — reacciones elementales.",
-            f"• {prefix}enciclopedia <nombre> | {prefix}archivo <nombre> | {prefix}teyvat <nombre> — fichas y datos.",
-            f"• {prefix}buscargenshin <texto> — búsqueda; {prefix}lista <categoría> [página] — listados.",
-            f"• {prefix}enemigo <nombre> | {prefix}geografia <nombre> | {prefix}elemento <nombre> — consultas del juego.",
-            f"• {prefix}curiosidad — dato aleatorio de Genshin Impact.",
-            "DESEOS",
-            f"• {prefix}deseo — simulador; {prefix}pity — consulta el contador.",
-            f"• {prefix}resetpity — reinicia tu contador.",
+        (_CATEGORY_TITLES[1], [
+            (True, "▸ Personajes y Equipos"),
+            (False, f"• {cmd('guia')} <personaje> — Builds y talentos."),
+            (False, f"• {cmd('materiales')} <personaje> — Materiales de ascensión."),
+            (False, f"• {cmd('equipos')} <personaje> — Composiciones de equipo."),
+            (False, f"• {cmd('rotacion')} <personaje> — Rotaciones de combate."),
+            (False, f"• {cmd('sinergia')} <personaje> — Sinergias y compañeros recomendados."),
+            (True, "▸ Mundo y Datos"),
+            (False, f"• {cmd('jefes')} — Lista de jefes."),
+            (False, f"• {cmd('banner')} — Banners activos."),
+            (False, f"• {cmd('calendario')} — Eventos y fechas."),
+            (False, f"• {cmd('cobertura')} <personaje> — Contenido del personaje."),
+            (False, f"• {cmd('reacciones')} <elemento> — Reacciones elementales."),
+            (False, f"• {cmd('enciclopedia')} | {cmd('archivo')} | {cmd('teyvat')} <nombre> — Fichas y datos del lore."),
+            (False, f"• {cmd('buscargenshin')} <texto> — Búsqueda general."),
+            (False, f"• {cmd('lista')} <categoría> [página] — Listados por categoría."),
+            (False, f"• {cmd('enemigo')} | {cmd('geografia')} | {cmd('elemento')} <nombre> — Consultas específicas del juego."),
+            (False, f"• {cmd('curiosidad')} — Dato aleatorio de Genshin Impact."),
+            (True, "▸ Deseos (Gachapón)"),
+            (False, f"• {cmd('deseo')} — Simulador de tiradas."),
+            (False, f"• {cmd('pity')} — Consulta tu contador actual."),
+            (False, f"• {cmd('resetpity')} — Reinicia tu contador."),
         ]),
-        ("SOCIAL Y PERFILES", [
-            "PERFIL",
-            f"• {prefix}perfil [@usuario] — consulta un perfil; {prefix}bio <texto> — edita tu biografía.",
-            f"• {prefix}miestado <texto> — actualiza tu estado; {prefix}actividad [hoy|semana] — consulta actividad.",
-            "INTERACCIONES",
-            f"• {prefix}interaccion @usuario — guía de acciones sociales.",
-            f"• {prefix}abrazo|{prefix}abrazar|{prefix}beso|{prefix}besar|{prefix}acariciar|{prefix}mimar @usuario — afecto.",
-            f"• {prefix}patada|{prefix}golpe|{prefix}cachetada|{prefix}morder|{prefix}empujar @usuario — acciones físicas.",
-            f"• {prefix}consolar|{prefix}felicitar|{prefix}saludar|{prefix}proteger|{prefix}ayudar|{prefix}apoyar @usuario — apoyo.",
-            f"• {prefix}bailar|{prefix}cosquillas|{prefix}chocar|{prefix}highfive|{prefix}acompañar @usuario — acciones sociales.",
-            f"• {prefix}asustar|{prefix}curar|{prefix}cargar|{prefix}regañar|{prefix}admirar|{prefix}dormir @usuario — otras acciones.",
-            f"• {prefix}ignorar|{prefix}mirar|{prefix}invitar @usuario — acciones adicionales.",
-            "VÍNCULOS Y REGALOS",
-            f"• {prefix}roast @usuario — broma; {prefix}afinidad @usuario — vínculo.",
-            f"• {prefix}regalo @usuario [mensaje] — envía un regalo; {prefix}muro — consulta los recibidos.",
+        (_CATEGORY_TITLES[2], [
+            (True, "▸ Perfil"),
+            (False, f"• {cmd('perfil')} [@usuario] — Consulta un perfil."),
+            (False, f"• {cmd('bio')} <texto> — Edita tu biografía."),
+            (False, f"• {cmd('miestado')} <texto> — Actualiza tu estado."),
+            (False, f"• {cmd('actividad')} [hoy|semana] — Consulta la actividad."),
+            (True, "▸ Interacciones (@usuario)"),
+            (False, f"• {cmd('interaccion')} @usuario — Guía de acciones sociales."),
+            (False, f"• Afecto: {cmd('abrazo')} | {cmd('abrazar')} | {cmd('beso')} | {cmd('besar')} | {cmd('acariciar')} | {cmd('mimar')}"),
+            (False, f"• Físicas: {cmd('patada')} | {cmd('golpe')} | {cmd('cachetada')} | {cmd('morder')} | {cmd('empujar')}"),
+            (False, f"• Apoyo: {cmd('consolar')} | {cmd('felicitar')} | {cmd('saludar')} | {cmd('proteger')} | {cmd('ayudar')} | {cmd('apoyar')}"),
+            (False, f"• Sociales: {cmd('bailar')} | {cmd('cosquillas')} | {cmd('chocar')} | {cmd('highfive')} | {cmd('acompañar')}"),
+            (False, f"• Otras: {cmd('asustar')} | {cmd('curar')} | {cmd('cargar')} | {cmd('regañar')} | {cmd('admirar')} | {cmd('dormir')}"),
+            (False, f"• Adicionales: {cmd('ignorar')} | {cmd('mirar')} | {cmd('invitar')}"),
+            (True, "▸ Vínculos y Regalos"),
+            (False, f"• {cmd('roast')} @usuario — Lanza una broma."),
+            (False, f"• {cmd('afinidad')} @usuario — Mide el vínculo con alguien."),
+            (False, f"• {cmd('regalo')} @usuario [mensaje] — Envía un regalo."),
+            (False, f"• {cmd('muro')} — Consulta los regalos recibidos."),
         ]),
-        ("JUEGOS, ECONOMÍA Y COMUNIDAD", [
-            "JUEGOS",
-            f"• {prefix}trivia — inicia trivia; {prefix}responder <1-4> — responde.",
-            f"• {prefix}adivina — inicia adivinanza; {prefix}intento <número> — prueba tu respuesta.",
-            f"• {prefix}duelo @usuario — reta a alguien; {prefix}ship <usuario1> <usuario2> — compatibilidad.",
-            f"• {prefix}azar <mínimo> <máximo> | {prefix}dado | {prefix}moneda — azar.",
-            f"• {prefix}verdad | {prefix}8ball <pregunta> — preguntas; {prefix}elige <opciones> — elección aleatoria.",
-            f"• {prefix}chiste | {prefix}frase | {prefix}reto | {prefix}suerte — entretenimiento.",
-            "ECONOMÍA",
-            f"• {prefix}puntos — saldo; {prefix}ranking — clasificación; {prefix}diario — recompensa diaria.",
-            f"• {prefix}trabajar — gana puntos; {prefix}pagar @usuario <cantidad> — transfiere puntos.",
-            f"• {prefix}economia — resumen de la economía comunitaria.",
-            "COMUNIDAD",
-            f"• {prefix}encuesta <pregunta> | <opciones> — crea una votación.",
-            f"• {prefix}evento | {prefix}eventos — consulta, crea o cierra eventos según permisos.",
+        (_CATEGORY_TITLES[3], [
+            (True, "▸ Juegos y Entretenimiento"),
+            (False, f"• {cmd('trivia')} — Inicia trivia | {cmd('responder')} <1-4> — Responde."),
+            (False, f"• {cmd('adivina')} — Inicia adivinanza | {cmd('intento')} <número> — Prueba tu respuesta."),
+            (False, f"• {cmd('duelo')} @usuario — Reta a alguien."),
+            (False, f"• {cmd('ship')} <usuario1> <usuario2> — Calcula compatibilidad."),
+            (False, f"• {cmd('azar')} <mín> <máx> | {cmd('dado')} | {cmd('moneda')} — Juegos de azar."),
+            (False, f"• {cmd('verdad')} | {cmd('8ball')} <pregunta> — Preguntas al azar."),
+            (False, f"• {cmd('elige')} <opciones> — Elección aleatoria."),
+            (False, f"• {cmd('chiste')} | {cmd('frase')} | {cmd('reto')} | {cmd('suerte')} — Entretenimiento rápido."),
+            (True, "▸ Economía"),
+            (False, f"• {cmd('puntos')} — Consulta tu saldo."),
+            (False, f"• {cmd('ranking')} — Clasificación general."),
+            (False, f"• {cmd('diario')} — Reclama tu recompensa diaria."),
+            (False, f"• {cmd('trabajar')} — Gana puntos."),
+            (False, f"• {cmd('pagar')} @usuario <cantidad> — Transfiere puntos."),
+            (False, f"• {cmd('economia')} — Resumen de la economía comunitaria."),
+            (True, "▸ Comunidad"),
+            (False, f"• {cmd('encuesta')} <pregunta> | <opciones> — Crea una votación."),
+            (False, f"• {cmd('evento')} | {cmd('eventos')} — Consulta, crea o cierra eventos (según permisos)."),
         ]),
-        ("MÚSICA Y VOZ", [
-            "LLAMADAS",
-            f"• {prefix}join — entra a la llamada; {prefix}salirsala — sale de ella; {prefix}salas — lista salas.",
-            f"• {prefix}voz participantes — muestra quién está en la llamada.",
-            f"• {prefix}voz hablando — muestra quién está hablando; {prefix}voz estado — estado de la llamada.",
-            "REPRODUCTOR DJ",
-            f"• {prefix}dj buscar <tema> — busca música; {prefix}reproducir <pista> — reproduce una pista local.",
-            f"• {prefix}dj pausa | {prefix}dj reanudar — pausa o continúa la reproducción.",
-            f"• {prefix}dj saltar | {prefix}dj cola | {prefix}dj actual — controla y consulta la cola.",
-            f"• {prefix}dj detener — detiene la música sin salir de la llamada.",
-            f"• {prefix}dj fuentes — consulta catálogos y pausas temporales; {prefix}dj ambiente <mood> — recomienda por ambiente.",
-            f"• {prefix}dj probar <tema> — prueba búsqueda, descarga y reproducción real [ADMIN].",
-            f"• {prefix}dj favorito lista|guardar <número>|reproducir <id>|quitar <id> — administra favoritos.",
-            "LISTAS Y VOLUMEN",
-            f"• {prefix}playlist crear|lista|ver|reproducir|borrar <nombre> — administra playlists de archivos locales.",
-            f"• {prefix}playlist agregar <nombre> | <archivo local> — añade un audio existente.",
-            f"• {prefix}volumen <0-100> | {prefix}subirvolumen | {prefix}bajarvolumen | {prefix}silencio — controles de música.",
-            "LECTURA Y TTS",
-            f"• {prefix}leer | {prefix}noleer — activa o desactiva la lectura de mensajes.",
-            f"• {prefix}volumenlectura <0-100> | {prefix}subirvolumenlectura [cantidad] | {prefix}bajarvolumenlectura [cantidad] — volumen de lectura.",
-            f"• {prefix}silenciolectura — silencia la lectura; {prefix}tts voces|voz|velocidad|volumen — configuración de voz.",
+        (_CATEGORY_TITLES[4], [
+            (True, "▸ Llamadas"),
+            (False, f"• {cmd('join')} — Entra a la llamada | {cmd('salirsala')} — Sale de ella."),
+            (False, f"• {cmd('salas')} — Lista las salas disponibles."),
+            (False, f"• {cmd('voz participantes')} — Muestra quién está en la llamada."),
+            (False, f"• {cmd('voz hablando')} — Muestra quién está hablando."),
+            (False, f"• {cmd('voz estado')} — Estado actual de la llamada."),
+            (True, "▸ Reproductor DJ"),
+            (False, f"• {cmd('dj buscar')} <tema> — Busca música en los catálogos disponibles."),
+            (False, f"• {cmd('reproducir')} <pista> — Reproduce una pista local."),
+            (False, f"• {cmd('dj pausa')} | {cmd('dj reanudar')} — Pausa o continúa la reproducción."),
+            (False, f"• {cmd('dj saltar')} | {cmd('dj cola')} | {cmd('dj actual')} — Controla y consulta la cola."),
+            (False, f"• {cmd('dj detener')} — Detiene la música sin salir de la llamada."),
+            (False, f"• {cmd('dj fuentes')} — Consulta catálogos y su estado."),
+            (False, f"• {cmd('dj ambiente')} <mood> — Recomienda música por ambiente."),
+            (False, f"• {cmd('dj favorito')} lista|guardar <número>|reproducir <id>|quitar <id> — Administra favoritos."),
+            (False, f"• {cmd('dj probar')} <tema> — Prueba búsqueda, descarga, validación y reproducción [ADMIN]."),
+            (True, "▸ Listas y Volumen"),
+            (False, f"• {cmd('playlist')} crear|lista|ver|reproducir|borrar <nombre> — Administra listas locales."),
+            (False, f"• {cmd('playlist agregar')} <nombre> | <archivo local> — Añade un archivo existente."),
+            (False, f"• {cmd('volumen')} <0-100> — Ajusta el volumen exacto."),
+            (False, f"• {cmd('subirvolumen')} | {cmd('bajarvolumen')} | {cmd('silencio')} — Controles rápidos."),
+            (True, "▸ Lectura y TTS (Texto a Voz)"),
+            (False, f"• {cmd('leer')} | {cmd('noleer')} — Activa o desactiva la lectura de mensajes."),
+            (False, f"• {cmd('volumenlectura')} <0-100> — Fija el volumen de lectura."),
+            (False, f"• {cmd('subirvolumenlectura')} [cantidad] | {cmd('bajarvolumenlectura')} [cantidad] — Ajusta el volumen."),
+            (False, f"• {cmd('silenciolectura')} — Silencia la lectura."),
+            (False, f"• {cmd('tts')} voces|voz|velocidad|volumen — Configuración de voz."),
         ]),
-        ("UTILIDADES Y MULTIMEDIA", [
-            "FECHA, HORA E IDIOMAS",
-            f"• {prefix}fecha — fecha y hora; {prefix}zona <Area/Ciudad> — hora de otra zona.",
-            f"• {prefix}traducir <idioma> | <texto> — traduce un texto.",
-            "BÚSQUEDA MULTIMEDIA",
-            f"• {prefix}multimedia imagen|video|audio <búsqueda> — búsqueda por tipo de recurso.",
-            f"• {prefix}imagen <búsqueda> — imágenes; {prefix}video <búsqueda> — vídeos.",
-            f"• {prefix}audio <búsqueda> — recursos de audio.",
+        (_CATEGORY_TITLES[5], [
+            (True, "▸ Fecha, Hora e Idiomas"),
+            (False, f"• {cmd('fecha')} — Fecha y hora actual."),
+            (False, f"• {cmd('zona')} <Area/Ciudad> — Hora de otra zona horaria."),
+            (False, f"• {cmd('traducir')} <idioma> | <texto> — Traduce un texto."),
+            (True, "▸ Búsqueda Multimedia"),
+            (False, f"• {cmd('multimedia')} imagen|video|audio <búsqueda> — Búsqueda por tipo de recurso."),
+            (False, f"• {cmd('imagen')} <búsqueda> — Busca imágenes."),
+            (False, f"• {cmd('video')} <búsqueda> — Busca vídeos."),
+            (False, f"• {cmd('audio')} <búsqueda> — Busca recursos de audio."),
         ]),
-        ("ADMINISTRACIÓN · UID AUTORIZADO", [
-            "IDENTIDAD Y ESTADO",
-            f"• {prefix}miuid | {prefix}mi-id | {prefix}mi_uid — consulta tu UID.",
-            f"• {prefix}estado — estado general; {prefix}diagnostico — almacenamiento, SQLite y proveedores [ADMIN].",
-            "FUENTES Y PANELES",
-            f"• {prefix}fuentes | {prefix}saludfuentes — estado de proveedores.",
-            f"• {prefix}metricas — métricas; {prefix}autotest — pruebas internas.",
-            f"• {prefix}centro | {prefix}nexus — investigación; {prefix}admin | {prefix}paneladmin | {prefix}guardian — paneles.",
-            "MODERACIÓN Y CONFIGURACIÓN",
-            f"• {prefix}antispam — protección antispam.",
-            f"• {prefix}advertir | {prefix}advertencias | {prefix}quitaradvertencia — herramientas de moderación.",
-            f"• {prefix}respuestas | {prefix}respuesta — reglas automáticas.",
-            f"• {prefix}perfilbot — perfil; {prefix}avatarbot — icono del bot.",
-            f"• {prefix}eliminarmensajes — elimina mensajes propios identificados en esta ejecución.",
-            "Los comandos ADMIN requieren un UID autorizado en ADMIN_UIDS. El nickname no concede permisos.",
+        (_CATEGORY_TITLES[6], [
+            (True, "▸ Identidad y Estado"),
+            (False, f"• {cmd('miuid')} | {cmd('mi-id')} | {cmd('mi_uid')} — Consulta tu UID."),
+            (False, f"• {cmd('estado')} — Estado general del bot."),
+            (False, f"• {cmd('diagnostico')} — Almacenamiento, SQLite y proveedores [ADMIN]."),
+            (True, "▸ Fuentes y Paneles"),
+            (False, f"• {cmd('fuentes')} | {cmd('saludfuentes')} — Estado de proveedores."),
+            (False, f"• {cmd('metricas')} — Métricas del sistema."),
+            (False, f"• {cmd('autotest')} — Pruebas internas."),
+            (False, f"• {cmd('centro')} | {cmd('nexus')} — Paneles de investigación."),
+            (False, f"• {cmd('admin')} | {cmd('paneladmin')} | {cmd('guardian')} — Paneles de control."),
+            (True, "▸ Moderación y Configuración"),
+            (False, f"• {cmd('antispam')} — Protección contra spam."),
+            (False, f"• {cmd('advertir')} | {cmd('advertencias')} | {cmd('quitaradvertencia')} — Sistema de moderación."),
+            (False, f"• {cmd('respuestas')} | {cmd('respuesta')} — Reglas automáticas."),
+            (False, f"• {cmd('perfilbot')} | {cmd('avatarbot')} — Edita el perfil e icono del bot."),
+            (False, f"• {cmd('eliminarmensajes')} — Elimina mensajes propios de esta ejecución."),
+            (False, "Nota: Los comandos ADMIN requieren un UID autorizado en ADMIN_UIDS (el nickname no concede permisos)."),
         ]),
     ]
     return prefix, groups
 
 
-def _utf16_length(value: str) -> int:
-    """Count message length the same way Anarchy's UTF-16 API does."""
-    return len(value.encode("utf-16-le")) // 2
+def _intro_lines(prefix: str) -> list[str]:
+    return [
+        "[CB] KATHERINE · GUÍA DE COMANDOS",
+        f"[C] Prefijo principal: {prefix} (También acepta ! y -)",
+        f"[C] Usa {prefix}ayuda <categoría> para consultar una sola sección.",
+        "[C]",
+    ]
 
 
-def _help_intro(prefix: str, *, continuation: bool = False) -> str:
-    heading = "KATHERINE · GUÍA DE COMANDOS"
-    if continuation:
-        heading += " · CONTINUACIÓN"
-    return (
-        f"{heading}\n"
-        f"Prefijo principal: {prefix} · También acepta ! y -.\n"
-        f"Usa {prefix}ayuda <categoría> para consultar una sola sección."
-    )
+def _format_section(title: str, entries: list[tuple[bool, str]]) -> list[str]:
+    lines = [f"[CB] {title}", "[C]"]
+    for is_heading, value in entries:
+        lines.append(f"[CB] {value}" if is_heading else f"[C] {value}")
+    return lines
 
 
 def build_commands_help_text(prefix: str = "!") -> str:
-    """Complete command index with clear subsections and one command family per line."""
+    """Build the complete seven-section guide using Anarchy's [CB]/[C] markers."""
     prefix, groups = _command_help_groups(prefix)
-    lines = [
-        _help_intro(prefix),
-        "",
-    ]
-    for title, entries in groups:
-        lines.extend([f"── {title} ──", *entries, ""])
-    lines.append(
-        f"Guía de texto: {prefix}ayuda, {prefix}comandos y {prefix}menu. "
-        "La ayuda se entrega en mensajes de texto, sin paneles ni botones."
-    )
+    lines = _intro_lines(prefix)
+    for index, (title, entries) in enumerate(groups):
+        if index:
+            lines.extend(["[C]", _SEPARATOR, "[C]"])
+        lines.extend(_format_section(title, entries))
     return "\n".join(lines)
 
 
+def _utf16_length(value: str) -> int:
+    """Count message length in UTF-16 code units."""
+    return len(value.encode("utf-16-le")) // 2
+
+
 def build_commands_help_blocks(prefix: str = "!", max_units: int = 1800) -> list[str]:
-    """Build ordered, readable category messages without mixing categories."""
-    if max_units < 100:
-        raise ValueError("El tamaño mínimo de bloque debe ser al menos 100 unidades UTF-16.")
+    """Send one self-contained Anarchy message per category, respecting API limits."""
+    if max_units < 200:
+        raise ValueError("El tamaño mínimo de bloque debe ser al menos 200 unidades UTF-16.")
 
     prefix, groups = _command_help_groups(prefix)
-    intro = _help_intro(prefix)
+    intro = _intro_lines(prefix)
     blocks: list[str] = []
-
     for title, entries in groups:
-        category_header = f"── {title} ──"
-        current_header = f"{intro}\n\n{category_header}"
-        current_lines: list[str] = []
+        section = _format_section(title, entries)
+        block = "\n".join([*intro, *section])
+        if _utf16_length(block) <= max_units:
+            blocks.append(block)
+            continue
 
-        for entry in entries:
-            candidate_lines = [*current_lines, entry]
-            candidate = current_header + "\n" + "\n".join(candidate_lines)
-            if _utf16_length(candidate) <= max_units:
-                current_lines.append(entry)
-                continue
-
-            if not current_lines:
-                raise ValueError(
-                    f"Una línea de la categoría {title!r} supera el límite de bloque."
-                )
-
-            blocks.append(current_header + "\n" + "\n".join(current_lines))
-            continuation_intro = _help_intro(prefix, continuation=True)
-            current_header = (
-                f"{continuation_intro}\n\n"
-                f"── {title} · CONTINUACIÓN ──"
-            )
-            current_lines = [entry]
-            continued = current_header + "\n" + entry
-            if _utf16_length(continued) > max_units:
-                raise ValueError(
-                    f"Una línea de continuación de {title!r} supera el límite de bloque."
-                )
-
-        if current_lines:
-            blocks.append(current_header + "\n" + "\n".join(current_lines))
-
+        current = [*intro, f"[CB] {title} · CONTINUACIÓN", "[C]"]
+        for is_heading, value in entries:
+            line = f"[CB] {value}" if is_heading else f"[C] {value}"
+            candidate = "\n".join([*current, line])
+            if _utf16_length(candidate) > max_units and len(current) > len(intro) + 2:
+                blocks.append("\n".join(current))
+                current = [*intro, f"[CB] {title} · CONTINUACIÓN", "[C]", line]
+            elif _utf16_length(candidate) > max_units:
+                raise ValueError(f"Una línea de {title!r} supera el límite del mensaje.")
+            else:
+                current.append(line)
+        if len(current) > len(intro) + 2:
+            blocks.append("\n".join(current))
     return blocks
 
 
-_CATEGORIES = {
-    "ia": "AYUDA E INTELIGENCIA ARTIFICIAL",
-    "inteligencia": "AYUDA E INTELIGENCIA ARTIFICIAL",
-    "genshin": "GENSHIN IMPACT",
-    "teyvat": "GENSHIN IMPACT",
-    "social": "SOCIAL Y PERFILES",
-    "perfiles": "SOCIAL Y PERFILES",
-    "juegos": "JUEGOS, ECONOMÍA Y COMUNIDAD",
-    "economia": "JUEGOS, ECONOMÍA Y COMUNIDAD",
-    "comunidad": "JUEGOS, ECONOMÍA Y COMUNIDAD",
-    "musica": "MÚSICA Y VOZ",
-    "voz": "MÚSICA Y VOZ",
-    "multimedia": "UTILIDADES Y MULTIMEDIA",
-    "utilidades": "UTILIDADES Y MULTIMEDIA",
-    "admin": "ADMINISTRACIÓN · UID AUTORIZADO",
-    "administracion": "ADMINISTRACIÓN · UID AUTORIZADO",
+_CATEGORY_ALIASES = {
+    "ia": 0,
+    "inteligencia": 0,
+    "inteligencia artificial": 0,
+    "genshin": 1,
+    "teyvat": 1,
+    "personajes": 1,
+    "social": 2,
+    "perfiles": 2,
+    "juegos": 3,
+    "economia": 3,
+    "comunidad": 3,
+    "musica": 4,
+    "voz": 4,
+    "dj": 4,
+    "tts": 4,
+    "multimedia": 5,
+    "utilidades": 5,
+    "admin": 6,
+    "administracion": 6,
+    "administración": 6,
 }
 
 
@@ -225,54 +263,24 @@ def _normalize(value: str) -> str:
 
 
 def filter_commands_help_text(help_text: str, topic: str | None = None) -> str:
-    """Return one consistently formatted category, or the complete guide."""
+    """Return the requested section in the same visual format as !comandos."""
     requested = _normalize(topic or "")
     if not requested or requested in {"todo", "todos", "completo", "all"}:
         return str(help_text)
 
-    title = _CATEGORIES.get(requested)
-    if title is None:
-        options = ", ".join(sorted(_CATEGORIES))
-        prefix_match = unicodedata.normalize("NFKC", str(help_text)).splitlines()
-        prefix = "!"
-        if len(prefix_match) > 1 and prefix_match[1].startswith("Prefijo principal: "):
-            prefix = prefix_match[1].split(":", 1)[1].split("·", 1)[0].strip() or "!"
+    category_index = _CATEGORY_ALIASES.get(requested)
+    if category_index is None:
+        available = "ia, genshin, social, juegos, musica, multimedia, admin"
+        prefix_match = re.search(r"Prefijo principal:\\s*(.+?)\\s*\\(", str(help_text))
+        prefix = prefix_match.group(1).strip() if prefix_match else "!"
         return (
-            f"Categoría no reconocida. Disponibles: {options}.\n"
-            f"Ejemplo: {prefix}ayuda genshin."
+            "[CB] KATHERINE · AYUDA POR CATEGORÍA\\n"
+            f"[C] Categoría no reconocida. Disponibles: {available}.\\n"
+            f"[C] Ejemplo: {prefix}ayuda genshin."
         )
 
-    lines = str(help_text).splitlines()
-    section_start = None
-    section_end = None
-    for index, line in enumerate(lines):
-        if line.startswith("── ") and line.endswith(" ──"):
-            current = line[3:-3]
-            if current == title:
-                section_start = index
-            elif section_start is not None:
-                section_end = index
-                break
-
-    if section_start is None:
-        return "No encontré esa categoría en la ayuda."
-
-    if section_end is None:
-        section_end = len(lines)
-
-    section = lines[section_start:section_end]
-    while section and not section[-1].strip():
-        section.pop()
-
-    prefix = "!"
-    for line in lines:
-        if line.startswith("Prefijo principal: "):
-            prefix = line.split(":", 1)[1].split("·", 1)[0].strip() or "!"
-            break
-
-    return "\n".join([
-        "KATHERINE · AYUDA POR CATEGORÍA",
-        f"Prefijo principal: {prefix} · También acepta ! y -.",
-        "",
-        *section,
-    ])
+    prefix_match = re.search(r"Prefijo principal:\\s*(.+?)\\s*\\(", str(help_text))
+    prefix = prefix_match.group(1).strip() if prefix_match else "!"
+    _, groups = _command_help_groups(prefix)
+    title, entries = groups[category_index]
+    return "\\n".join([*_intro_lines(prefix), *_format_section(title, entries)])
