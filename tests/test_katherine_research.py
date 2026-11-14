@@ -559,3 +559,100 @@ def test_topic_router_queries_official_docs_for_software_topics(monkeypatch):
     assert "fastapi.tiangolo.com" in domains
     assert "docs.github.com" in domains
     assert all(item["source_type"] == "official_software_docs" for item in results)
+
+
+
+def test_biomedical_router_recognizes_common_clinical_language():
+    for query in (
+        "Investiga estudios clínicos sobre diabetes y tratamientos",
+        "Alzheimer disease and biomarkers",
+        "Clinical research about cancer therapies",
+    ):
+        intent = research.classify_research_intent(query)
+        assert intent["biomedical"] is True
+        assert intent["academic"] is True
+
+
+def test_search_web_bounds_concurrent_source_requests(monkeypatch):
+    active = 0
+    maximum_active = 0
+    calls = []
+
+    async def tracked(*args, **kwargs):
+        nonlocal active, maximum_active
+        active += 1
+        maximum_active = max(maximum_active, active)
+        calls.append((args, kwargs))
+        try:
+            await asyncio.sleep(0.01)
+            return []
+        finally:
+            active -= 1
+
+    for name in (
+        "search_wikidata",
+        "search_wikipedia",
+        "_search_general_web",
+        "search_gdelt_news",
+        "search_openalex",
+        "search_crossref",
+        "search_arxiv",
+        "search_europe_pmc",
+        "search_scoped_site",
+    ):
+        monkeypatch.setattr(research, name, tracked)
+
+    run(research.search_web(
+        "Investiga noticias y estudios clínicos sobre diabetes con Python y FastAPI",
+        lambda *args, **kwargs: None,
+        limit=8,
+    ))
+
+    assert len(calls) >= 8
+    assert maximum_active <= 5
+    assert maximum_active > 1
+
+
+def test_search_web_bounds_parallel_page_enrichment(monkeypatch):
+    active = 0
+    maximum_active = 0
+
+    async def empty(*args, **kwargs):
+        return []
+
+    async def news(query, request_func, limit=4):
+        return [
+            {
+                "title": f"Noticia {index}",
+                "url": f"https://news{index}.example/article",
+                "domain": f"news{index}.example",
+                "snippet": "Cobertura informativa reciente",
+                "source_type": "gdelt_news",
+            }
+            for index in range(6)
+        ]
+
+    async def fetch_page(url, request_func):
+        nonlocal active, maximum_active
+        active += 1
+        maximum_active = max(maximum_active, active)
+        try:
+            await asyncio.sleep(0.01)
+            return {"title": "Noticia", "excerpt": "Texto público"}
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(research, "search_wikidata", empty)
+    monkeypatch.setattr(research, "search_wikipedia", empty)
+    monkeypatch.setattr(research, "_search_general_web", empty)
+    monkeypatch.setattr(research, "search_gdelt_news", news)
+    monkeypatch.setattr(research, "fetch_public_page", fetch_page)
+
+    results = run(research.search_web(
+        "Últimas noticias de energía en Chile esta semana",
+        lambda *args, **kwargs: None,
+        limit=8,
+    ))
+
+    assert len(results) == 6
+    assert maximum_active == 3
