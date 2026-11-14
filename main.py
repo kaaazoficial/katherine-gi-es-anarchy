@@ -108,7 +108,6 @@ from typing import Any
 from html.parser import HTMLParser
 from urllib.parse import urljoin, quote, urlparse, urlsplit, urlunsplit
 
-BOOT_IMPORT_STARTED_AT = time.perf_counter()
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, Response
@@ -153,7 +152,6 @@ from katherine_help import (
 )
 
 AI_CORE = KatherineAI()
-BOOT_IMPORT_DURATION_SECONDS = time.perf_counter() - BOOT_IMPORT_STARTED_AT
 AI_TOOL_OUTPUT_CAPTURE: ContextVar[list[str] | None] = ContextVar(
     "katherine_ai_tool_output_capture", default=None
 )
@@ -12388,11 +12386,6 @@ async def health_head():
 async def startup():
     global HTTP_CLIENT, CLEANUP_TASK
     startup_started_at = time.perf_counter()
-    logging.info(
-        "[STARTUP_TIMING] imports_principales=%.3fs",
-        BOOT_IMPORT_DURATION_SECONDS,
-    )
-
     phase_started_at = time.perf_counter()
     HTTP_CLIENT = httpx.AsyncClient(
         timeout=httpx.Timeout(20.0, connect=8.0),
