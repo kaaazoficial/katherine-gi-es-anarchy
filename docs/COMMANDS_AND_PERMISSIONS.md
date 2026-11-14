@@ -67,3 +67,8 @@ Los eventos se crean libremente; solo su creador o un UID administrador puede ce
 ## Respuestas a mensajes
 
 Al responder directamente a un mensaje de Katherine, el bot interpreta el texto como una continuación de la conversación. Solo se activa cuando el ID citado corresponde a un mensaje enviado y confirmado por Katherine en esa misma sala.
+
+
+## Benchmark de calidad sin llamadas a IA
+
+La batería determinista del enrutador se ejecuta con `pytest -q tests/test_katherine_ai_benchmark.py`. Comprueba intención, dificultad, selección mínima de herramientas y conservación del contexto en preguntas de seguimiento. No consume cuotas de Gemini, Groq u OpenRouter.
