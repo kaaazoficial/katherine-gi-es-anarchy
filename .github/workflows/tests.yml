@@ -15,6 +15,8 @@ on:
       - "katherine_matching.py"
       - "katherine_metrics.py"
       - "katherine_topics.py"
+      - "katherine_help.py"
+      - "katherine_storage.py"
       - "tests/**"
       - "requirements-test.txt"
       - "pytest.ini"
@@ -38,6 +40,8 @@ on:
       - "katherine_matching.py"
       - "katherine_metrics.py"
       - "katherine_topics.py"
+      - "katherine_help.py"
+      - "katherine_storage.py"
       - ".github/workflows/tests.yml"
   workflow_dispatch:
 
@@ -72,7 +76,7 @@ jobs:
         run: python -m compileall -q .
 
       - name: Run automated tests with coverage
-        run: python -m pytest -q --ignore=tests/integration --cov=main --cov=katherine_ai --cov=katherine_nexus --cov=katherine_astra --cov=katherine_research --cov=katherine_retention --cov-report=term-missing --timeout=120
+        run: python -m pytest -q --ignore=tests/integration --cov=main --cov=katherine_ai --cov=katherine_nexus --cov=katherine_astra --cov=katherine_research --cov=katherine_retention --cov=katherine_help --cov=katherine_storage --cov-report=term-missing --timeout=120
 
 
   integration:
