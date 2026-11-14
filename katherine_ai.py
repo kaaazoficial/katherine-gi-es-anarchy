@@ -2007,14 +2007,6 @@ class KatherineAI:
             }
 
         contextual_genshin = is_contextual_genshin_followup(text, history)
-        last_user_turn = next(
-            (turn for turn in reversed(history) if turn.get("role") == "user"),
-            None,
-        )
-        last_user_was_genshin = bool(
-            last_user_turn
-            and is_genshin_related_request(str(last_user_turn.get("content") or ""))
-        )
         contextual_followup = self.is_contextual_followup(text, history)
         if history and not contextual_genshin and not contextual_followup:
             # Standalone requests start clean; only referential follow-ups keep

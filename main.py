@@ -46,7 +46,7 @@ except Exception as exc:
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from collections import OrderedDict, defaultdict, deque
+from collections import defaultdict, deque
 from typing import Any
 from html.parser import HTMLParser
 from urllib.parse import urljoin, quote, urlparse, urlsplit, urlunsplit
@@ -12195,8 +12195,10 @@ async def prometheus_metrics_endpoint(request: Request):
             cpu_percent = PROCESS.cpu_percent(interval=None)
         except (psutil.Error, OSError):
             pass
+    metric_snapshot = dict(metrics)
+    metric_snapshot.update(dict(AI_CORE.metrics))
     payload, content_type = render_prometheus_metrics(
-        dict(metrics),
+        metric_snapshot,
         SOURCE_HEALTH,
         uptime_seconds=time.monotonic() - STARTED_MONOTONIC,
         memory_bytes=memory_bytes,
