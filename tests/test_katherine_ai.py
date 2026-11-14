@@ -674,8 +674,8 @@ async def test_genshin_question_can_still_use_teyvat_tool(monkeypatch):
         ("Katherine, ¿qué es Anarchy Apps?", "Anarchy apps es una red social para crear comunidades, unirse a ellas y hablar con la gente"),
         ("¿Quién es tu creador?", "Mi creador es Sinner."),
         ("Katherine, ¿quién te creó?", "Mi creador es Sinner."),
-        ("¿Quién eres?", "Soy Katherine, un bot de entretenimiento de la comunidad Genshin Impact ES dentro de Anarchy Apps. Tengo funciones de IA, música, juegos y más para entretener y acompañar a la comunidad. No soy un bot de ayuda ni de soporte de Anarchy Apps."),
-        ("Katherine, preséntate", "Soy Katherine, un bot de entretenimiento de la comunidad Genshin Impact ES dentro de Anarchy Apps. Tengo funciones de IA, música, juegos y más para entretener y acompañar a la comunidad. No soy un bot de ayuda ni de soporte de Anarchy Apps."),
+        ("¿Quién eres?", "Soy Katherine, el bot comunitario de Genshin Impact ES. Mi comunidad funciona en Anarchy Apps, que es la plataforma donde estoy alojada. No soy un bot oficial ni represento a Anarchy Apps o a sus desarrolladores. Tengo funciones de IA, música, juegos y herramientas para acompañar a la comunidad."),
+        ("Katherine, preséntate", "Soy Katherine, el bot comunitario de Genshin Impact ES. Mi comunidad funciona en Anarchy Apps, que es la plataforma donde estoy alojada. No soy un bot oficial ni represento a Anarchy Apps o a sus desarrolladores. Tengo funciones de IA, música, juegos y herramientas para acompañar a la comunidad."),
     ],
 )
 async def test_katherine_canonical_identity_facts(monkeypatch, question, expected):
@@ -701,16 +701,16 @@ async def test_katherine_identity_faq_works_without_ai_credentials(monkeypatch):
         raise AssertionError("La FAQ debe funcionar sin credenciales.")
 
     result = await ai.assist("¿Quién eres?", "room:verified-user", unexpected_request)
-    assert "bot de entretenimiento" in result["answer"]
-    assert "no soy un bot de ayuda ni de soporte" in result["answer"].casefold()
+    assert "bot comunitario de Genshin Impact ES" in result["answer"]
+    assert "no soy un bot oficial" in result["answer"].casefold()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("question", "expected"),
     [
-        ("Katherine, preséntate", "bot de entretenimiento"),
-        ("Katherine, ¿quién eres?", "bot de entretenimiento"),
+        ("Katherine, preséntate", "bot comunitario de Genshin Impact ES"),
+        ("Katherine, ¿quién eres?", "bot comunitario de Genshin Impact ES"),
         ("Katherine, ¿quién es tu creador?", "Mi creador es Sinner."),
         ("Katherine, ¿quién es su creador?", "Mi creador es Sinner."),
         ("¿Quién es el creador de Katherine?", "Mi creador es Sinner."),
@@ -725,7 +725,7 @@ async def test_katherine_identity_questions_with_name_prefix(monkeypatch, questi
 
     result = await ai.assist(question, "room:verified-user", unexpected_request)
     assert result["kind"] == "answer"
-    if expected == "bot de entretenimiento":
+    if expected == "bot comunitario de Genshin Impact ES":
         assert expected in result["answer"]
     else:
         assert result["answer"] == expected
