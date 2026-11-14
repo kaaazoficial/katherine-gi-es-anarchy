@@ -87,7 +87,7 @@ from katherine_game_queries import (
     unwrap_genshin_db_response,
 )
 from katherine_retention import cleanup_database_retention
-from katherine_storage import create_sqlite_backup, verify_sqlite_database
+from katherine_storage import verify_sqlite_database
 from katherine_help import build_commands_help_text as _build_commands_help_text, filter_commands_help_text
 
 AI_CORE = KatherineAI()
@@ -6720,10 +6720,6 @@ async def fetch_community_character_guide(
         "genshin_gg": "Genshin.gg",
         "icy_veins": "Icy Veins",
         "icy_veins_teams": "Icy Veins · equipos",
-    "genshin_guides": "Genshin Guides",
-    "genshin_build": "Genshin Build",
-    "genshin_guide": "Genshin Guide",
-    "game8": "Game8"
     }
     merged["source_labels"] = list(dict.fromkeys(
         source_labels[source] for source in merged["sources"]
@@ -9246,7 +9242,6 @@ async def _handle_command_impl(event: dict, source: str):
             await send_message(thread, "Analizo un máximo de cuatro personajes por consulta.", source, reply)
             return
         datasets = await asyncio.gather(*(collect_character_guide_data(name) for name in names))
-        keys = {item["key"] for item in datasets}
         shared_teams = []
         for item in datasets:
             for team in get_team_suggestions(item["key"], item.get("community_data")):

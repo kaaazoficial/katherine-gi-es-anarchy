@@ -1,7 +1,6 @@
 """Plain-text command help and category filtering for Katherine."""
 from __future__ import annotations
 
-import re
 import unicodedata
 
 
