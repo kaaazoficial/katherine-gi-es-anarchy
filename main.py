@@ -10553,7 +10553,7 @@ Uso: !enciclopedia <nombre>""",
                 "Aviso: los datos locales pueden perderse al reiniciar o desplegar. "
                 "El respaldo local no sustituye una copia externa."
             )
-        await send_message(thread, "\\n".join(diagnostic), source, reply)
+        await send_message(thread, "\n".join(diagnostic), source, reply)
         return
 
     if command == "!metricas":
