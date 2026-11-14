@@ -52,6 +52,7 @@ def _command_help_groups(prefix: str) -> tuple[str, list[tuple[str, list[str]]]]
         ]),
         ("MÚSICA Y VOZ", [
             f"{prefix}join — entra a la llamada; {prefix}salirsala — sale; {prefix}salas — lista salas.",
+            f"{prefix}voz participantes|hablando|estado — muestra participantes detectados en la llamada activa.",
             f"{prefix}dj buscar <tema> — busca música; {prefix}reproducir <pista> — reproduce archivo local.",
             f"{prefix}dj pausa|reanudar|saltar|cola|actual|detener — controles de reproducción.",
             f"{prefix}playlist <acción> — listas; {prefix}volumen <0-100> — volumen.",
