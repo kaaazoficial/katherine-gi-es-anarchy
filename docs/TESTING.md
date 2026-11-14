@@ -27,7 +27,7 @@ deduplicación de eventId, límites de tamaño, despacho hasta el manejador de c
 y endpoint de salud.
 
 Las pruebas sustituyen los límites de envío/voz/antispam y no realizan llamadas a
-Anarchy Apps, Gemini, Groq, OpenRouter ni otros servicios externos. No requieren
+Anarchy Apps, Gemini, Groq ni otros servicios externos. No requieren
 variables de entorno de producción ni consumen cuotas de proveedores.
 
 GitHub Actions ejecuta las pruebas unitarias y las de integración en Python 3.11

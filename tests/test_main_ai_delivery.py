@@ -464,7 +464,6 @@ async def test_reply_to_katherine_routes_plain_text_to_assistant(monkeypatch):
         "message_id": "katherine-reply-target", "created_at": bot_main.time.time(),
     })
     monkeypatch.setattr(bot_main, "check_antispam_message", lambda *_: (False, None))
-    monkeypatch.setattr(bot_main.AI_CORE, "record_chat_message", lambda *args, **kwargs: False)
 
     async def no_speech(*_args, **_kwargs):
         return None
@@ -521,12 +520,12 @@ def test_command_help_is_complete_and_keeps_main_categories():
     assert len(help_text) > 1800
     assert "GENSHIN IMPACT" in help_text and "MÚSICA Y VOZ" in help_text
     assert "!menu" in help_text and "UID autorizado" in help_text
-    assert "!salirsala" in help_text and "!djstop" in help_text
+    assert "!salirsala" in help_text and "!djstop" not in help_text
     assert "sin paneles ni botones" in help_text
 
 
 
-def test_command_help_lists_all_groups_and_legacy_aliases_without_button_menu():
+def test_command_help_lists_core_commands_without_button_menu():
     help_text = bot_main.build_commands_help_text()
     required = (
         "!asistente", "!ia preguntar", "!investigar", "!analizartexto", "!calcular",
@@ -805,7 +804,6 @@ def test_concurrent_audio_dependency_loading_is_single_initialization(monkeypatc
 @pytest.mark.asyncio
 async def test_misspelled_katherine_call_routes_to_ai_assistant(monkeypatch):
     monkeypatch.setattr(bot_main, "check_antispam_message", lambda *_: (False, None))
-    monkeypatch.setattr(bot_main.AI_CORE, "record_chat_message", lambda *args, **kwargs: None)
     monkeypatch.setattr(bot_main, "extract_message_urls", lambda *_: [])
 
     async def no_speech(*_args, **_kwargs):
@@ -843,7 +841,6 @@ async def test_calling_katherine_without_a_question_gets_a_short_prompt(monkeypa
     sent = []
 
     monkeypatch.setattr(bot_main, "check_antispam_message", lambda *_: (False, None))
-    monkeypatch.setattr(bot_main.AI_CORE, "record_chat_message", lambda *args, **kwargs: None)
     monkeypatch.setattr(bot_main, "extract_message_urls", lambda *_: [])
 
     async def no_speech(*_args, **_kwargs):

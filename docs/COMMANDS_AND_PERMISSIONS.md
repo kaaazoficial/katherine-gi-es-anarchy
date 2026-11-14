@@ -6,9 +6,9 @@ La ayuda del chat (`!ayuda`, `!comandos` y `!menu`) muestra el catálogo complet
 
 - `!investigar <tema>`: busca páginas públicas en varios resultados independientes, recupera extractos y solicita una síntesis basada en las fuentes.
 - Modos del Centro de Investigación Avanzada: `!investigar comparar: <tema>` contrasta fuentes y posturas; `!investigar verificar: <afirmación>` clasifica afirmaciones según la evidencia; `!investigar cronologia: <tema>` ordena acontecimientos con fechas verificables; `!investigar informe: <tema>` genera un informe exhaustivo. Sin modo explícito se usa la investigación general.
-- `!enlace <URL>`: analiza una página HTML pública HTTPS; no sigue redirecciones ni acepta hosts locales/privados.
+- Los enlaces se inspeccionan automáticamente al recibir el mensaje; no existe comando manual de análisis.
 - La investigación combina Wikipedia, Wikidata y búsqueda web general. Según la intención, añade Internet Archive (libros/archivos), OpenAlex, Crossref y arXiv (publicaciones académicas y preprints), Europe PMC (biomedicina y ciencias de la vida), GDELT (cobertura periodística reciente), NASA (biblioteca de imágenes y vídeos espaciales), MusicBrainz y Jamendo (metadatos y catálogo musical), KeqingMains, HoYoLAB y Fandom (Genshin Impact), y documentación oficial de herramientas como Python, FastAPI, GitHub, Render, PostgreSQL, Docker, MDN, Node.js y React. Las fuentes especializadas solo se consultan cuando el tema las justifica; no se mezclan con preguntas generales. Se priorizan hasta ocho resultados de dominios distintos. GDELT sirve para localizar cobertura, no para validar por sí solo una noticia; arXiv contiene preprints que pueden no estar revisados por pares. Europe PMC devuelve metadatos y abstracts, no garantiza texto completo. KeqingMains y Fandom son fuentes comunitarias; HoYoLAB puede contener publicaciones oficiales y de usuarios, por lo que se comprueba la autoría. Jamendo requiere `JAMENDO_CLIENT_ID` en Render; sin ella se omite. MusicBrainz limita las consultas a una por segundo. OpenAlex, Crossref, Wikidata, Internet Archive y NASA usan endpoints públicos sin clave de Katherine.
-- `!ia investigar <tema>` y `!ia enlace <URL>`: accesos desde el menú IA.
+- `!ia investigar <tema>`: acceso alternativo a la investigación. Los enlaces se inspeccionan automáticamente al recibir mensajes.
 - Todos los comandos del catálogo y las acciones sociales (por ejemplo, `Katherine investigar comparar: ...`, `Katherine dj pausa`, `Katherine abrazo @usuario` o `Katherine perfil`) pueden invocarse directamente después de «Katherine». Se conservan los permisos originales y la mención aislada no activa el bot.
 - La síntesis cita las fuentes por número y dominio; páginas bloqueadas, no HTML o sin texto suficiente pueden omitirse. Los metadatos de Crossref/OpenAlex no garantizan acceso al texto completo y los derechos de Internet Archive/Jamendo dependen de cada ítem. La búsqueda no garantiza exhaustividad.
 
@@ -26,7 +26,7 @@ En Render, configura la variable `ADMIN_UIDS` con uno o más UID. Se aceptan sep
 - `!antispam`, `!advertir`, `!advertencias`, `!quitaradvertencia`
 - `!perfilbot`, `!avatarbot`
 - `!respuestas`, `!respuesta`
-- `!ia probar [gemini|groq|openrouter]`, `!ia guardian`, `!ia analista`, `!ia diagnostico`
+- `!ia probar [gemini|groq]`, `!ia guardian`, `!ia diagnostico`
 
 Los eventos se crean libremente; solo su creador o un UID administrador puede cerrarlos. Los comandos generales de fecha, zona horaria, menú, economía, traducción y multimedia siguen disponibles para todos.
 
@@ -76,7 +76,7 @@ Al responder directamente a un mensaje de Katherine, el bot interpreta el texto 
 
 ## Benchmark de calidad sin llamadas a IA
 
-La batería determinista del enrutador se ejecuta con `pytest -q tests/test_katherine_ai_benchmark.py`. Comprueba intención, dificultad, selección mínima de herramientas y conservación del contexto en preguntas de seguimiento. No consume cuotas de Gemini, Groq u OpenRouter.
+La batería determinista del enrutador se ejecuta con `pytest -q tests/test_katherine_ai_benchmark.py`. Comprueba intención, dificultad, selección mínima de herramientas y conservación del contexto en preguntas de seguimiento. No consume cuotas de Gemini, Gemini o Groq.
 
 
 ## Menciones de usuarios en respuestas
