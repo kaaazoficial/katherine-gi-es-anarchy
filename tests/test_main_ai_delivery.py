@@ -1,4 +1,5 @@
 """Regression tests for AI tool output delivery capture."""
+import asyncio
 import inspect
 
 import pytest
@@ -545,40 +546,9 @@ def test_command_help_lists_all_groups_and_legacy_aliases_without_button_menu():
     assert len(help_text) > 1800
 
 
-def test_outgoing_mention_map_preserves_structured_uid_and_display_name():
-    mapping = bot_main.build_outgoing_mention_map({
-        "mentions": [
-            {"uid": "user-123", "nickname": "Ana", "username": "ana_dev"},
-            {"uid": "", "nickname": "Texto sin UID"},
-        ]
-    })
-    expected = {"uid": "user-123", "nickname": "Ana"}
-    assert mapping == {"ana": expected, "ana_dev": expected}
-
-
-def test_outgoing_mentions_keep_plain_display_text_and_build_profile_entities():
-    token = bot_main.OUTGOING_MENTION_MAP.set({
-        "ana": {"uid": "user-123", "nickname": "Ana"},
-        "ana maria": {"uid": "user-456", "nickname": "Ana Maria"},
-    })
-    try:
-        text = "Hola @Ana y @Ana Maria, pero deja @Desconocido y correo ana@example.com, no @Ana.com ni @Anagrama."
-        entities = bot_main.outgoing_mention_entities(text)
-    finally:
-        bot_main.OUTGOING_MENTION_MAP.reset(token)
-    assert entities == [
-        {"uid": "user-123", "nickname": "Ana"},
-        {"uid": "user-456", "nickname": "Ana Maria"},
-    ]
-    assert "@Ana" in text and "<@user-123>" not in text
-
-
 @pytest.mark.asyncio
-async def test_send_message_posts_visible_name_and_structured_mention_entity(monkeypatch):
+async def test_send_message_keeps_at_name_literal_without_undocumented_mentions(monkeypatch):
     captured = []
-    mention_token = bot_main.OUTGOING_MENTION_MAP.set({
-        "ana": {"uid": "user-123", "nickname": "Ana"}
-    })
     monkeypatch.setattr(bot_main, "last_bot_send", 0.0)
     monkeypatch.setitem(bot_main.last_chat_send, "developer:mention-test", 0.0)
 
@@ -587,14 +557,95 @@ async def test_send_message_posts_visible_name_and_structured_mention_entity(mon
         return {"ok": True, "status": 200, "data": {"messageId": "mention-test-id"}}
 
     monkeypatch.setattr(bot_main, "api", successful_api)
-    try:
-        result = await bot_main.send_message(
-            "mention-test", "Hola @Ana, aquí tienes tu respuesta."
-        )
-    finally:
-        bot_main.OUTGOING_MENTION_MAP.reset(mention_token)
+    result = await bot_main.send_message(
+        "mention-test", "Hola @Ana, aquí tienes tu respuesta."
+    )
 
     assert result["ok"] is True
-    assert captured[0]["content"] == "Hola @Ana, aquí tienes tu respuesta."
-    assert captured[0]["mentions"] == [{"uid": "user-123", "nickname": "Ana"}]
-    assert "buttons" not in captured[0]
+    assert captured == [{"content": "Hola @Ana, aquí tienes tu respuesta."}]
+
+
+@pytest.mark.asyncio
+async def test_safe_dispatch_serializes_events_inside_same_room(monkeypatch):
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    second_started = asyncio.Event()
+    processed = []
+    key = ("developer", "dispatch-same-room")
+    bot_main.event_dispatch_locks.pop(key, None)
+
+    async def fake_dispatch(event, source):
+        if event["id"] == "first":
+            first_started.set()
+            await release_first.wait()
+        else:
+            second_started.set()
+        processed.append(event["id"])
+
+    monkeypatch.setattr(bot_main, "dispatch", fake_dispatch)
+    first = asyncio.create_task(bot_main.safe_dispatch(
+        {"type": "message", "threadId": key[1], "id": "first"}, key[0]
+    ))
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+    second = asyncio.create_task(bot_main.safe_dispatch(
+        {"type": "interaction", "threadId": key[1], "id": "second"}, key[0]
+    ))
+    await asyncio.sleep(0)
+    assert not second_started.is_set()
+
+    release_first.set()
+    await asyncio.wait_for(asyncio.gather(first, second), timeout=1)
+
+    assert processed == ["first", "second"]
+    assert key not in bot_main.event_dispatch_locks
+    assert bot_main.metrics["webhook_dispatch_queue_waits"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_safe_dispatch_keeps_different_rooms_parallel(monkeypatch):
+    started = {
+        "room-left": asyncio.Event(),
+        "room-right": asyncio.Event(),
+    }
+    release = asyncio.Event()
+
+    async def fake_dispatch(event, source):
+        room = event["threadId"]
+        started[room].set()
+        await release.wait()
+
+    monkeypatch.setattr(bot_main, "dispatch", fake_dispatch)
+    tasks = [
+        asyncio.create_task(bot_main.safe_dispatch(
+            {"type": "message", "threadId": room}, "developer"
+        ))
+        for room in started
+    ]
+
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*(item.wait() for item in started.values())),
+            timeout=1,
+        )
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
+
+    assert not bot_main.event_dispatch_locks
+
+
+@pytest.mark.asyncio
+async def test_safe_dispatch_counts_failures_without_leaking_room_locks(monkeypatch):
+    key = ("developer", "dispatch-failing-room")
+
+    async def failing_dispatch(event, source):
+        raise RuntimeError("simulated dispatch failure")
+
+    monkeypatch.setattr(bot_main, "dispatch", failing_dispatch)
+    before = bot_main.metrics["webhook_dispatch_failures"]
+    await bot_main.safe_dispatch(
+        {"type": "message", "threadId": key[1]}, key[0]
+    )
+
+    assert bot_main.metrics["webhook_dispatch_failures"] == before + 1
+    assert key not in bot_main.event_dispatch_locks
