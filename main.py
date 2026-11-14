@@ -201,7 +201,7 @@ API = "https://api.anarchyapps.org/bot-api/v1"
 GAME_API = "https://genshin-db-api.vercel.app/api/v5"
 PORT = SETTINGS.port
 # Render requires the web server to listen on every container interface.
-UVICORN_BIND_HOST = "0.0.0.0"
+UVICORN_BIND_HOST = os.getenv("UVICORN_BIND_HOST", "0.0.0.0").strip() or "0.0.0.0"
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 COMMUNITY_TOKEN = os.getenv("COMMUNITY_BOT_TOKEN", "").strip()
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
