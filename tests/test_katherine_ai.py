@@ -4,7 +4,8 @@ import json
 import time
 import pytest
 from katherine_ai import (
-    ACTION_SCHEMA, KatherineAI, build_ai_session_key, build_ai_rate_key,
+    ACTION_SCHEMA, ANSWER_SCHEMA, KatherineAI, build_ai_session_key, build_ai_rate_key,
+    compact_tool_result_for_context, output_token_budget_for_difficulty,
     is_bot_author, sanitize_ai_trace_text, validate_ai_tool_call,
 )
 
@@ -184,7 +185,8 @@ async def test_api_request_uses_store_false_and_structured_output(monkeypatch):
     assert captured["headers"]["Authorization"] == "Bearer test-key"
     assert captured["json"]["store"] is False
     assert captured["json"]["model"] == "test-model"
-    assert captured["json"]["text"]["format"]["schema"] == ACTION_SCHEMA
+    assert captured["json"]["text"]["format"]["schema"] == ANSWER_SCHEMA
+    assert captured["json"]["max_output_tokens"] == 256
 
 @pytest.mark.asyncio
 async def test_rapid_requests_are_queued_not_rejected(monkeypatch):
@@ -364,6 +366,7 @@ def test_tool_results_are_retained_for_follow_up_context():
     assert history[-1]["role"] == "assistant"
     assert "Resultado de herramienta" in history[-1]["content"]
     assert "materiales de jefe" in history[-1]["content"]
+    assert ai.metrics["ai_tool_context_chars_original"] >= ai.metrics["ai_tool_context_chars_stored"]
 
 
 def test_ai_session_key_never_uses_nickname_as_persistent_identity():
@@ -1343,8 +1346,9 @@ async def test_simple_answer_cache_isolated_by_user_identity(monkeypatch):
     ai._request_json = fake_request
     await ai.assist("¿Qué es una API?", "session-a", lambda *args, **kwargs: None, rate_key="user-a")
     await ai.assist("¿Qué es una API?", "session-b", lambda *args, **kwargs: None, rate_key="user-b")
-    assert len(calls) == 2
-    assert ai.metrics["ai_cache_hits"] == 0
+    assert len(calls) == 1
+    assert ai.metrics["ai_shared_cache_hits"] == 1
+    assert ai.metrics["ai_cache_hits"] == 1
 
 
 @pytest.mark.asyncio
@@ -1397,3 +1401,71 @@ async def test_simultaneous_simple_queries_share_one_provider_request(monkeypatc
     assert len(calls) == 1
     assert all(item["answer"] == "Respuesta compartida." for item in results)
     assert ai.metrics["ai_singleflight_waits"] == 1
+
+
+
+def test_output_budgets_preserve_complex_answers_without_a_fixed_cap():
+    assert output_token_budget_for_difficulty("simple") == 256
+    assert output_token_budget_for_difficulty("standard") == 640
+    assert output_token_budget_for_difficulty("complex") is None
+    assert output_token_budget_for_difficulty("research") is None
+
+
+def test_tool_context_compaction_keeps_start_and_end_and_caps_storage():
+    source = "\n".join(
+        [f"Sección {index}: " + ("dato relevante " * 40) for index in range(30)]
+    )
+    compacted = compact_tool_result_for_context(source, max_chars=900)
+    assert len(compacted) <= 900
+    assert "Sección 0" in compacted
+    assert "Sección 29" in compacted
+    assert "contenido intermedio omitido" in compacted
+
+
+def test_conversation_prompt_uses_minimal_answer_contract():
+    from katherine_ai import build_ai_instructions
+    prompt = build_ai_instructions(set(), "conversation")
+    assert "únicamente answer" in prompt
+    assert "kind, answer, command, args, steps" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_generic_cache_is_shared_but_personal_context_is_not(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+    calls = []
+
+    async def fake_request(method, url, **kwargs):
+        calls.append(kwargs["json"])
+        return FakeResponse(response_payload({
+            "answer": "Una API permite que dos programas se comuniquen."
+        }))
+
+    first = await ai.assist("¿Qué es una API?", "room:user-a", fake_request, rate_key="user-a")
+    second = await ai.assist("¿Qué es una API?", "room:user-b", fake_request, rate_key="user-b")
+    assert first["answer"] == second["answer"]
+    assert len(calls) == 1
+    assert ai.metrics["ai_shared_cache_hits"] == 1
+
+    personal = await ai.assist("¿Qué sabes de mi cuenta?", "room:user-c", fake_request, rate_key="user-c")
+    assert personal["answer"]
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_action_requests_keep_full_action_schema_and_standard_budget(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    ai = KatherineAI()
+    captured = {}
+
+    async def fake_request(method, url, **kwargs):
+        captured.update(kwargs["json"])
+        return FakeResponse(response_payload({
+            "kind": "command", "answer": "", "command": "pausa",
+            "args": "", "steps": []
+        }))
+
+    result = await ai.assist("por favor pausa la música después de terminar esta canción", "room:user", fake_request)
+    assert result["kind"] == "command"
+    assert captured["text"]["format"]["schema"] == ACTION_SCHEMA
+    assert captured["max_output_tokens"] == 640
