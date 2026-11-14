@@ -33,6 +33,9 @@ Los eventos se crean libremente; solo su creador o un UID administrador puede ce
 ### Métricas y sugerencias de comandos
 
 - `!metricas` muestra solo métricas agregadas del proceso y requiere UID administrador.
+  También estima el coste por proveedor/modelo en USD usando tarifas públicas estándar para Gemini 3.5 Flash-Lite y Groq GPT-OSS 20B. Los modelos sin tarifa aparecen como «sin tarifa configurada», nunca como coste cero.
+  Las tarifas pueden sobrescribirse con `KATHERINE_AI_COST_RATES`, un objeto JSON cuyas claves son `Proveedor|modelo` y cuyos valores contienen `input` y `output` en USD por millón de tokens. Ejemplo: `{"Google Gemini|gemini-3.5-flash-lite":{"input":0.30,"output":2.50}}`.
+  El importe es una estimación con tarifas estándar, no una factura: puede diferir por nivel gratuito, caché, modalidad, descuentos, región, proveedor de enrutamiento o cambios de precios.
   Incluye promedios por respuesta con tokens informados, totales de los últimos 60 minutos y una proyección diaria solo tras 5 minutos y 3 observaciones. La proyección se calcula desde el arranque del proceso y no representa consumo real ni facturación.
   Los contadores y las ventanas temporales viven solo en RAM y se reinician con el proceso; no se guardan usuarios, salas ni conversaciones.
 - `GET /metrics` expone métricas Prometheus sin etiquetas de usuario, sala o mensaje. Puede protegerse configurando `PROMETHEUS_METRICS_TOKEN` en Render; cuando se configura, requiere `Authorization: Bearer <token>`.
