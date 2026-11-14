@@ -1091,6 +1091,11 @@ class KatherineAI:
                 f"respuestas: {int(self.metrics.get('ai_provider_responses_completed', 0))} · "
                 f"respaldos: {int(self.metrics.get('ai_provider_failovers', 0))}."
             ),
+            (
+                f"Caché breve: {int(self.metrics.get('ai_cache_hits', 0))} aciertos · "
+                f"{int(self.metrics.get('ai_cache_misses', 0))} consultas nuevas · "
+                f"{int(self.metrics.get('ai_singleflight_waits', 0))} solicitudes compartidas."
+            ),
             f"Límite: {self.user_request_limit} consultas por usuario y minuto; estado temporal solo en RAM.",
             "Memoria contextual: solo RAM, aislada por usuario y sala (5 min; máximo 2 intercambios).",
             f"Analizador de chat: {'ACTIVO' if thread_id and str(thread_id) in self._analyst_enabled else 'INACTIVO'} en esta sala.",
@@ -1900,6 +1905,15 @@ class KatherineAI:
             if self.is_gemini
             else payload.get("usage", {})
         )
+        usage_key = (self.provider_name[:48], self.model[:96])
+        provider_totals = self._provider_usage.setdefault(
+            usage_key, {"responses": 0, "input_tokens": 0, "output_tokens": 0}
+        )
+        self._provider_usage.move_to_end(usage_key)
+        while len(self._provider_usage) > 12:
+            self._provider_usage.popitem(last=False)
+        provider_totals["responses"] += 1
+
         if isinstance(usage, dict):
             token_aliases = (
                 (
@@ -1915,7 +1929,10 @@ class KatherineAI:
             for key, aliases in token_aliases:
                 value = next((usage.get(alias) for alias in aliases if usage.get(alias) is not None), 0)
                 try:
-                    self.metrics[key] += max(0, int(value or 0))
+                    numeric_value = max(0, int(value or 0))
+                    self.metrics[key] += numeric_value
+                    target = "input_tokens" if key.endswith("input_tokens") else "output_tokens"
+                    provider_totals[target] += numeric_value
                 except (TypeError, ValueError):
                     pass
         self.metrics["ai_provider_responses_completed"] += 1
@@ -1998,9 +2015,10 @@ class KatherineAI:
             last_user_turn
             and is_genshin_related_request(str(last_user_turn.get("content") or ""))
         )
-        if last_user_was_genshin and not contextual_genshin:
-            # A new non-referential request changes topic; discard stale domain
-            # context before generating a general-purpose answer.
+        contextual_followup = self.is_contextual_followup(text, history)
+        if history and not contextual_genshin and not contextual_followup:
+            # Standalone requests start clean; only referential follow-ups keep
+            # the preceding turns in the prompt.
             self._memory.pop(key, None)
             history = []
 
@@ -2026,10 +2044,31 @@ class KatherineAI:
                 "fallback": True,
             }
         messages = [*history, {"role": "user", "content": text}]
+        normalized_request = normalize_topic_text(text)
+        cacheable_simple = (
+            intent == "conversation"
+            and difficulty == "simple"
+            and not request_is_genshin
+            and not history
+            and len(text) <= 120
+            and not re.search(
+                r"\b(?:yo|mi|mis|mio|mia|me|tengo|estoy|siento|necesito|quiero|pareja|cuenta|usuario)\b",
+                normalized_request,
+            )
+            and not re.search(
+                r"\b(?:eso|ese|esa|ellos|ellas|aquello|anterior|antes)\b",
+                normalized_request,
+            )
+        )
         try:
-            result = await self._request_json(
-                instructions, messages, request_func, rate_key=rate_key or key,
+            result = await self._request_assist_json(
+                instructions,
+                messages if not cacheable_simple else [{"role": "user", "content": text}],
+                request_func,
+                rate_key=rate_key,
+                session_key=key,
                 difficulty=difficulty,
+                cacheable=cacheable_simple,
             )
         except RuntimeError as exc:
             reason = str(exc)
