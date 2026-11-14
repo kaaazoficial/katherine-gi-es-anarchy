@@ -649,3 +649,44 @@ async def test_safe_dispatch_counts_failures_without_leaking_room_locks(monkeypa
 
     assert bot_main.metrics["webhook_dispatch_failures"] == before + 1
     assert key not in bot_main.event_dispatch_locks
+
+
+
+@pytest.mark.asyncio
+async def test_command_help_blocks_are_sent_in_order_and_reply_only_to_first(monkeypatch):
+    blocks = ["bloque IA", "bloque Genshin", "bloque Social"]
+    calls = []
+
+    async def fake_send(thread_id, content, source="developer", reply_id=None):
+        calls.append((thread_id, content, source, reply_id))
+        return {"ok": True}
+
+    monkeypatch.setattr(bot_main, "build_commands_help_blocks", lambda _prefix: blocks)
+    monkeypatch.setattr(bot_main, "send_message", fake_send)
+
+    await bot_main.send_command_help_blocks("room-help", "community", "reply-123")
+
+    assert calls == [
+        ("room-help", "bloque IA", "community", "reply-123"),
+        ("room-help", "bloque Genshin", "community", None),
+        ("room-help", "bloque Social", "community", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_command_help_delivery_stops_after_first_failed_block(monkeypatch):
+    blocks = ["bloque IA", "bloque Genshin", "bloque Social"]
+    calls = []
+
+    async def fake_send(thread_id, content, source="developer", reply_id=None):
+        calls.append(content)
+        if content == "bloque Genshin":
+            return {"ok": False, "status": 503}
+        return {"ok": True}
+
+    monkeypatch.setattr(bot_main, "build_commands_help_blocks", lambda _prefix: blocks)
+    monkeypatch.setattr(bot_main, "send_message", fake_send)
+
+    await bot_main.send_command_help_blocks("room-help-failure", "developer")
+
+    assert calls == ["bloque IA", "bloque Genshin"]
