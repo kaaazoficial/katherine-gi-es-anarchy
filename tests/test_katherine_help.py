@@ -4,7 +4,7 @@ from katherine_help import build_commands_help_text, filter_commands_help_text
 
 def test_help_supports_category_aliases_and_custom_prefix():
     text = build_commands_help_text("$")
-    assert "$ayuda [categoria]" in text
+    assert "$ayuda <categoría>" in text
     assert "$diagnostico" in text
     assert "$ayuda" in filter_commands_help_text(text, "administración")
     assert "GENSHIN IMPACT" not in filter_commands_help_text(text, "administración")
@@ -78,3 +78,29 @@ def test_reading_volume_command_is_listed_under_music_and_voice():
     assert "!subirvolumenlectura [cantidad]" in music_help
     assert "!bajarvolumenlectura [cantidad]" in music_help
     assert "!silenciolectura" in music_help
+
+
+
+def test_help_uses_subsections_and_one_command_family_per_line():
+    text = build_commands_help_text()
+    assert "PERSONAJES Y EQUIPOS" in text
+    assert "REPRODUCTOR DJ" in text
+    assert "• !guia <personaje>" in text
+    assert "• !dj buscar <tema>" in text
+    assert "• !advertir" in text
+
+
+def test_category_help_is_compact_and_does_not_include_other_categories():
+    full = build_commands_help_text()
+    social = filter_commands_help_text(full, "social")
+    assert "SOCIAL Y PERFILES" in social
+    assert "INTERACCIONES" in social
+    assert "!perfil" in social
+    assert "GENSHIN IMPACT" not in social
+    assert "MÚSICA Y VOZ" not in social
+
+
+def test_unknown_category_includes_a_concrete_example():
+    response = filter_commands_help_text(build_commands_help_text("$"), "inexistente")
+    assert "Categoría no reconocida" in response
+    assert "Ejemplo: $ayuda genshin" in response
