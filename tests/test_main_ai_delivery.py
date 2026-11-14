@@ -799,3 +799,70 @@ def test_concurrent_audio_dependency_loading_is_single_initialization(monkeypatc
 
     assert results == [True, True, True, True]
     assert sorted(calls) == ["av", "livekit.rtc", "numpy"]
+
+
+
+@pytest.mark.asyncio
+async def test_misspelled_katherine_call_routes_to_ai_assistant(monkeypatch):
+    monkeypatch.setattr(bot_main, "check_antispam_message", lambda *_: (False, None))
+    monkeypatch.setattr(bot_main.AI_CORE, "record_chat_message", lambda *args, **kwargs: None)
+    monkeypatch.setattr(bot_main, "extract_message_urls", lambda *_: [])
+
+    async def no_speech(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(bot_main, "enqueue_message_for_speech", no_speech)
+    monkeypatch.setattr(bot_main, "interpret_natural_request", lambda _text: None)
+    captured = []
+
+    async def capture_command(event, source):
+        captured.append((event, source))
+
+    monkeypatch.setattr(bot_main, "handle_command", capture_command)
+    event = {
+        "type": "message",
+        "threadId": "name-call-room",
+        "message": {
+            "content": "Katherin, necesito ayuda con una pregunta.",
+            "author": {"uid": "user-1", "nickname": "Viajero"},
+        },
+    }
+
+    await bot_main.dispatch(event, "developer")
+
+    assert len(captured) == 1
+    routed_event, source = captured[0]
+    assert source == "developer"
+    assert routed_event["message"]["content"] == (
+        f"{bot_main.PREFIX}asistente necesito ayuda con una pregunta."
+    )
+
+
+@pytest.mark.asyncio
+async def test_calling_katherine_without_a_question_gets_a_short_prompt(monkeypatch):
+    sent = []
+
+    monkeypatch.setattr(bot_main, "check_antispam_message", lambda *_: (False, None))
+    monkeypatch.setattr(bot_main.AI_CORE, "record_chat_message", lambda *args, **kwargs: None)
+    monkeypatch.setattr(bot_main, "extract_message_urls", lambda *_: [])
+
+    async def no_speech(*_args, **_kwargs):
+        return None
+
+    async def fake_send(thread_id, content, source="developer", **kwargs):
+        sent.append((thread_id, content, source))
+        return {"ok": True}
+
+    monkeypatch.setattr(bot_main, "enqueue_message_for_speech", no_speech)
+    monkeypatch.setattr(bot_main, "send_message", fake_send)
+
+    await bot_main.dispatch({
+        "type": "message",
+        "threadId": "name-call-room",
+        "message": {
+            "content": "Kathy",
+            "author": {"uid": "user-2", "nickname": "Viajero"},
+        },
+    }, "developer")
+
+    assert sent == [("name-call-room", "Aquí estoy. ¿Qué necesitas?", "developer")]
