@@ -222,42 +222,11 @@ def test_memory_turn_limit():
     assert len(history) == 4
     assert history[-1]["content"] == "m7"
 
-def test_chat_analyst_is_disabled_by_default_and_records_only_when_enabled():
-    ai = KatherineAI()
-    assert not ai.record_chat_message("room", "Ana", "hola")
-    ai.set_analyst("room", True)
-    assert ai.record_chat_message("room", "Ana", "hola")
-    assert ai.record_chat_message("room", "Luis", "hablemos del evento")
-    assert len(ai.analyst_messages("room")) == 2
-    ai.set_analyst("room", False)
-    assert ai.analyst_messages("room") == []
-
 def test_ai_context_defaults_are_short_and_bounded():
     ai = KatherineAI()
     assert ai.memory_ttl == 300
     assert ai.memory_turns == 2
-    assert ai.analyst_ttl == 900
-    assert ai.analyst_limit == 60
 
-
-def test_chat_analyst_activation_expires_automatically():
-    ai = KatherineAI()
-    ai.set_analyst("room", True)
-    ai.record_chat_message("room", "Ana", "mensaje temporal")
-    ai._analyst_enabled_at["room"] = time.time() - 901
-    ai.cleanup()
-    assert ai.analyst_messages("room") == []
-    assert "room" not in ai._analyst_enabled
-
-
-def test_chat_analyst_ignores_bot_and_commands_and_can_clear():
-    ai = KatherineAI()
-    ai.set_analyst("room", True)
-    assert not ai.record_chat_message("room", "Bot", "hola", is_bot=True)
-    assert not ai.record_chat_message("room", "Ana", "!estado")
-    assert ai.record_chat_message("room", "Ana", "acordamos reunirnos")
-    assert ai.clear_analyst_messages("room") == 1
-    assert ai.analyst_messages("room") == []
 
 def test_extract_responses_api_output_text():
     ai = KatherineAI()
@@ -488,42 +457,6 @@ def test_ai_session_key_never_uses_nickname_as_persistent_identity():
 
 
 @pytest.mark.asyncio
-async def test_chat_summary_respects_short_retention_and_hard_message_cap(monkeypatch):
-    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
-    ai = KatherineAI(analyst_limit=200)
-    assert ai.analyst_limit == 60
-    assert ai.analyst_ttl == 900
-    ai.set_analyst("room", True)
-    for index in range(100):
-        ai.record_chat_message(
-            "room", f"User{index:03d}", f"MARKER{index:03d} " + ("x" * 680)
-        )
-
-    retained = ai.analyst_messages("room")
-    assert len(retained) == 60
-    assert retained[0]["author"].startswith("Participante-")
-    assert "User040" not in str(retained)
-    assert retained[0]["content"].startswith("MARKER040")
-
-    captured = {}
-
-    async def fake_request(method, url, **kwargs):
-        captured.update(kwargs)
-        return FakeResponse(response_payload({
-            "kind": "answer", "answer": "Resumen de los mensajes recientes.",
-            "command": "", "args": ""
-        }))
-
-    answer = await ai.summarize_chat("room", fake_request)
-    inputs = captured["json"]["input"]
-    all_input = "\n".join(item["content"] for item in inputs)
-    assert answer == "Resumen de los mensajes recientes."
-    assert len(inputs) > 1
-    assert all(len(item["content"]) <= 4000 for item in inputs)
-    assert all(f"MARKER{index:03d}" in all_input for index in range(40, 100))
-    assert all(f"MARKER{index:03d}" not in all_input for index in range(40))
-
-
 def test_groq_status_does_not_claim_store_disabled(monkeypatch):
     monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
     monkeypatch.setenv(
@@ -949,7 +882,7 @@ def test_structured_ai_schema_uses_provider_compatible_steps_and_app_limits():
     ]
 
 
-def test_ai_trace_redacts_secrets_and_personal_identifiers():
+def test_diagnostic_sanitizer_redacts_secrets_and_personal_identifiers():
     value = (
         "gsk_1234567890abcdefghijklmnop user@example.com "
         "@SomeUser uid 12345678901 Bearer token-value"
@@ -1283,52 +1216,17 @@ def test_ai_rate_key_uses_stable_ids_not_nicknames():
     assert anonymous_a == anonymous_b
 
 
-def test_openrouter_defaults_to_free_responses_router(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-test-key")
-    monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
-    config = KatherineAI()._openrouter_provider_config()
-    assert config["name"] == "OpenRouter"
-    assert config["model"] == "openrouter/free"
-    assert config["url"] == "https://openrouter.ai/api/v1/responses"
-
-
 @pytest.mark.asyncio
-async def test_direct_openrouter_probe_uses_openrouter_responses_api(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
-    monkeypatch.setenv("KATHERINE_AI_PRIMARY_PROVIDER", "gemini")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-test-key")
-    ai = KatherineAI()
-    calls = []
-
-    async def fake_request(method, url, **kwargs):
-        calls.append((url, kwargs))
-        return FakeResponse(response_payload({
-            "kind": "answer", "answer": "OK", "command": "", "args": "", "steps": []
-        }))
-
-    assert await ai.test_provider_connection("openrouter", fake_request) == "OK"
-    assert len(calls) == 1
-    url, kwargs = calls[0]
-    assert url == "https://openrouter.ai/api/v1/responses"
-    assert kwargs["headers"]["Authorization"] == "Bearer openrouter-test-key"
-    assert kwargs["headers"]["X-Title"] == "Katherine"
-    assert kwargs["json"]["model"] == "openrouter/free"
-    assert "max_output_tokens" not in kwargs["json"]
-    assert kwargs["json"]["text"]["format"]["type"] == "json_schema"
-
-
-@pytest.mark.asyncio
-async def test_provider_chain_falls_back_in_gemini_groq_openrouter_order(monkeypatch):
+async def test_provider_chain_falls_back_from_gemini_to_groq(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
     monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-test-key")
+    monkeypatch.setenv("KATHERINE_AI_PRIMARY_PROVIDER", "gemini")
     ai = KatherineAI()
     calls = []
 
     async def fake_provider_call(*args, **kwargs):
         calls.append(ai.provider_name)
-        if ai.provider_name != "OpenRouter":
+        if ai.provider_name != "Groq":
             raise RuntimeError("provider unavailable")
         return {"kind": "answer", "answer": "OK", "command": "", "args": "", "steps": []}
 
@@ -1338,7 +1236,7 @@ async def test_provider_chain_falls_back_in_gemini_groq_openrouter_order(monkeyp
         lambda *args, **kwargs: None,
     )
     assert result["answer"] == "OK"
-    assert calls == ["Google Gemini", "Groq", "OpenRouter"]
+    assert calls == ["Google Gemini", "Groq"]
     assert ai.metrics["ai_provider_failovers"] == 1
 
 
@@ -1354,18 +1252,6 @@ async def test_user_ai_rate_limit_is_ephemeral_and_per_identity():
     ai._enforce_user_rate_limit(key_b)
     assert ai.metrics["ai_user_rate_limited"] == 1
     assert all("user-a" not in item for item in ai._user_request_windows)
-
-
-def test_ai_status_reports_three_providers_without_secrets(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-secret")
-    monkeypatch.setenv("GROQ_API_KEY", "groq-test-secret")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-test-secret")
-    status = KatherineAI().status()
-    assert "Google Gemini" in status
-    assert "Groq" in status
-    assert "OpenRouter" in status
-    assert "openrouter/free" in status
-    assert "openrouter-test-secret" not in status
 
 
 @pytest.mark.asyncio
@@ -1401,7 +1287,7 @@ def test_non_genshin_topic_does_not_expose_teyvat_tools():
     tools = select_ai_tool_commands(text, AI_PUBLIC_COMMANDS, intent)
     assert intent == "conversation"
     assert not tools
-    assert classify_request_intent("Katherine, busca información sobre OpenRouter") == "research"
+    assert classify_request_intent("Katherine, busca información sobre Render") == "research"
 
 def test_anarchy_apps_semantic_faq_does_not_require_llm():
     from katherine_ai import resolve_community_faq
