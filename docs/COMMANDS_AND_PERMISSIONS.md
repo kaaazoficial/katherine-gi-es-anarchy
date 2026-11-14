@@ -1,6 +1,6 @@
 # Katherine · Catálogo y permisos de comandos
 
-La ayuda del chat (`!ayuda` / `!comandos`) es una guía rápida y compacta por categorías; `!menu` abre el panel interactivo. Este documento conserva el catálogo técnico y los permisos completos. La IA tiene ayuda separada mediante `!ia ayuda`; los manejadores y las listas de permisos son la fuente de verdad.
+La ayuda del chat (`!ayuda`, `!comandos` y `!menu`) muestra el catálogo completo en texto plano, agrupado por categorías y con descripciones breves. No crea botones ni abre un panel interactivo. Este documento conserva el detalle técnico y los permisos; la IA tiene ayuda separada mediante `!ia ayuda`.
 
 ## Investigación y herramientas universales
 
@@ -72,3 +72,8 @@ Al responder directamente a un mensaje de Katherine, el bot interpreta el texto 
 ## Benchmark de calidad sin llamadas a IA
 
 La batería determinista del enrutador se ejecuta con `pytest -q tests/test_katherine_ai_benchmark.py`. Comprueba intención, dificultad, selección mínima de herramientas y conservación del contexto en preguntas de seguimiento. No consume cuotas de Gemini, Groq u OpenRouter.
+
+
+## Menciones de usuarios en respuestas
+
+Cuando el evento contiene `message.mentions` con un UID y un nombre, Katherine convierte referencias `@nombre` de sus respuestas al formato nativo `<@UID>`. La asociación se limita al mensaje que originó la respuesta y permanece solo en el contexto de ejecución; no se guarda una agenda permanente. Si la plataforma no entrega un UID verificable, el texto se mantiene como texto y no se inventa una mención.

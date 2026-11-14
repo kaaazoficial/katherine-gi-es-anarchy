@@ -515,9 +515,81 @@ async def test_stopping_music_keeps_katherine_connected_to_livekit():
         bot_main.DJ_ROOMS.pop(key, None)
 
 
-def test_command_help_is_compact_and_keeps_main_categories():
+def test_command_help_is_complete_and_keeps_main_categories():
     help_text = bot_main.build_commands_help_text()
-    assert len(help_text) < 1500
-    assert "TEYVAT" in help_text and "MÚSICA Y VOZ" in help_text
+    assert len(help_text) > 1800
+    assert "GENSHIN IMPACT" in help_text and "MÚSICA Y VOZ" in help_text
     assert "!menu" in help_text and "UID autorizado" in help_text
-    assert "salirsala" in help_text and "mantiene la llamada" in help_text
+    assert "salirsala" in help_text and "sin paneles ni botones" in help_text
+
+
+
+def test_command_help_lists_all_groups_and_legacy_aliases_without_button_menu():
+    help_text = bot_main.build_commands_help_text()
+    required = (
+        "!asistente", "!ia preguntar", "!investigar", "!enlace",
+        "!guia", "!materiales", "!equipos", "!rotacion", "!buscargenshin",
+        "!enemigo", "!elemento", "!curiosidad", "!deseo", "!resetpity",
+        "!interaccion", "!afinidad", "!regalo", "!actividad",
+        "!trivia", "!responder", "!adivina", "!intento", "!encuesta",
+        "!duelo", "!ship", "!pagar", "!ranking", "!8ball",
+        "!join", "!salirsala", "!salas", "!playlist", "!tts",
+        "!fecha", "!zona", "!multimedia", "!imagen", "!audio",
+        "!miuid", "!antispam", "!advertir", "!perfilbot",
+    )
+    for command in required:
+        assert command in help_text
+    assert "paneles ni botones" in help_text
+    assert "panel interactivo" not in help_text.casefold()
+    assert len(help_text) > 1800
+
+
+def test_outgoing_mention_map_only_uses_real_uids_from_structured_mentions():
+    mapping = bot_main.build_outgoing_mention_map({
+        "mentions": [
+            {"uid": "user-123", "nickname": "Ana", "username": "ana_dev"},
+            {"uid": "", "nickname": "Texto sin UID"},
+        ]
+    })
+    assert mapping == {"ana": "user-123", "ana_dev": "user-123"}
+
+
+def test_outgoing_mention_renderer_produces_native_uid_tokens_and_keeps_unknown_names():
+    token = bot_main.OUTGOING_MENTION_MAP.set({
+        "ana": "user-123",
+        "ana maria": "user-456",
+    })
+    try:
+        rendered = bot_main.render_outgoing_user_mentions(
+            "Hola @Ana y @Ana Maria, pero deja @Desconocido y correo ana@example.com."
+        )
+    finally:
+        bot_main.OUTGOING_MENTION_MAP.reset(token)
+    assert rendered == (
+        "Hola <@user-123> y <@user-456>, pero deja @Desconocido "
+        "y correo ana@example.com."
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_posts_native_user_mention_token(monkeypatch):
+    captured = []
+    mention_token = bot_main.OUTGOING_MENTION_MAP.set({"ana": "user-123"})
+    monkeypatch.setattr(bot_main, "last_bot_send", 0.0)
+    monkeypatch.setitem(bot_main.last_chat_send, "developer:mention-test", 0.0)
+
+    async def successful_api(method, path, source="developer", body=None):
+        captured.append(body)
+        return {"ok": True, "status": 200, "data": {"messageId": "mention-test-id"}}
+
+    monkeypatch.setattr(bot_main, "api", successful_api)
+    try:
+        result = await bot_main.send_message(
+            "mention-test", "Hola @Ana, aquí tienes tu respuesta."
+        )
+    finally:
+        bot_main.OUTGOING_MENTION_MAP.reset(mention_token)
+
+    assert result["ok"] is True
+    assert captured[0]["content"] == "Hola <@user-123>, aquí tienes tu respuesta."
+    assert "buttons" not in captured[0]

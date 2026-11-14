@@ -100,6 +100,9 @@ AI_TRACE_WINDOW_SECONDS = 900
 AI_TRACE_CAPTURE: ContextVar[list[str] | None] = ContextVar(
     "katherine_ai_trace_capture", default=None
 )
+OUTGOING_MENTION_MAP: ContextVar[dict[str, str]] = ContextVar(
+    "katherine_outgoing_mention_map", default={}
+)
 
 
 def log_ai_conversation_trace(question: str, answer: str, route: str = "assistant") -> None:
@@ -2123,6 +2126,49 @@ def schedule_pending_delivery(
     return True
 
 
+def build_outgoing_mention_map(message: dict | None) -> dict[str, str]:
+    """Build ephemeral aliases from Anarchy's structured mentions array."""
+    if not isinstance(message, dict):
+        return {}
+    aliases: dict[str, str] = {}
+    for mention in message.get("mentions") or []:
+        if not isinstance(mention, dict):
+            continue
+        user_id = str(
+            mention.get("uid") or mention.get("userId")
+            or mention.get("id") or ""
+        ).strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", user_id):
+            continue
+        for field in (
+            "nickname", "username", "displayName", "display_name",
+            "name", "userName", "handle",
+        ):
+            alias = str(mention.get(field) or "").strip().lstrip("@").strip()
+            if not alias or len(alias) > 80 or any(ord(ch) < 32 for ch in alias):
+                continue
+            aliases.setdefault(alias.casefold(), user_id)
+    return aliases
+
+
+def render_outgoing_user_mentions(content: Any) -> str:
+    """Turn @names from the current event into native <@UID> mention tokens."""
+    text = str(content or "")
+    aliases = OUTGOING_MENTION_MAP.get() or {}
+    if not aliases:
+        return text
+    ordered = sorted(aliases, key=len, reverse=True)
+    alternatives = "|".join(re.escape(alias) for alias in ordered)
+    pattern = re.compile(
+        rf"(?<![<\\w@])@({alternatives})(?![\\w.-])",
+        re.IGNORECASE,
+    )
+    return pattern.sub(
+        lambda match: f"<@{aliases.get(match.group(1).casefold(), '')}>",
+        text,
+    )
+
+
 async def send_message(
     thread_id: str,
     content: str,
@@ -2136,6 +2182,7 @@ async def send_message(
     if not thread_id:
         return None
 
+    content = render_outgoing_user_mentions(content)
     content = sanitize_chat_text(content, allow_safe_links=allow_safe_links)
     trace_capture = AI_TRACE_CAPTURE.get()
     if trace_capture is not None and content and len(trace_capture) < 10:
@@ -2559,31 +2606,83 @@ async def remove_pressed_buttons(event: dict, source: str, remove=True):
 
 
 def build_commands_help_text() -> str:
-    """One-screen command index; detailed permissions remain in documentation."""
-    return "\n".join([
-        "╭──────── ✦ KATHERINE · GUÍA RÁPIDA",
-        f"│ Prefijo: {PREFIX}  ·  También acepta ! y -",
-        "├─ ✧ TEYVAT",
-        f"│ {PREFIX}guia <personaje> · {PREFIX}equipos <personaje>",
-        f"│ {PREFIX}rotacion <personaje> · {PREFIX}enciclopedia <nombre>",
-        "├─ ✧ SOCIAL",
-        f"│ {PREFIX}perfil · {PREFIX}interaccion @usuario · {PREFIX}regalo @usuario",
-        f"│ {PREFIX}bio <texto> · {PREFIX}afinidad @usuario · {PREFIX}muro",
-        "├─ ✧ JUEGOS Y COMUNIDAD",
-        f"│ {PREFIX}trivia · {PREFIX}adivina · {PREFIX}encuesta · {PREFIX}duelo",
-        f"│ {PREFIX}puntos · {PREFIX}ranking · {PREFIX}diario · {PREFIX}evento",
-        "├─ ✧ MÚSICA Y VOZ",
-        f"│ {PREFIX}join · {PREFIX}salirsala · {PREFIX}dj buscar <tema> · {PREFIX}dj pausa",
-        f"│ {PREFIX}dj reanudar · {PREFIX}dj detener (mantiene la llamada) · {PREFIX}cola · {PREFIX}leer · {PREFIX}tts",
-        "├─ ✧ UTILIDADES",
-        f"│ {PREFIX}fecha · {PREFIX}zona <ciudad> · {PREFIX}traducir · {PREFIX}multimedia",
-        "├─ ✧ INTELIGENCIA ARTIFICIAL",
-        f"│ {PREFIX}asistente <consulta> · {PREFIX}investigar <tema> · {PREFIX}ia ayuda",
-        "├─ ✧ ADMINISTRACIÓN",
-        f"│ {PREFIX}estado · {PREFIX}fuentes · {PREFIX}metricas · {PREFIX}autotest  [ADMIN]",
-        "╰─ ◈ Usa !menu para abrir el panel interactivo.",
-        "Los comandos ADMIN requieren un UID autorizado. El catálogo técnico completo está en docs/COMMANDS_AND_PERMISSIONS.md.",
-    ])
+    """Complete command index in compact plain text; no interactive buttons."""
+    groups = [
+        ("AYUDA E INTELIGENCIA ARTIFICIAL", [
+            f"{PREFIX}ayuda / {PREFIX}comandos / {PREFIX}menu — muestra esta guía.",
+            f"{PREFIX}asistente <consulta> — conversación y solicitudes en lenguaje natural.",
+            f"{PREFIX}ia ayuda|preguntar|genshin|estado|olvidar — chat, consulta, estado y contexto temporal.",
+            f"{PREFIX}ia investigar|enlace|musica|traducir — investigación, páginas, búsqueda musical y traducción.",
+            f"{PREFIX}investigar|investiga|investigacion <tema> — investigación; admite comparar, verificar, cronologia e informe.",
+            f"{PREFIX}enlace|analizarenlace|leerweb <URL> — analiza una página pública.",
+            f"{PREFIX}ia probar|trazas|guardian|analista|diagnostico — diagnóstico y controles [ADMIN].",
+        ]),
+        ("GENSHIN IMPACT", [
+            f"{PREFIX}guia <personaje> — build y talentos; {PREFIX}materiales <personaje> — materiales.",
+            f"{PREFIX}equipos|rotacion|sinergia <personaje> — equipos, rotación y sinergias.",
+            f"{PREFIX}jefes — jefes; {PREFIX}banner — banners; {PREFIX}calendario — eventos y calendario.",
+            f"{PREFIX}cobertura <personaje> — contenido; {PREFIX}reacciones <elemento> — reacciones.",
+            f"{PREFIX}enciclopedia|archivo|teyvat <nombre> — consulta la base de datos.",
+            f"{PREFIX}buscargenshin <texto> — búsqueda; {PREFIX}lista <categoría> [página] — listados.",
+            f"{PREFIX}enemigo|geografia|elemento <nombre> — fichas de datos; {PREFIX}curiosidad — dato aleatorio.",
+            f"{PREFIX}deseo — simulador; {PREFIX}pity — consulta contador; {PREFIX}resetpity — reinicia el contador.",
+        ]),
+        ("SOCIAL Y PERFILES", [
+            f"{PREFIX}perfil [@usuario] — consulta perfil; {PREFIX}bio <texto> — edita biografía.",
+            f"{PREFIX}miestado <texto> — actualiza estado; {PREFIX}actividad [hoy|semana] — actividad.",
+            f"{PREFIX}interaccion @usuario — acciones sociales; también: abrazo, abrazar, beso, besar, patada, golpe, cachetada.",
+            "Más acciones: acariciar, mimar, morder, consolar, felicitar, saludar, proteger, bailar, cosquillas, chocar, highfive.",
+            "Otras acciones: ayudar, regalar, acompañar, asustar, curar, cargar, empujar, regañar, admirar, apoyar, dormir, ignorar, mirar e invitar.",
+            f"{PREFIX}roast @usuario — broma; {PREFIX}afinidad|amistad @usuario — vínculo.",
+            f"{PREFIX}regalo @usuario [mensaje] — envía regalo; {PREFIX}muro — regalos recibidos.",
+        ]),
+        ("JUEGOS, ECONOMÍA Y COMUNIDAD", [
+            f"{PREFIX}trivia / {PREFIX}responder <1-4> — trivia; {PREFIX}adivina / {PREFIX}intento <número> — adivinanza.",
+            f"{PREFIX}puntos|reputacion — saldo; {PREFIX}ranking|top — clasificación; {PREFIX}diario|daily — recompensa diaria.",
+            f"{PREFIX}trabajar — recompensa; {PREFIX}pagar|transferir @usuario <cantidad> — transfiere puntos; {PREFIX}economia — resumen.",
+            f"{PREFIX}encuesta <pregunta> | <opciones> — votación; {PREFIX}elige <opciones> — elección aleatoria.",
+            f"{PREFIX}duelo @usuario — reta; {PREFIX}ship <usuario1> <usuario2> — compatibilidad.",
+            f"{PREFIX}azar <mínimo> <máximo> — número; {PREFIX}verdad — pregunta; {PREFIX}dado / {PREFIX}moneda — azar.",
+            f"{PREFIX}8ball <pregunta> — respuesta; {PREFIX}chiste / {PREFIX}frase / {PREFIX}reto / {PREFIX}suerte — entretenimiento.",
+            f"{PREFIX}evento|eventos — eventos de comunidad; crear, consultar estado o cerrar según permisos.",
+        ]),
+        ("MÚSICA Y VOZ", [
+            f"{PREFIX}join — entra a la llamada; {PREFIX}salirsala — sale; {PREFIX}salas — lista salas.",
+            f"{PREFIX}dj buscar <tema> — busca música; {PREFIX}reproducir <pista> — reproduce archivo local.",
+            f"{PREFIX}dj pausa|reanudar|saltar|cola|actual|detener — controles de reproducción.",
+            f"{PREFIX}pausa|pausar|reanudar|continuar|saltar|cola — accesos rápidos; {PREFIX}djdetener|djstop — detiene música sin salir.",
+            f"{PREFIX}playlist <acción> — listas; {PREFIX}volumen|volume <0-100> — volumen.",
+            f"{PREFIX}subirvolumen|bajarvolumen|silencio — controles rápidos; {PREFIX}leer|noleer — lectura de chat.",
+            f"{PREFIX}silenciolectura|subirvolumenlectura|bajarvolumenlectura — ajustes de lectura.",
+            f"{PREFIX}tts voces|voz|velocidad|volumen — configuración de voz y lectura.",
+        ]),
+        ("UTILIDADES Y MULTIMEDIA", [
+            f"{PREFIX}fecha — fecha y hora; {PREFIX}zona <Area/Ciudad> — hora de otra zona.",
+            f"{PREFIX}traducir <idioma> | <texto> — traducción; {PREFIX}multimedia imagen|video|audio <búsqueda> — busca recursos.",
+            f"{PREFIX}media <tipo> <búsqueda> — alias multimedia; {PREFIX}imagen|video|audio <búsqueda> — accesos directos.",
+        ]),
+        ("ADMINISTRACIÓN · UID AUTORIZADO", [
+            f"{PREFIX}miuid|mi-id|mi_uid — consulta UID; {PREFIX}estado — estado general.",
+            f"{PREFIX}fuentes|saludfuentes — proveedores; {PREFIX}metricas — métricas; {PREFIX}autotest — pruebas internas.",
+            f"{PREFIX}centro|nexus — panel de investigación; {PREFIX}admin|paneladmin|guardian — herramientas administrativas.",
+            f"{PREFIX}antispam — protección; {PREFIX}advertir|advertencias|quitaradvertencia — moderación.",
+            f"{PREFIX}respuestas|respuesta — reglas automáticas; {PREFIX}perfilbot — perfil; {PREFIX}avatarbot — avatar.",
+            f"{PREFIX}eliminarmensajes — limpia mensajes propios identificados en esta ejecución.",
+            "Los comandos ADMIN requieren un UID permitido en ADMIN_UIDS. No se autoriza por nickname.",
+        ]),
+    ]
+    lines = [
+        "KATHERINE · LISTA COMPLETA DE COMANDOS",
+        f"Prefijo principal: {PREFIX} · También acepta ! y -.",
+        "Los argumentos entre < > son obligatorios; [ ] son opcionales.",
+        "",
+    ]
+    for title, entries in groups:
+        lines.append(f"── {title} ──")
+        lines.extend(entries)
+        lines.append("")
+    lines.append("Guía de texto: !ayuda, !comandos y !menu. Sin paneles ni botones.")
+    return "\n".join(lines)
 
 
 MENU_ROOT_CHOICES = [
@@ -8125,7 +8224,7 @@ async def execute_ai_plan(
 
 
 
-async def handle_command(event: dict, source: str):
+async def _handle_command_impl(event: dict, source: str):
     global LAST_EVENT_AT, LAST_COMMAND_AT, LAST_COMMAND_NAME, LAST_COMMAND_USER, AI_TRACE_UNTIL
     LAST_EVENT_AT = time.time()
     msg = event.get("message") or {}
@@ -8845,9 +8944,7 @@ async def handle_command(event: dict, source: str):
         return
 
     if command in ("!menu", "!menú"):
-        await send_interactive_menu(
-            thread, source, raw_uid, nickname, reply_id=reply
-        )
+        await send_message(thread, build_commands_help_text(), source, reply)
         return
 
     if command == "!autotest":
@@ -8897,7 +8994,7 @@ async def handle_command(event: dict, source: str):
         )
         await send_message(
             thread,
-            f"INTERACCIÓN CON {target_name.upper()}\nElige qué quieres hacer:",
+            f"INTERACCIÓN CON @{target_name}\nElige qué quieres hacer:",
             source,
             reply,
             buttons
@@ -8940,9 +9037,10 @@ async def handle_command(event: dict, source: str):
         if target_uid and target_uid != uid:
             add_affinity(uid, target_uid)
 
+        target_label = f"@{target_name}" if target_name else str(target)
         await send_message(
             thread,
-            f"{nickname} {random.choice(actions)} {target}.",
+            f"{nickname} {random.choice(actions)} {target_label}.",
             source,
             reply
         )
@@ -8997,7 +9095,7 @@ async def handle_command(event: dict, source: str):
 
         await send_message(
             thread,
-            f"🔥 Katherine contraataca: {target_name}, {random.choice(roasts)}",
+            f"🔥 Katherine contraataca: @{target_name}, {random.choice(roasts)}",
             source,
             reply
         )
@@ -9120,7 +9218,7 @@ async def handle_command(event: dict, source: str):
         if not target_uid:
             await send_message(
                 thread,
-                f"No tengo registrado el UID de {target_name}. "
+                f"No tengo registrado el UID de @{target_name}. "
                 "Esa persona debe escribir un comando primero.",
                 source,
                 reply
@@ -9131,7 +9229,7 @@ async def handle_command(event: dict, source: str):
 
         await send_message(
             thread,
-            f"Afinidad entre {nickname} y {target_name}: {score} puntos. "
+            f"Afinidad entre {nickname} y @{target_name}: {score} puntos. "
             "Las interacciones suman como máximo 1 punto cada 30 segundos.",
             source,
             reply
@@ -9153,7 +9251,7 @@ async def handle_command(event: dict, source: str):
         if not target_uid:
             await send_message(
                 thread,
-                f"No puedo registrar el regalo porque {target_name} "
+                f"No puedo registrar el regalo porque @{target_name} "
                 "aún no está en los perfiles de Katherine.",
                 source,
                 reply
@@ -9178,7 +9276,7 @@ async def handle_command(event: dict, source: str):
 
         await send_message(
             thread,
-            f"🎁 {nickname} le envió un regalo a {target_name}."
+            f"🎁 {nickname} le envió un regalo a @{target_name}."
             + (f"\nMensaje: {message}" if message else ""),
             source,
             reply
@@ -10159,7 +10257,7 @@ Uso: !enciclopedia <nombre>""",
         else:
             result = transfer_points(uid, target_uid, amount)
             if result == "ok":
-                answer = f"💸 Transferiste {amount} puntos a {target_name}."
+                answer = f"💸 Transferiste {amount} puntos a @{target_name}."
             elif result == "insufficient":
                 answer = "No tienes suficientes puntos para esa transferencia."
             elif result == "missing":
@@ -10399,7 +10497,7 @@ Uso: !enciclopedia <nombre>""",
         )
         await send_message(
             thread,
-            f"⚔️ {nickname} ha retado a {target_name} a un duelo. ¿Aceptas el desafío?",
+            f"⚔️ {nickname} ha retado a @{target_name} a un duelo. ¿Aceptas el desafío?",
             source,
             reply,
             buttons
@@ -11207,11 +11305,11 @@ Uso: !enciclopedia <nombre>""",
                 1 for item in get_moderation_warnings(thread, target_uid, 30)
                 if item["active"]
             )
-            await send_message(thread, f"⚠️ Advertencia #{warning_id} registrada para {target_name}. Total activas: {active_count}.", source, reply)
+            await send_message(thread, f"⚠️ Advertencia #{warning_id} registrada para @{target_name}. Total activas: {active_count}.", source, reply)
         else:
             warnings = get_moderation_warnings(thread, target_uid, 20)
             active = [item for item in warnings if item["active"]]
-            lines = [f"⚠️ Advertencias de {target_name}: {len(active)} activas"]
+            lines = [f"⚠️ Advertencias de @{target_name}: {len(active)} activas"]
             lines.extend(
                 f"#{item['id']} · {datetime.fromtimestamp(item['created_at']).strftime('%d/%m %H:%M')} · {item['reason']}"
                 for item in warnings
@@ -11852,6 +11950,16 @@ async def handle_interaction(event: dict, source: str):
 # ---------------------------------------------------------------------------
 # EVENTOS Y WEBHOOKS
 # ---------------------------------------------------------------------------
+async def handle_command(event: dict, source: str):
+    """Process one command with a scoped, ephemeral map of mentioned users."""
+    message = event.get("message") if isinstance(event, dict) else None
+    token = OUTGOING_MENTION_MAP.set(build_outgoing_mention_map(message))
+    try:
+        return await _handle_command_impl(event, source)
+    finally:
+        OUTGOING_MENTION_MAP.reset(token)
+
+
 async def dispatch(event: dict, source: str):
     kind = event.get("type")
 
