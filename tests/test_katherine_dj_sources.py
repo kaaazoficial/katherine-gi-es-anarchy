@@ -16,6 +16,12 @@ def test_dj_audio_hosts_are_exact_and_https_only():
     assert katherine.dj_audio_url_allowed(
         "https://audio.jamendo.com/song.mp3"
     )
+    assert katherine.dj_audio_url_allowed(
+        "https://prod-1.storage.jamendo.com/download/track/123/mp32/"
+    )
+    assert not katherine.dj_audio_url_allowed(
+        "https://user:pass@archive.org/download/item/song.mp3"
+    )
     assert not katherine.dj_audio_url_allowed(
         "http://archive.org/download/item/song.mp3"
     )
@@ -26,6 +32,58 @@ def test_dj_audio_hosts_are_exact_and_https_only():
         "https://example.com/song.mp3"
     )
 
+
+
+
+def test_jamendo_search_uses_official_audiodownload_url(monkeypatch):
+    class FakeResponse:
+        is_success = True
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "headers": {"status": "success"},
+                "results": [{
+                    "id": "12345",
+                    "name": "Ambient track",
+                    "artist_name": "Test Artist",
+                    "license_ccurl": "https://creativecommons.org/licenses/by/4.0/",
+                    "audiodownload_allowed": True,
+                    "audiodownload": (
+                        "https://prod-1.storage.jamendo.com/"
+                        "download/track/12345/mp32/"
+                    ),
+                }],
+            }
+
+    async def fake_request(*args, **kwargs):
+        return FakeResponse()
+
+    monkeypatch.setattr(katherine, "JAMENDO_CLIENT_ID", "test-client")
+    monkeypatch.setattr(katherine, "external_request", fake_request)
+    katherine.DJ_SOURCE_CACHE.pop("jamendo:ambient direct url", None)
+
+    tracks = asyncio.run(katherine.search_jamendo_audio("ambient direct url"))
+
+    assert len(tracks) == 1
+    assert tracks[0]["url"].endswith("/download/track/12345/mp32/")
+    assert tracks[0]["source"] == "Jamendo"
+
+
+def test_dj_source_cooldown_is_host_scoped_and_expires(monkeypatch):
+    katherine.DJ_SOURCE_COOLDOWNS.clear()
+    monkeypatch.setattr(katherine.time, "monotonic", lambda: 100.0)
+    katherine.cool_down_dj_source("prod-1.storage.jamendo.com", 600)
+
+    assert katherine.dj_source_is_cooled("prod-1.storage.jamendo.com")
+    assert not katherine.dj_source_is_cooled("upload.wikimedia.org")
+    assert not katherine.dj_source_is_cooled("prod-1.storage.jamendo.com", now=701.0)
+
+
+def test_dj_remote_limits_are_bounded_for_free_instance():
+    assert katherine.DJ_REMOTE_AUDIO_MAX_BYTES == 80 * 1024 * 1024
+    assert katherine.DJ_QUEUE_MAX_TRACKS == 10
 
 def test_jamendo_is_optional_without_client_id(monkeypatch):
     monkeypatch.setattr(katherine, "JAMENDO_CLIENT_ID", "")
