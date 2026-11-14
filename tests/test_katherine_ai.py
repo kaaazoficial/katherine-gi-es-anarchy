@@ -1505,7 +1505,7 @@ def test_ai_tool_selection_is_narrow_for_research_and_genshin():
     research = select_ai_tool_commands(
         "Investiga las novedades de Python", AI_PUBLIC_COMMANDS, "research"
     )
-    assert research == frozenset({"investigar", "enlace"})
+    assert research == frozenset({"investigar"})
 
     genshin = select_ai_tool_commands(
         "¿Qué build y equipos recomiendas para Cyno en Genshin?",
