@@ -73,7 +73,7 @@ AI_PLAN_SAFE_COMMANDS = frozenset({
     "archivo", "teyvat", "guia", "equipos", "rotacion", "materiales",
     "reacciones", "buscargenshin", "banner", "calendario", "cobertura",
     "sinergia", "jefes", "lista", "enemigo", "geografia", "elemento",
-    "investigar", "enlace", "calcular", "traducir", "multimedia", "media", "imagen",
+    "investigar", "calcular", "traducir", "multimedia", "media", "imagen",
     "video", "audio",
 })
 
@@ -771,7 +771,7 @@ def select_ai_tool_commands(
         else (*AI_TOOL_REQUEST_HINTS, *AI_ADMIN_REQUEST_HINTS)
     )
     if intent == "research":
-        selected.update({"investigar", "enlace"})
+        selected.add("investigar")
     else:
         for commands, hints in hint_groups:
             if any(
@@ -806,7 +806,7 @@ def build_ai_instructions(
     intent_text = {
         "action": "Acción explícita: elige el comando coincidente; no inventes argumentos.",
         "multi_action": "Plan: máximo tres consultas independientes de solo lectura.",
-        "research": "Investigación: usa investigar/enlace solo si aportan evidencia.",
+        "research": "Investigación: usa investigar solo si aporta evidencia.",
         "genshin": "INTENCIÓN: Genshin Impact. Usa datos de Teyvat solo para esta consulta.",
         "conversation": "Responde directamente; no ejecutes herramientas.",
     }.get(intent, "Responde directamente; no inventes acciones.")
@@ -872,10 +872,6 @@ def validate_ai_tool_call(
             return None
     elif name == "investigar":
         if not 3 <= len(args) <= 160 or re.search(r"https?://", args, re.I):
-            return None
-    elif name == "enlace":
-        from katherine_research import is_safe_public_url
-        if not is_safe_public_url(args):
             return None
     elif name == "zona":
         if not re.fullmatch(r"[A-Za-z0-9_+/-]{2,64}", args):
