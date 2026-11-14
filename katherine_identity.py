@@ -23,15 +23,15 @@ NAME_ALIASES = frozenset({
 })
 
 _GREETING_RE = re.compile(
-    r"^(?:oye|ey|hey|hola|buenas(?:\s+(?:tardes|noches|dias))?|"
-    r"disculpa|perdona|escucha)\s*[,!:;]?\s+",
+    r"^[¡!¿?]*\\s*(?:oye|ey|hey|hola|buenas(?:\\s+(?:tardes|noches|dias))?|"
+    r"disculpa|perdona|escucha)\\s*[,!:;]?\\s+",
     flags=re.IGNORECASE,
 )
 _NAME_RE = re.compile(
     r"^@?([^\W\d_][\w'-]{1,23})(?=$|[\s,.:;!?¡¿—-])",
     flags=re.UNICODE,
 )
-_LEADING_SEPARATORS = " \t,.:;!?¡¿—-"
+_LEADING_SEPARATORS = " \t,.:;!?—-"
 
 
 def _normalize_name(value: str) -> str:

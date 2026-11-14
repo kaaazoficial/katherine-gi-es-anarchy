@@ -1,6 +1,7 @@
 """Regression tests for safe SQLite backup and connection primitives."""
 from __future__ import annotations
 
+from contextlib import closing
 import sqlite3
 
 import pytest
@@ -24,7 +25,7 @@ def test_backup_is_consistent_and_passes_integrity_check(tmp_path):
     assert result["integrity"] == "ok"
     assert result["size_bytes"] > 0
     assert verify_sqlite_database(destination)["ok"] is True
-    with sqlite3.connect(destination) as db:
+    with closing(sqlite3.connect(destination)) as db:
         assert db.execute("SELECT value FROM sample").fetchone()[0] == "committed WAL data"
 
 
