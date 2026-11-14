@@ -642,83 +642,138 @@ def compact_tool_result_for_context(value: Any, max_chars: int = 1600) -> str:
     return compacted[:limit]
 
 
+AI_TOOL_REQUEST_HINTS = (
+    ({"ayuda", "comandos", "menu"}, ("ayuda", "comandos disponibles", "que puedes hacer", "menu")),
+    ({"fecha"}, ("fecha actual", "que fecha", "que dia", "hora actual", "fecha")),
+    ({"zona"}, ("zona horaria", "hora en", "hora de otra ciudad")),
+    ({"miuid"}, ("mi uid", "mi identificador", "identificador de anarchy")),
+    ({"perfil"}, ("mi perfil", "perfil de", "consulta el perfil")),
+    ({"bio"}, ("mi bio", "biografia", "actualiza mi bio")),
+    ({"miestado"}, ("mi estado", "estado personal", "actualiza mi estado")),
+    ({"afinidad", "amistad"}, ("afinidad", "amistad", "compatibilidad con")),
+    ({"interaccion"}, ("interaccion", "abraza", "abrazar", "saluda", "saludar", "beso", "acariciar", "consuela")),
+    ({"regalo"}, ("regalo", "regalar", "envia un regalo")),
+    ({"muro"}, ("muro", "regalos recibidos")),
+    ({"evento"}, ("evento", "eventos", "crear un evento", "cerrar el evento")),
+    ({"roast"}, ("roast", "broma sobre")),
+    ({"puntos"}, ("mi saldo", "mis puntos", "cuantos puntos", "saldo de puntos")),
+    ({"ranking"}, ("ranking", "clasificacion de puntos", "tabla de puntos")),
+    ({"actividad"}, ("actividad de la sala", "actividad del chat")),
+    ({"economia"}, ("economia", "como funcionan los puntos", "recompensas")),
+    ({"diario", "daily"}, ("recompensa diaria", "reclama el diario", "diario", "daily")),
+    ({"trabajar"}, ("trabajar", "ganar puntos")),
+    ({"pagar", "transferir"}, ("pagar", "transfiere", "transferir puntos", "envia puntos")),
+    ({"trivia"}, ("trivia", "inicia trivia")),
+    ({"responder"}, ("responder la trivia", "respuesta de trivia")),
+    ({"adivina"}, ("adivina", "juego de adivinar")),
+    ({"intento"}, ("mi intento", "intento")),
+    ({"encuesta"}, ("encuesta", "crear encuesta", "resultados de encuesta")),
+    ({"elige"}, ("elige entre", "eleccion interactiva")),
+    ({"duelo"}, ("duelo", "reta a")),
+    ({"ship"}, ("ship", "compatibilidad entre")),
+    ({"azar"}, ("numero aleatorio", "elige un numero", "al azar")),
+    ({"verdad"}, ("verdad", "juego de verdad")),
+    ({"dado"}, ("lanza un dado", "tirar un dado", "dado")),
+    ({"moneda"}, ("lanza una moneda", "tirar una moneda", "moneda")),
+    ({"8ball"}, ("8ball", "bola magica")),
+    ({"chiste"}, ("chiste", "cuenta un chiste")),
+    ({"frase"}, ("frase del dia", "frase aleatoria")),
+    ({"reto"}, ("reto", "desafio")),
+    ({"suerte"}, ("suerte", "fortuna")),
+    ({"dj"}, ("busca musica", "buscar musica", "pon musica", "musica ambiente", "cancion para", "que suene")),
+    ({"dj", "reproducir"}, ("reproduce musica", "reproducir musica", "escuchar musica")),
+    ({"reproducir"}, ("reproduce", "reproducir", "pon la cancion", "escuchar la cancion")),
+    ({"pausa", "pausar", "dj"}, ("pausa", "pausar", "deten la musica", "detener la musica")),
+    ({"reanudar", "continuar", "dj"}, ("reanuda", "reanudar", "continua la musica", "continuar la musica")),
+    ({"saltar", "dj"}, ("saltar cancion", "siguiente cancion", "cambia la pista")),
+    ({"cola", "dj"}, ("cola musical", "ver la cola", "canciones en cola")),
+    ({"join"}, ("entra a la sala de voz", "conecta a la sala", "unete a la sala")),
+    ({"salirsala"}, ("sal de la sala de voz", "desconecta de la sala")),
+    ({"djdetener", "djstop"}, ("deten el dj", "detener dj", "apaga la musica")),
+    ({"salas"}, ("salas de voz", "salas disponibles")),
+    ({"playlist"}, ("playlist", "lista de reproduccion", "mi lista musical")),
+    ({"leer", "noleer", "silenciolectura", "tts"}, ("lee en voz alta", "lectura en voz alta", "tts", "deja de leer")),
+    ({"volumen", "volume", "subirvolumen", "bajarvolumen", "silencio"}, ("volumen", "sube el volumen", "baja el volumen", "silencia el dj")),
+    ({"traducir"}, ("traduce", "traducir", "traduccion")),
+    ({"multimedia", "media", "imagen", "video", "audio"}, ("multimedia", "imagen", "foto", "video", "audio", "buscar imagen", "buscar videos")),
+    ({"investigar", "enlace"}, ("investiga", "investigar", "fuentes", "consulta web", "analiza este enlace", "resume este enlace", "pagina web", "articulo")),
+)
+
+AI_GENSIN_REQUEST_HINTS = (
+    ({"enciclopedia", "archivo", "teyvat", "buscargenshin"}, ("quien es", "quien fue", "que es", "ficha de", "datos de", "informacion de", "info de", "enciclopedia", "archivo")),
+    ({"guia"}, ("guia", "build", "artefactos", "mejor arma", "estadisticas de build")),
+    ({"equipos", "sinergia"}, ("equipo", "equipos", "composicion", "sinergia", "companeros", "companero")),
+    ({"rotacion"}, ("rotacion", "rotation")),
+    ({"materiales"}, ("materiales", "ascension", "mejorar a", "subir a nivel")),
+    ({"reacciones", "elemento"}, ("reaccion", "reacciones", "elemento", "elemental")),
+    ({"jefes", "enemigo"}, ("jefe", "jefes", "boss", "enemigo")),
+    ({"banner", "calendario"}, ("banner", "banners", "calendario", "proximos banners")),
+    ({"lista"}, ("lista de", "listado", "todos los personajes", "todos los enemigos")),
+    ({"geografia"}, ("mapa", "region", "geografia", "lugar de teyvat")),
+    ({"curiosidad"}, ("curiosidad", "dato curioso")),
+    ({"deseo", "pity", "resetpity"}, ("deseo", "pity", "contador de deseos")),
+)
+
+AI_ADMIN_REQUEST_HINTS = (
+    ({"estado"}, ("estado tecnico", "estado del bot", "diagnostico del bot")),
+    ({"fuentes", "saludfuentes"}, ("estado de las fuentes", "salud de fuentes", "fuentes")),
+    ({"metricas"}, ("metricas", "rendimiento del bot")),
+    ({"autotest"}, ("autotest", "pruebas internas", "ejecuta pruebas")),
+    ({"centro"}, ("centro de administracion", "centro admin")),
+    ({"nexus"}, ("nexus", "panel nexus")),
+    ({"admin", "paneladmin"}, ("panel admin", "panel administrativo", "administracion")),
+    ({"guardian"}, ("guardian", "panel preventivo")),
+    ({"antispam"}, ("antispam", "anti spam")),
+    ({"advertir", "advertencias", "quitaradvertencia"}, ("advertencia", "advertir", "advertencias", "quitar advertencia", "moderacion", "moderar")),
+    ({"respuestas", "respuesta"}, ("respuestas automaticas", "respuesta automatica")),
+    ({"perfilbot"}, ("perfil del bot", "perfilbot")),
+    ({"avatarbot"}, ("avatar del bot", "avatarbot")),
+    ({"eliminarmensajes"}, ("eliminar mensajes", "borrar mensajes", "limpiar mensajes enviados")),
+)
+
+
 def select_ai_tool_commands(
     request_text: str,
     allowed_commands: set[str] | frozenset[str] | None = None,
     intent: str = "conversation",
 ) -> frozenset[str]:
-    """Expose only the commands relevant to this request."""
+    """Expose the smallest relevant command subset without bypassing caller permissions."""
     allowed = AI_ALLOWED_COMMANDS if allowed_commands is None else frozenset(
         str(item).strip().lstrip("!").casefold() for item in allowed_commands
     )
-    if intent == "conversation":
+    if intent == "conversation" or not allowed:
         return frozenset()
 
     text = normalize_topic_text(request_text)
-    music = {
-        "dj", "reproducir", "pausa", "pausar", "reanudar", "continuar",
-        "saltar", "cola", "join", "salirsala", "djdetener", "djstop",
-        "salas", "playlist", "leer", "noleer", "silenciolectura", "tts",
-        "volumen", "volume", "subirvolumen", "bajarvolumen", "silencio",
-    }
-    social = {
-        "perfil", "bio", "miestado", "afinidad", "amistad", "interaccion",
-        "regalo", "muro", "evento", "roast",
-    }
-    games = {
-        "puntos", "ranking", "actividad", "economia", "diario", "daily",
-        "trabajar", "trivia", "responder", "adivina", "intento", "encuesta",
-        "elige", "duelo", "ship", "azar", "verdad", "dado", "moneda",
-        "8ball", "chiste", "frase", "reto", "suerte",
-    }
-    utilities = {
-        "fecha", "zona", "miuid", "traducir", "multimedia", "media",
-        "imagen", "video", "audio",
-    }
-    common = {
-        "ayuda", "menu", "perfil", "puntos", "ranking", "actividad",
-        "economia", "fecha", "zona",
-    }
+    padded = f" {text} "
+    selected: set[str] = set()
 
-    if intent == "genshin":
-        selected = set(GENSHIN_ONLY_TOOL_COMMANDS)
-    elif intent == "research":
-        selected = {"investigar", "enlace"}
-    elif intent == "multi_action":
-        selected = set(AI_PLAN_SAFE_COMMANDS)
-        if not is_genshin_related_request(request_text):
-            selected.difference_update(GENSHIN_ONLY_TOOL_COMMANDS)
-    elif any(x in text for x in (
-        "musica", "cancion", "canciones", "dj", "reproduce",
-        "reproducir", "escuchar", "pista", "volumen", "voz", "tts", "playlist",
-    )):
-        selected = music
-    elif any(x in text for x in (
-        "perfil", "bio", "estado personal", "afinidad", "amistad", "regalo",
-        "muro", "evento", "abraza", "abrazar", "abrazo", "saluda",
-        "saludar", "interaccion", "beso", "acariciar", "consuela",
-    )):
-        selected = social
-    elif any(x in text for x in (
-        "trivia", "juego", "jugar", "puntos", "ranking", "economia",
-        "trabajar", "diario", "encuesta", "duelo", "azar", "adivina",
-        "chiste", "dado", "moneda", "verdad", "reto",
-    )):
-        selected = games
-    elif any(x in text for x in (
-        "admin", "administrador", "antispam", "advertencia", "moderacion",
-        "metricas", "diagnostico", "nexus", "panel", "fuentes",
-    )):
-        selected = set(AI_ADMIN_COMMANDS)
-    elif any(x in text for x in (
-        "traduce", "traducir", "idioma", "fecha", "hora", "zona horaria",
-        "imagen", "video", "audio", "multimedia",
-    )):
-        selected = utilities
-    elif intent == "action":
-        selected = set(common)
+    # Explicit command names are useful for follow-ups, but never expand the
+    # caller's allowlist. For example, an ordinary member cannot expose admin tools.
+    for name in allowed:
+        if re.search(rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])", text):
+            selected.add(name)
+
+    hint_groups = AI_GENSIN_REQUEST_HINTS if intent == "genshin" else AI_TOOL_REQUEST_HINTS
+    if intent == "research":
+        selected.update({"investigar", "enlace"})
     else:
-        selected = set()
+        for commands, hints in hint_groups:
+            if any(
+                (normalized := normalize_topic_text(hint))
+                and f" {normalized} " in padded
+                for hint in hints
+            ):
+                selected.update(commands)
+
+    if intent == "genshin" and not selected:
+        selected.update({"enciclopedia", "buscargenshin"})
+    if intent == "action" and not selected:
+        # Keep a tiny read-only fallback for underspecified but explicit actions.
+        selected.update({"ayuda", "fecha", "perfil", "puntos"})
+    if intent == "multi_action":
+        selected.intersection_update(AI_PLAN_SAFE_COMMANDS)
+
     return frozenset(allowed.intersection(selected))
 
 
@@ -1395,7 +1450,12 @@ class KatherineAI:
 
     def _append_history(self, key: str, role: str, content: str) -> None:
         turns = self._history(key)
-        turns.append({"role": role, "content": str(content)})
+        # Bound only retained context. The live request and final response remain untouched.
+        limit = 2400 if role == "user" else 1600
+        retained = str(content or "")
+        if len(retained) > limit:
+            retained = retained[:limit].rstrip() + "…"
+        turns.append({"role": role, "content": retained})
         self._memory[key] = {
             "turns": turns[-self.memory_turns * 2:],
             "expires": time.time() + self.memory_ttl,
