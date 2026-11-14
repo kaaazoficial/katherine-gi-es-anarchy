@@ -68,7 +68,7 @@ GENSHIN_ONLY_TOOL_COMMANDS = frozenset({
 # interactive, payment, moderation and profile-edit commands remain available
 # as individual explicit actions only.
 AI_PLAN_SAFE_COMMANDS = frozenset({
-    "ayuda", "comandos", "estado", "fuentes", "saludfuentes", "fecha", "zona", "calcular",
+    "ayuda", "comandos", "estado", "fuentes", "saludfuentes", "fecha", "zona",
     "perfil", "puntos", "ranking", "actividad", "economia", "enciclopedia",
     "archivo", "teyvat", "guia", "equipos", "rotacion", "materiales",
     "reacciones", "buscargenshin", "banner", "calendario", "cobertura",
@@ -703,8 +703,6 @@ AI_TOOL_REQUEST_HINTS = (
     ({"traducir"}, ("traduce", "traducir", "traduccion")),
     ({"multimedia", "media", "imagen", "video", "audio"}, ("multimedia", "imagen", "foto", "video", "audio", "buscar imagen", "buscar videos")),
     ({"investigar"}, ("investiga", "investigar", "fuentes", "consulta web", "pagina web", "articulo")),
-    ({"calcular"}, ("calcula ", "calcular ", "cuanto es ", "cuánto es ", "resuelve ", "raiz cuadrada de ")),
-    ({"calcular"}, ("calcula ", "calcular ", "cuanto es ", "cuánto es ", "resuelve ", "raiz cuadrada de ")),
     ({"calcular"}, ("calcula ", "calcular ", "cuanto es ", "cuánto es ", "resuelve ", "raiz cuadrada de ")),
 )
 
