@@ -520,7 +520,8 @@ def test_command_help_is_complete_and_keeps_main_categories():
     assert len(help_text) > 1800
     assert "GENSHIN IMPACT" in help_text and "MÚSICA Y VOZ" in help_text
     assert "!menu" in help_text and "UID autorizado" in help_text
-    assert "salirsala" in help_text and "sin paneles ni botones" in help_text
+    assert "!salirsala" in help_text and "!djstop" in help_text
+    assert "sin paneles ni botones" in help_text
 
 
 

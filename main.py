@@ -2613,19 +2613,19 @@ def build_commands_help_text() -> str:
             f"{PREFIX}asistente <consulta> — conversación y solicitudes en lenguaje natural.",
             f"{PREFIX}ia ayuda — guía; {PREFIX}ia preguntar <consulta> — chat; {PREFIX}ia genshin <consulta> — consulta de Teyvat.",
             f"{PREFIX}ia estado — proveedor y sesión; {PREFIX}ia olvidar — borra contexto temporal.",
-            f"{PREFIX}ia investigar <tema>|{PREFIX}ia enlace <URL>|{PREFIX}ia musica <estilo>|{PREFIX}ia traducir <idioma> | <texto>.",
-            f"{PREFIX}investigar|{PREFIX}investiga|{PREFIX}investigacion|{PREFIX}investigación <tema> — investigación: comparar, verificar, cronologia o informe.",
-            f"{PREFIX}enlace|analizarenlace|leerweb <URL> — analiza una página pública.",
-            f"{PREFIX}ia probar|trazas|guardian|analista|diagnostico — diagnóstico y controles [ADMIN].",
+            f"{PREFIX}ia investigar <tema> | {PREFIX}ia enlace <URL> | {PREFIX}ia musica <estilo> | {PREFIX}ia traducir <idioma> | <texto>.",
+            f"{PREFIX}investigar <tema> | {PREFIX}investiga <tema> | {PREFIX}investigacion <tema> | {PREFIX}investigación <tema> — investigación: comparar, verificar, cronologia o informe.",
+            f"{PREFIX}enlace <URL> | {PREFIX}analizarenlace <URL> | {PREFIX}leerweb <URL> — analiza una página pública.",
+            f"{PREFIX}ia probar | {PREFIX}ia trazas | {PREFIX}ia guardian | {PREFIX}ia analista | {PREFIX}ia diagnostico — diagnóstico y controles [ADMIN].",
         ]),
         ("GENSHIN IMPACT", [
             f"{PREFIX}guia <personaje> — build y talentos; {PREFIX}materiales <personaje> — materiales.",
-            f"{PREFIX}equipos|rotacion|sinergia <personaje> — equipos, rotación y sinergias.",
+            f"{PREFIX}equipos <personaje> | {PREFIX}rotacion <personaje> | {PREFIX}sinergia <personaje> — equipos, rotación y sinergias.",
             f"{PREFIX}jefes — jefes; {PREFIX}banner — banners; {PREFIX}calendario — eventos y calendario.",
             f"{PREFIX}cobertura <personaje> — contenido; {PREFIX}reacciones <elemento> — reacciones.",
-            f"{PREFIX}enciclopedia|archivo|teyvat <nombre> — consulta la base de datos.",
+            f"{PREFIX}enciclopedia <nombre> | {PREFIX}archivo <nombre> | {PREFIX}teyvat <nombre> — consulta la base de datos.",
             f"{PREFIX}buscargenshin <texto> — búsqueda; {PREFIX}lista <categoría> [página] — listados.",
-            f"{PREFIX}enemigo|geografia|elemento <nombre> — fichas de datos; {PREFIX}curiosidad — dato aleatorio.",
+            f"{PREFIX}enemigo <nombre> | {PREFIX}geografia <nombre> | {PREFIX}elemento <nombre> — fichas de datos; {PREFIX}curiosidad — dato aleatorio.",
             f"{PREFIX}deseo — simulador; {PREFIX}pity — consulta contador; {PREFIX}resetpity — reinicia el contador.",
         ]),
         ("SOCIAL Y PERFILES", [
@@ -2637,13 +2637,13 @@ def build_commands_help_text() -> str:
             f"{PREFIX}bailar|{PREFIX}cosquillas|{PREFIX}chocar|{PREFIX}highfive|{PREFIX}ayudar|{PREFIX}regalar|{PREFIX}acompañar @usuario.",
             f"{PREFIX}asustar|{PREFIX}curar|{PREFIX}cargar|{PREFIX}empujar|{PREFIX}regañar|{PREFIX}admirar|{PREFIX}apoyar @usuario.",
             f"{PREFIX}dormir|{PREFIX}ignorar|{PREFIX}mirar|{PREFIX}invitar @usuario.",
-            f"{PREFIX}roast @usuario — broma; {PREFIX}afinidad|amistad @usuario — vínculo.",
+            f"{PREFIX}roast @usuario — broma; {PREFIX}afinidad @usuario | {PREFIX}amistad @usuario — vínculo.",
             f"{PREFIX}regalo @usuario [mensaje] — envía regalo; {PREFIX}muro — regalos recibidos.",
         ]),
         ("JUEGOS, ECONOMÍA Y COMUNIDAD", [
             f"{PREFIX}trivia / {PREFIX}responder <1-4> — trivia; {PREFIX}adivina / {PREFIX}intento <número> — adivinanza.",
-            f"{PREFIX}puntos|reputacion — saldo; {PREFIX}ranking|top — clasificación; {PREFIX}diario|daily — recompensa diaria.",
-            f"{PREFIX}trabajar — recompensa; {PREFIX}pagar|transferir @usuario <cantidad> — transfiere puntos; {PREFIX}economia — resumen.",
+            f"{PREFIX}puntos | {PREFIX}reputacion — saldo; {PREFIX}ranking | {PREFIX}top — clasificación; {PREFIX}diario | {PREFIX}daily — recompensa diaria.",
+            f"{PREFIX}trabajar — recompensa; {PREFIX}pagar @usuario <cantidad> | {PREFIX}transferir @usuario <cantidad> — transfiere puntos; {PREFIX}economia — resumen.",
             f"{PREFIX}encuesta <pregunta> | <opciones> — votación; {PREFIX}elige <opciones> — elección aleatoria.",
             f"{PREFIX}duelo @usuario — reta; {PREFIX}ship <usuario1> <usuario2> — compatibilidad.",
             f"{PREFIX}azar <mínimo> <máximo> — número; {PREFIX}verdad — pregunta; {PREFIX}dado / {PREFIX}moneda — azar.",
@@ -2654,23 +2654,23 @@ def build_commands_help_text() -> str:
             f"{PREFIX}join — entra a la llamada; {PREFIX}salirsala — sale; {PREFIX}salas — lista salas.",
             f"{PREFIX}dj buscar <tema> — busca música; {PREFIX}reproducir <pista> — reproduce archivo local.",
             f"{PREFIX}dj pausa|reanudar|saltar|cola|actual|detener — controles de reproducción.",
-            f"{PREFIX}pausa|pausar|reanudar|continuar|saltar|cola — accesos rápidos; {PREFIX}djdetener|djstop — detiene música sin salir.",
-            f"{PREFIX}playlist <acción> — listas; {PREFIX}volumen|volume <0-100> — volumen.",
-            f"{PREFIX}subirvolumen|bajarvolumen|silencio — controles rápidos; {PREFIX}leer|noleer — lectura de chat.",
-            f"{PREFIX}silenciolectura|subirvolumenlectura|bajarvolumenlectura — ajustes de lectura.",
+            f"{PREFIX}pausa | {PREFIX}pausar | {PREFIX}reanudar | {PREFIX}continuar | {PREFIX}saltar | {PREFIX}cola — accesos rápidos; {PREFIX}djdetener | {PREFIX}djstop — detiene música sin salir.",
+            f"{PREFIX}playlist <acción> — listas; {PREFIX}volumen | {PREFIX}volume <0-100> — volumen.",
+            f"{PREFIX}subirvolumen | {PREFIX}bajarvolumen | {PREFIX}silencio — controles rápidos; {PREFIX}leer | {PREFIX}noleer — lectura de chat.",
+            f"{PREFIX}silenciolectura | {PREFIX}subirvolumenlectura | {PREFIX}bajarvolumenlectura — ajustes de lectura.",
             f"{PREFIX}tts voces|voz|velocidad|volumen — configuración de voz y lectura.",
         ]),
         ("UTILIDADES Y MULTIMEDIA", [
             f"{PREFIX}fecha — fecha y hora; {PREFIX}zona <Area/Ciudad> — hora de otra zona.",
             f"{PREFIX}traducir <idioma> | <texto> — traducción; {PREFIX}multimedia imagen|video|audio <búsqueda> — busca recursos.",
-            f"{PREFIX}media <tipo> <búsqueda> — alias multimedia; {PREFIX}imagen|video|audio <búsqueda> — accesos directos.",
+            f"{PREFIX}media <tipo> <búsqueda> — alias multimedia; {PREFIX}imagen <búsqueda> | {PREFIX}video <búsqueda> | {PREFIX}audio <búsqueda> — accesos directos.",
         ]),
         ("ADMINISTRACIÓN · UID AUTORIZADO", [
-            f"{PREFIX}miuid|mi-id|mi_uid — consulta UID; {PREFIX}estado — estado general.",
-            f"{PREFIX}fuentes|saludfuentes — proveedores; {PREFIX}metricas — métricas; {PREFIX}autotest — pruebas internas.",
-            f"{PREFIX}centro|nexus — panel de investigación; {PREFIX}admin|paneladmin|guardian — herramientas administrativas.",
-            f"{PREFIX}antispam — protección; {PREFIX}advertir|advertencias|quitaradvertencia — moderación.",
-            f"{PREFIX}respuestas|respuesta — reglas automáticas; {PREFIX}perfilbot — perfil; {PREFIX}avatarbot — avatar.",
+            f"{PREFIX}miuid | {PREFIX}mi-id | {PREFIX}mi_uid — consulta UID; {PREFIX}estado — estado general.",
+            f"{PREFIX}fuentes | {PREFIX}saludfuentes — proveedores; {PREFIX}metricas — métricas; {PREFIX}autotest — pruebas internas.",
+            f"{PREFIX}centro | {PREFIX}nexus — panel de investigación; {PREFIX}admin | {PREFIX}paneladmin | {PREFIX}guardian — herramientas administrativas.",
+            f"{PREFIX}antispam — protección; {PREFIX}advertir | {PREFIX}advertencias | {PREFIX}quitaradvertencia — moderación.",
+            f"{PREFIX}respuestas | {PREFIX}respuesta — reglas automáticas; {PREFIX}perfilbot — perfil; {PREFIX}avatarbot — avatar.",
             f"{PREFIX}eliminarmensajes — limpia mensajes propios identificados en esta ejecución.",
             "Los comandos ADMIN requieren un UID autorizado incluido en ADMIN_UIDS. No se autoriza por nickname.",
         ]),
@@ -2685,7 +2685,7 @@ def build_commands_help_text() -> str:
         lines.append(f"── {title} ──")
         lines.extend(entries)
         lines.append("")
-    lines.append("Guía de texto: !ayuda, !comandos y !menu. Sin paneles ni botones.")
+    lines.append("Guía de texto: !ayuda, !comandos y !menu. sin paneles ni botones.")
     return "\n".join(lines)
 
 
