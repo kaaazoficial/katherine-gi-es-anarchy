@@ -103,6 +103,12 @@ def test_provider_token_usage_snapshot_excludes_entries_older_than_last_hour():
 def test_token_usage_helper_updates_global_totals_and_provider_costs(monkeypatch):
     monkeypatch.delenv("KATHERINE_AI_COST_RATES", raising=False)
     ai = KatherineAI()
+    ai._provider_override.set({
+        "name": "Google Gemini",
+        "key": "test-key",
+        "url": "https://generativelanguage.googleapis.com/v1beta",
+        "model": "gemini-3.5-flash-lite",
+    })
     ai._token_usage_started_at = 1000.0
     ai._record_provider_token_usage(1_000_000, 1_000_000, now=1100.0)
 
