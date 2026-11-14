@@ -62,7 +62,7 @@ from katherine_research import (
     is_safe_public_url,
  )
 from katherine_utilities import calculate_expression, format_calculation_result
-from katherine_link_analysis import (\n    inspect_link_signals, format_link_signals, inspect_message_links,\n)
+from katherine_link_analysis import (\n    inspect_link_signals, format_link_signals, inspect_message_links,\n    extract_message_urls,\n)
 from katherine_game_queries import (
     infer_genshin_data_folder,
     strip_game_scope_qualifier,
