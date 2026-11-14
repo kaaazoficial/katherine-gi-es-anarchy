@@ -2160,7 +2160,7 @@ def render_outgoing_user_mentions(content: Any) -> str:
     ordered = sorted(aliases, key=len, reverse=True)
     alternatives = "|".join(re.escape(alias) for alias in ordered)
     pattern = re.compile(
-        rf"(?<![<\w@])@({alternatives})(?![\w.-])",
+        rf"(?<![<\w@])@({alternatives})(?![\w@-]|\.[A-Za-z0-9])",
         re.IGNORECASE,
     )
     return pattern.sub(

@@ -561,13 +561,14 @@ def test_outgoing_mention_renderer_produces_native_uid_tokens_and_keeps_unknown_
     })
     try:
         rendered = bot_main.render_outgoing_user_mentions(
-            "Hola @Ana y @Ana Maria, pero deja @Desconocido y correo ana@example.com."
+            "Hola @Ana y @Ana Maria, pero deja @Desconocido y correo ana@example.com, "
+            "no @Ana.com ni @Anagrama. Fin @Ana."
         )
     finally:
         bot_main.OUTGOING_MENTION_MAP.reset(token)
     assert rendered == (
         "Hola <@user-123> y <@user-456>, pero deja @Desconocido "
-        "y correo ana@example.com."
+        "y correo ana@example.com, no @Ana.com ni @Anagrama. Fin <@user-123>."
     )
 
 
