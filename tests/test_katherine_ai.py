@@ -4,7 +4,7 @@ import json
 import time
 import pytest
 from katherine_ai import (
-    ACTION_SCHEMA, ANSWER_SCHEMA, KatherineAI, build_ai_session_key, build_ai_rate_key,
+    ACTION_SCHEMA, ANSWER_SCHEMA, BASE_INSTRUCTIONS, KatherineAI, build_ai_session_key, build_ai_rate_key,
     compact_tool_result_for_context, output_token_budget_for_difficulty,
     is_bot_author, sanitize_ai_trace_text, validate_ai_tool_call,
 )
@@ -1587,3 +1587,11 @@ def test_cleanup_expires_ai_cache_and_rate_windows_without_touching_live_tasks()
     assert set(ai._simple_answer_cache) == {"fresh"}
     assert set(ai._user_request_windows) == {"active-user"}
     assert set(ai._simple_request_inflight) == {"pending"}
+
+
+
+def test_katherine_identity_is_the_genshin_impact_es_community_bot():
+    assert "bot comunitario de Genshin Impact ES" in BASE_INSTRUCTIONS
+    assert "Anarchy Apps es únicamente la plataforma" in BASE_INSTRUCTIONS
+    assert "No eres un bot oficial de Anarchy Apps" in BASE_INSTRUCTIONS
+    assert "bot de entretenimiento de Anarchy Apps" not in BASE_INSTRUCTIONS
