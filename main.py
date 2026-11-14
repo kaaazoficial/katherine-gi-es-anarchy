@@ -61,6 +61,8 @@ from katherine_research import (
     search_web, fetch_public_page, build_source_context, parse_research_mode,
     is_safe_public_url,
  )
+from katherine_utilities import calculate_expression, format_calculation_result
+from katherine_link_analysis import inspect_link_signals, format_link_signals
 from katherine_game_queries import (
     infer_genshin_data_folder,
     strip_game_scope_qualifier,
@@ -8424,6 +8426,42 @@ async def _handle_command_impl(event: dict, source: str):
         await send_message(thread, final_answer, source, reply)
         return
 
+    if command in ("!calcular", "!calc", "!matematica", "!matemáticas"):
+        expression = query.strip()
+        if not expression:
+            await send_message(thread, "Uso: !calcular <operación>. Ejemplos: 15% de 240 · sqrt(144) · (25*4)+10.", source, reply)
+            return
+        try:
+            value = calculate_expression(expression)
+            await send_message(thread, f"CALCULADORA\n{expression} = {format_calculation_result(value)}", source, reply)
+        except ValueError as exc:
+            await send_message(thread, f"No pude calcularlo: {exc}", source, reply)
+        return
+
+    if command in ("!analizartexto", "!analizatexto", "!texto"):
+        parts = query.strip().split(maxsplit=1)
+        if len(parts) != 2 or parts[0].casefold() not in {"resumir", "corregir", "reescribir", "extraer", "contradicciones"}:
+            await send_message(thread, "Uso: !analizartexto resumir|corregir|reescribir|extraer|contradicciones <texto>.", source, reply)
+            return
+        task_name = parts[0].casefold()
+        task_labels = {
+            "resumir": "Resume", "corregir": "Corrige ortografía, gramática y puntuación",
+            "reescribir": "Reescribe con mayor claridad y coherencia, sin cambiar el significado",
+            "extraer": "Extrae los puntos clave, nombres, fechas y datos explícitos",
+            "contradicciones": "Detecta contradicciones internas y explica qué afirmaciones chocan",
+        }
+        try:
+            answer = await AI_CORE.task_response(
+                "text_analysis", parts[1], external_request,
+                extra_instructions=f"Operación solicitada: {task_labels[task_name]}.",
+                rate_key=build_ai_rate_key(source, thread, author),
+            )
+        except Exception:
+            logging.exception("[AI] Falló el análisis de texto")
+            answer = "No pude analizar ese texto con el proveedor de IA. Inténtalo de nuevo."
+        await send_message(thread, answer, source, reply)
+        return
+
     if command in ("!investigar", "!investiga", "!investigacion"):
         research_mode, research_query = parse_research_mode(query.strip())
         research_mode_label = {
@@ -8489,6 +8527,13 @@ async def _handle_command_impl(event: dict, source: str):
             return
         try:
             page = await fetch_public_page(target_url, external_request)
+            link_signals = inspect_link_signals(
+                target_url,
+                final_url=page.get("final_url", page.get("url", "")),
+                redirect_chain=page.get("redirect_chain", []),
+                title=page.get("title", ""),
+                page_text=page.get("excerpt", ""),
+            )
             context = build_source_context(
                 "Analiza esta página: " + page["title"],
                 [page]
@@ -8504,8 +8549,10 @@ async def _handle_command_impl(event: dict, source: str):
                 summary = page.get("excerpt", "")[:2500]
             answer = (
                 f"ANÁLISIS DE ENLACE\n{page['title']}\nDominio: {page['domain']}\n\n"
+                f"{format_link_signals(link_signals)}\n\n"
                 f"{summary}\n\nFuente: {page['domain']}\n"
-                "El contenido de la página se trató como material externo no confiable."
+                "El contenido de la página se trató como material externo no confiable.\n"
+                "La evaluación es heurística: no sustituye un antivirus ni garantiza seguridad."
             )
         except ValueError as exc:
             answer = str(exc)
