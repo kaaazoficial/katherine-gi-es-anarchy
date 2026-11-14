@@ -20,6 +20,12 @@ _COUNTERS = (
     ("katherine_ai_cache_hits", "ai_cache_hits", "Short-lived safe AI answer cache hits."),
     ("katherine_ai_cache_misses", "ai_cache_misses", "New eligible AI cache requests."),
     ("katherine_ai_singleflight_waits", "ai_singleflight_waits", "Concurrent requests sharing an in-flight AI call."),
+    ("katherine_ai_shared_cache_hits", "ai_shared_cache_hits", "Cross-user hits for generic, non-personal short-lived answers."),
+    ("katherine_ai_shared_cache_misses", "ai_shared_cache_misses", "Generic answer cache misses."),
+    ("katherine_ai_answer_schema_requests", "ai_answer_schema_requests", "Requests using the minimal answer-only schema."),
+    ("katherine_ai_output_budgeted_requests", "ai_output_budgeted_requests", "Requests with a dynamic output token budget."),
+    ("katherine_ai_output_unbounded_requests", "ai_output_unbounded_requests", "Complex requests intentionally left without an output token cap."),
+    ("katherine_ai_tool_context_compactions", "ai_tool_context_compactions", "Tool results compacted only for temporary follow-up context."),
     ("katherine_messages_sent", "messages_sent", "Messages sent by this process."),
     ("katherine_api_requests", "api_requests", "Anarchy API requests made by this process."),
     ("katherine_api_errors", "api_errors", "Anarchy API request errors recorded by this process."),
@@ -121,6 +127,22 @@ def render_prometheus_metrics(
         "Cumulative seconds spent dispatching webhook events.",
         registry=registry,
     ).inc(_finite_number(counters.get("webhook_dispatch_processing_seconds", 0)))
+
+    Counter(
+        "katherine_ai_output_budget_tokens",
+        "Sum of configured dynamic output token budgets for bounded requests.",
+        registry=registry,
+    ).inc(_finite_number(counters.get("ai_output_budget_tokens", 0)))
+    Counter(
+        "katherine_ai_tool_context_chars_original",
+        "Characters received from tools before temporary context compaction.",
+        registry=registry,
+    ).inc(_finite_number(counters.get("ai_tool_context_chars_original", 0)))
+    Counter(
+        "katherine_ai_tool_context_chars_stored",
+        "Characters retained from tool results in temporary context.",
+        registry=registry,
+    ).inc(_finite_number(counters.get("ai_tool_context_chars_stored", 0)))
 
     Gauge(
         "katherine_ai_provider_queue_wait_seconds",
