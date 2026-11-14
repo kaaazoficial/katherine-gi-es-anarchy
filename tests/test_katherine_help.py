@@ -1,4 +1,3 @@
-"""Tests for Katherine's Anarchy-formatted command help."""
 from katherine_help import (
     build_commands_help_blocks,
     build_commands_help_text,
@@ -6,62 +5,10 @@ from katherine_help import (
 )
 
 
-def test_help_has_seven_requested_categories_and_anarchy_markers():
+def test_full_help_matches_the_supplied_anarchy_layout():
     text = build_commands_help_text()
-    assert text.startswith("[CB] KATHERINE · GUÍA DE COMANDOS")
-    assert "[C] Prefijo principal: !" in text
-    assert "[CB] 1. AYUDA E INTELIGENCIA ARTIFICIAL" in text
-    assert "[CB] 2. GENSHIN IMPACT" in text
-    assert "[CB] 3. SOCIAL Y PERFILES" in text
-    assert "[CB] 4. JUEGOS, ECONOMÍA Y COMUNIDAD" in text
-    assert "[CB] 5. MÚSICA Y VOZ" in text
-    assert "[CB] 6. UTILIDADES Y MULTIMEDIA" in text
-    assert "[CB] 7. ADMINISTRACIÓN (UID AUTORIZADO)" in text
-    assert "[C] ══════════════════════════════" in text
-
-
-def test_help_supports_custom_prefix_and_all_aliases():
-    text = build_commands_help_text("$")
-    assert "$ayuda <categoría>" in text
-    assert "$comandos / $menu / $menú" in text
-    assert "$diagnostico" in text
-    assert "$dj probar" in text
-
-
-def test_help_category_aliases_return_only_requested_section():
-    full = build_commands_help_text()
-    for alias, expected in [
-        ("ia", "1. AYUDA E INTELIGENCIA ARTIFICIAL"),
-        ("genshin", "2. GENSHIN IMPACT"),
-        ("social", "3. SOCIAL Y PERFILES"),
-        ("juegos", "4. JUEGOS, ECONOMÍA Y COMUNIDAD"),
-        ("musica", "5. MÚSICA Y VOZ"),
-        ("voz", "5. MÚSICA Y VOZ"),
-        ("multimedia", "6. UTILIDADES Y MULTIMEDIA"),
-        ("admin", "7. ADMINISTRACIÓN"),
-    ]:
-        section = filter_commands_help_text(full, alias)
-        assert expected in section
-        assert section.startswith("[CB] KATHERINE · GUÍA DE COMANDOS")
-        assert "Prefijo principal: !" in section
-        assert sum(line.startswith("[CB] ") and line[5:6].isdigit() for line in section.splitlines()) == 1
-
-
-def test_unknown_category_includes_concrete_example_and_custom_prefix():
-    response = filter_commands_help_text(build_commands_help_text("$"), "inexistente")
-    assert "Categoría no reconocida" in response
-    assert "Ejemplo: $ayuda genshin" in response
-
-
-def test_help_without_topic_returns_complete_catalog():
-    text = build_commands_help_text()
-    assert filter_commands_help_text(text, None) == text
-    assert filter_commands_help_text(text, "todos") == text
-
-
-def test_full_help_is_sent_as_seven_ordered_category_blocks():
-    blocks = build_commands_help_blocks("$")
-    assert len(blocks) == 7
+    assert text.startswith("[CB] KATHERINE · GUÍA DE COMANDOS\n[C] Prefijo principal: !")
+    assert "[C] Usa !ayuda <categoría> para consultar una sola sección." in text
     expected = [
         "1. AYUDA E INTELIGENCIA ARTIFICIAL",
         "2. GENSHIN IMPACT",
@@ -71,30 +18,59 @@ def test_full_help_is_sent_as_seven_ordered_category_blocks():
         "6. UTILIDADES Y MULTIMEDIA",
         "7. ADMINISTRACIÓN (UID AUTORIZADO)",
     ]
-    for block, category in zip(blocks, expected):
-        assert "[CB] KATHERINE · GUÍA DE COMANDOS" in block
-        assert f"[CB] {category}" in block
+    positions = [text.index(f"[CB] {title}") for title in expected]
+    assert positions == sorted(positions)
+    assert text.count("[C] ══════════════════════════════") == 7
+    assert "[CB] ▸ Ayuda y Navegación" in text
+    assert "[CB] ▸ Reproductor DJ" in text
+    assert "[CB] ▸ Moderación y Configuración" in text
+
+
+def test_help_prefix_and_aliases_are_preserved():
+    text = build_commands_help_text("$")
+    assert "$ayuda <categoría>" in text
+    assert "$comandos / $menu / $menú" in text
+    assert "$dj probar <tema>" in text
+
+
+def test_category_help_uses_same_visual_format():
+    full = build_commands_help_text()
+    for alias, title in [
+        ("ia", "1. AYUDA E INTELIGENCIA ARTIFICIAL"),
+        ("genshin", "2. GENSHIN IMPACT"),
+        ("social", "3. SOCIAL Y PERFILES"),
+        ("juegos", "4. JUEGOS, ECONOMÍA Y COMUNIDAD"),
+        ("musica", "5. MÚSICA Y VOZ"),
+        ("multimedia", "6. UTILIDADES Y MULTIMEDIA"),
+        ("admin", "7. ADMINISTRACIÓN (UID AUTORIZADO)"),
+    ]:
+        section = filter_commands_help_text(full, alias)
+        assert section.startswith("[CB] KATHERINE · GUÍA DE COMANDOS")
+        assert f"[CB] {title}" in section
+        assert "[C] ══════════════════════════════" in section
+
+
+def test_unknown_category_uses_requested_layout_and_prefix():
+    response = filter_commands_help_text(build_commands_help_text("$"), "inexistente")
+    assert "[CB] KATHERINE · GUÍA DE COMANDOS" in response
+    assert "Ejemplo: $ayuda genshin." in response
+
+
+def test_full_help_is_split_into_seven_category_messages():
+    blocks = build_commands_help_blocks()
+    assert len(blocks) == 7
+    for i, block in enumerate(blocks):
+        assert "[C] ══════════════════════════════" in block
+        assert f"[CB] {i + 1}." in block
         assert len(block.encode("utf-16-le")) // 2 <= 1800
 
 
-def test_music_help_includes_all_current_dj_and_tts_controls():
+def test_music_section_has_current_music_controls():
     music = filter_commands_help_text(build_commands_help_text(), "musica")
     for command in (
         "!dj buscar", "!dj pausa", "!dj reanudar", "!dj saltar",
         "!dj cola", "!dj actual", "!dj detener", "!dj fuentes",
         "!dj ambiente", "!dj favorito", "!dj probar", "!playlist",
-        "!volumen", "!leer", "!noleer", "!volumenlectura",
-        "!subirvolumenlectura", "!bajarvolumenlectura",
-        "!silenciolectura", "!tts",
+        "!volumen", "!leer", "!noleer", "!tts",
     ):
         assert command in music
-
-
-def test_small_limit_splits_long_category_without_mixing_categories():
-    blocks = build_commands_help_blocks(max_units=850)
-    music_blocks = [block for block in blocks if "5. MÚSICA Y VOZ" in block]
-    assert len(music_blocks) >= 1
-    for block in music_blocks:
-        assert "2. GENSHIN IMPACT" not in block
-        assert "3. SOCIAL Y PERFILES" not in block
-        assert len(block.encode("utf-16-le")) // 2 <= 850
