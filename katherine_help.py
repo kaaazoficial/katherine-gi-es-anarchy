@@ -57,7 +57,7 @@ def _command_help_groups(prefix: str) -> tuple[str, list[tuple[str, list[str]]]]
             f"{prefix}pausa | {prefix}pausar | {prefix}reanudar | {prefix}continuar | {prefix}saltar | {prefix}cola — accesos rápidos; {prefix}djdetener | {prefix}djstop — detiene música sin salir.",
             f"{prefix}playlist <acción> — listas; {prefix}volumen | {prefix}volume <0-100> — volumen.",
             f"{prefix}subirvolumen | {prefix}bajarvolumen | {prefix}silencio — controles rápidos; {prefix}leer | {prefix}noleer — lectura de chat.",
-            f"{prefix}silenciolectura | {prefix}subirvolumenlectura | {prefix}bajarvolumenlectura — ajustes de lectura.",
+            f"{prefix}volumenlectura <0-100> | {prefix}subirvolumenlectura [cantidad] | {prefix}bajarvolumenlectura [cantidad] | {prefix}silenciolectura — volumen y controles de lectura.",
             f"{prefix}tts voces|voz|velocidad|volumen — configuración de voz y lectura.",
         ]),
         ("UTILIDADES Y MULTIMEDIA", [
