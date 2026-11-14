@@ -11273,6 +11273,100 @@ Uso: !enciclopedia <nombre>""",
                 reply
             )
             return
+        if args and args[0].lower() in ("probar", "test", "diagnostico"):
+            if not is_admin_uid(admin_uid):
+                await send_message(
+                    thread,
+                    "La prueba de reproducción está restringida al UID administrador.",
+                    dj_source,
+                    reply,
+                )
+                return
+
+            test_query = " ".join(args[1:]).strip() or "ambient instrumental"
+            normalized_query = clean_archive_value(test_query, 80)
+            archive_terms = re.findall(r"[\\wáéíóúñü-]+", normalized_query, flags=re.I)[:5]
+            if not normalized_query or not archive_terms:
+                await send_message(
+                    thread,
+                    "Uso: !dj probar <tema>. Ejemplo: !dj probar ambient instrumental.",
+                    dj_source,
+                    reply,
+                )
+                return
+
+            # Force fresh catalog searches; metadata for individual archive items
+            # may remain cached, but the selected audio is downloaded and decoded.
+            DJ_ARCHIVE_CACHE.pop("search:" + " ".join(archive_terms).casefold(), None)
+            DJ_SOURCE_CACHE.pop("commons:" + normalized_query.casefold(), None)
+            DJ_SOURCE_CACHE.pop("jamendo:" + normalized_query.casefold(), None)
+            try:
+                results = await search_music_catalog(normalized_query, limit=5)
+            except Exception as exc:
+                logging.warning(
+                    "[DJ_PROBE] Falló la búsqueda real del catálogo | error=%s",
+                    type(exc).__name__,
+                )
+                await send_message(
+                    thread,
+                    "La prueba no pudo completar la búsqueda musical "
+                    f"({type(exc).__name__}). Revisa !dj fuentes.",
+                    dj_source,
+                    reply,
+                )
+                return
+
+            if not results:
+                await send_message(
+                    thread,
+                    "La prueba terminó: los catálogos no devolvieron pistas reproducibles "
+                    "con licencia y formato válidos. Prueba otro tema.",
+                    dj_source,
+                    reply,
+                )
+                return
+
+            logging.info(
+                "[DJ_PROBE] Búsqueda real completada | resultados=%s",
+                len(results),
+            )
+            await send_message(
+                thread,
+                f"🔎 Prueba DJ: encontré {len(results)} pistas para «{normalized_query}». "
+                "Voy a descargar, validar y reproducir una en esta llamada.",
+                dj_source,
+                reply,
+            )
+            ok, result_message, selected_track, selected_index = (
+                await start_dj_search_with_fallback(thread, results, 0)
+            )
+            if ok and selected_track:
+                logging.info(
+                    "[DJ_PROBE] Reproducción de prueba iniciada | source=%s",
+                    selected_track.get("source_key") or "unknown",
+                )
+                await send_message(
+                    thread,
+                    "✅ PRUEBA MUSICAL COMPLETADA\n"
+                    f"Pista: {selected_track.get('title', 'Audio')}\n"
+                    f"Fuente: {selected_track.get('source', 'Catálogo')}\n"
+                    f"Licencia: {selected_track.get('license', 'No indicada')}\n"
+                    "Búsqueda, descarga, validación y reproducción iniciadas correctamente.",
+                    dj_source,
+                )
+            else:
+                logging.warning(
+                    "[DJ_PROBE] No se pudo iniciar reproducción | error=%s",
+                    str(result_message).replace("\\n", " ")[:180],
+                )
+                await send_message(
+                    thread,
+                    "❌ La prueba encontró pistas, pero ninguna pudo reproducirse.\n"
+                    + str(result_message)[:260],
+                    dj_source,
+                )
+            return
+
         if args and args[0].lower() in ("fuentes", "fuente", "sources"):
             jamendo_status = (
                 "configurado" if JAMENDO_CLIENT_ID else

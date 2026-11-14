@@ -290,3 +290,87 @@ def test_music_fallback_skips_remaining_tracks_from_blocked_provider(monkeypatch
         "https://archive.org/download/item/good.mp3",
     ]
     katherine.DJ_SOURCE_COOLDOWNS.clear()
+
+
+
+def test_dj_probe_command_is_admin_only_and_does_not_search_for_public_users(monkeypatch):
+    sent = []
+    searched = []
+
+    async def fake_send(thread_id, content, source="developer", reply_id=None, buttons=None):
+        sent.append(str(content))
+        return {"ok": True}
+
+    async def fake_search(*args, **kwargs):
+        searched.append((args, kwargs))
+        return [{"url": "https://archive.org/download/item/song.mp3"}]
+
+    monkeypatch.setattr(katherine, "COMMUNITY_TOKEN", "test-community-token")
+    monkeypatch.setattr(katherine, "is_admin_uid", lambda uid: uid == "admin-uid")
+    monkeypatch.setattr(katherine, "record_user", lambda *args, **kwargs: None)
+    monkeypatch.setattr(katherine, "record_chat_activity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(katherine, "send_message", fake_send)
+    monkeypatch.setattr(katherine, "search_music_catalog", fake_search)
+
+    event = {
+        "threadId": "dj-probe-public-room",
+        "message": {
+            "messageId": "probe-message-1",
+            "content": "!dj probar ambient",
+            "author": {"uid": "public-uid", "nickname": "Usuario"},
+        },
+    }
+    asyncio.run(katherine._handle_command_impl(event, "developer"))
+
+    assert searched == []
+    assert sent and "restringida" in sent[-1]
+
+
+def test_admin_dj_probe_runs_real_catalog_and_playback_flow(monkeypatch):
+    sent = []
+    searches = []
+    playback = []
+
+    async def fake_send(thread_id, content, source="developer", reply_id=None, buttons=None):
+        sent.append(str(content))
+        return {"ok": True}
+
+    async def fake_search(query, limit=5):
+        searches.append((query, limit))
+        return [{
+            "url": "https://archive.org/download/item/song.mp3",
+            "title": "Ambient Test",
+            "creator": "Test Artist",
+            "license": "CC0",
+            "source": "Internet Archive",
+            "source_key": "archive",
+        }]
+
+    async def fake_play(thread_id, tracks, selected_index=0):
+        playback.append((thread_id, tracks, selected_index))
+        return True, "Reproducción iniciada", tracks[0], 0
+
+    monkeypatch.setattr(katherine, "COMMUNITY_TOKEN", "test-community-token")
+    monkeypatch.setattr(katherine, "is_admin_uid", lambda uid: uid == "admin-uid")
+    monkeypatch.setattr(katherine, "record_user", lambda *args, **kwargs: None)
+    monkeypatch.setattr(katherine, "record_chat_activity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(katherine, "send_message", fake_send)
+    monkeypatch.setattr(katherine, "search_music_catalog", fake_search)
+    monkeypatch.setattr(katherine, "start_dj_search_with_fallback", fake_play)
+    katherine.DJ_ARCHIVE_CACHE.clear()
+    katherine.DJ_SOURCE_CACHE.clear()
+
+    event = {
+        "threadId": "dj-probe-admin-room",
+        "message": {
+            "messageId": "probe-message-2",
+            "content": "!dj probar ambient",
+            "author": {"uid": "admin-uid", "nickname": "Admin"},
+        },
+    }
+    asyncio.run(katherine._handle_command_impl(event, "developer"))
+
+    assert searches == [("ambient", 5)]
+    assert len(playback) == 1
+    assert playback[0][0] == "dj-probe-admin-room"
+    assert any("PRUEBA MUSICAL COMPLETADA" in item for item in sent)
