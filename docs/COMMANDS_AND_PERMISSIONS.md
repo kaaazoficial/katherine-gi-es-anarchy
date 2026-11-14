@@ -65,6 +65,7 @@ Los eventos se crean libremente; solo su creador o un UID administrador puede ce
 ## Llamadas y música
 
 - `!join`: conecta a Katherine a la llamada de la sala.
+- `!voz participantes`, `!voz hablando` y `!voz estado`: muestran participantes detectados por los eventos de la llamada. El estado vive solo en RAM, caduca tras 30 minutos sin actualización y se elimina al terminar la sala o salir Katherine del chat. Los UID nunca se muestran.
 - `!dj detener` / `!dj stop`: detiene la reproducción y mantiene la conexión a la llamada.
 - `!salirsala`: salida explícita de Katherine de la llamada.
 - El final de una pista, una cola vacía o un fallo de TTS no deben provocar una salida de la llamada.
