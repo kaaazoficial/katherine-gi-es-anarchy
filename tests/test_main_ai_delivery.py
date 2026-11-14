@@ -464,7 +464,6 @@ async def test_reply_to_katherine_routes_plain_text_to_assistant(monkeypatch):
         "message_id": "katherine-reply-target", "created_at": bot_main.time.time(),
     })
     monkeypatch.setattr(bot_main, "check_antispam_message", lambda *_: (False, None))
-    monkeypatch.setattr(bot_main.AI_CORE, "record_chat_message", lambda *args, **kwargs: False)
 
     async def no_speech(*_args, **_kwargs):
         return None
@@ -805,7 +804,6 @@ def test_concurrent_audio_dependency_loading_is_single_initialization(monkeypatc
 @pytest.mark.asyncio
 async def test_misspelled_katherine_call_routes_to_ai_assistant(monkeypatch):
     monkeypatch.setattr(bot_main, "check_antispam_message", lambda *_: (False, None))
-    monkeypatch.setattr(bot_main.AI_CORE, "record_chat_message", lambda *args, **kwargs: None)
     monkeypatch.setattr(bot_main, "extract_message_urls", lambda *_: [])
 
     async def no_speech(*_args, **_kwargs):
