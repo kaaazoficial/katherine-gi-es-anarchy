@@ -305,11 +305,6 @@ async def test_webhook_dispatches_signed_command_through_real_dispatch_pipeline(
     monkeypatch.setattr(
         bot_main, "check_antispam_message", lambda *_args: (False, None)
     )
-    monkeypatch.setattr(
-        bot_main.AI_CORE,
-        "record_chat_message",
-        lambda *_args, **_kwargs: False,
-    )
 
     async def no_speech(*_args, **_kwargs):
         return None
