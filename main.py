@@ -1,4 +1,4 @@
-# Katherine - Bot de Anarchy Apps (Python)
+# Katherine - Bot comunitario de Genshin Impact ES en Anarchy Apps (Python)
 # Requiere Python 3.11+
 import os
 import re
@@ -63,6 +63,7 @@ from katherine_research import (
  )
 from katherine_utilities import calculate_expression, format_calculation_result
 from katherine_images import validate_avatar_image_bytes
+from katherine_identity import extract_katherine_call
 from katherine_link_analysis import (
     inspect_message_links,
     extract_message_urls,
@@ -199,6 +200,8 @@ def log_ai_conversation_trace(question: str, answer: str, route: str = "assistan
 API = "https://api.anarchyapps.org/bot-api/v1"
 GAME_API = "https://genshin-db-api.vercel.app/api/v5"
 PORT = SETTINGS.port
+# Render requires the web server to listen on every container interface.
+UVICORN_BIND_HOST = "0.0.0.0"
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 COMMUNITY_TOKEN = os.getenv("COMMUNITY_BOT_TOKEN", "").strip()
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
@@ -250,7 +253,7 @@ async def application_lifespan(application: FastAPI):
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 app = FastAPI(
-    title="Katherine Anarchy Bot",
+    title="Katherine · Genshin Impact ES",
     lifespan=application_lifespan,
 )
 
@@ -864,14 +867,19 @@ def save_wish_state(uid: str, state: dict):
 
 
 def update_user_field(uid: str, field: str, value: str):
-    allowed = {"bio", "status"}
-    if field not in allowed:
-        return
+    """Update only the two public profile fields through fixed SQL statements."""
+    params = (str(value)[:240], time.time(), uid)
     with db_session() as db:
-        db.execute(
-            f"UPDATE users SET {field}=?, profile_updated_at=? WHERE uid=?",
-            (str(value)[:240], time.time(), uid)
-        )
+        if field == "bio":
+            db.execute(
+                "UPDATE users SET bio=?, profile_updated_at=? WHERE uid=?",
+                params,
+            )
+        elif field == "status":
+            db.execute(
+                "UPDATE users SET status=?, profile_updated_at=? WHERE uid=?",
+                params,
+            )
 
 
 def add_points(uid: str, amount: int):
@@ -963,19 +971,40 @@ def save_gift(sender_uid, sender_name, target_uid, target_name, message):
 
 
 def get_top_users(column: str, limit: int = 10, scope_key: str | None = None):
-    if column not in {"points", "message_count"}:
-        column = "points"
-    sql = f"SELECT nickname,{column} AS value FROM users WHERE {column}>0"
-    params = []
-    if scope_key:
-        prefix = scope_key + ":"
-        sql += " AND substr(uid,1,?)=?"
-        params.extend([len(prefix), prefix])
-    sql += " ORDER BY value DESC LIMIT ?"
-    params.append(limit)
+    """Return a leaderboard using fixed SQL; only values are supplied at runtime."""
+    selected_column = column if column in {"points", "message_count"} else "points"
+    bounded_limit = max(1, min(100, int(limit)))
     with db_session() as db:
-        rows = db.execute(sql, tuple(params)).fetchall()
-        return [(r["nickname"], int(r["value"])) for r in rows]
+        if selected_column == "message_count":
+            if scope_key:
+                prefix = str(scope_key) + ":"
+                rows = db.execute(
+                    """SELECT nickname,message_count AS value FROM users
+                       WHERE message_count>0 AND substr(uid,1,?)=?
+                       ORDER BY value DESC LIMIT ?""",
+                    (len(prefix), prefix, bounded_limit),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    """SELECT nickname,message_count AS value FROM users
+                       WHERE message_count>0 ORDER BY value DESC LIMIT ?""",
+                    (bounded_limit,),
+                ).fetchall()
+        elif scope_key:
+            prefix = str(scope_key) + ":"
+            rows = db.execute(
+                """SELECT nickname,points AS value FROM users
+                   WHERE points>0 AND substr(uid,1,?)=?
+                   ORDER BY value DESC LIMIT ?""",
+                (len(prefix), prefix, bounded_limit),
+            ).fetchall()
+        else:
+            rows = db.execute(
+                """SELECT nickname,points AS value FROM users
+                   WHERE points>0 ORDER BY value DESC LIMIT ?""",
+                (bounded_limit,),
+            ).fetchall()
+        return [(row["nickname"], int(row["value"])) for row in rows]
 
 
 def get_recent_gifts(target_uid: str, limit: int = 5):
@@ -12099,7 +12128,13 @@ async def dispatch(event: dict, source: str):
                 logging.info("[AI_REPLY] Respuesta dirigida a Katherine detectada.")
                 await handle_command(reply_event, source)
                 return
-            routed_command = interpret_natural_request(incoming_text)
+            name_call = extract_katherine_call(incoming_text)
+            routing_text = (
+                f"Katherine, {name_call}" if name_call is not None and name_call
+                else "Katherine" if name_call is not None
+                else incoming_text
+            )
+            routed_command = interpret_natural_request(routing_text)
             if routed_command:
                 routed_event = dict(event)
                 routed_message = dict(message_data)
@@ -12128,6 +12163,24 @@ async def dispatch(event: dict, source: str):
                             "!nexus",
                         )
             else:
+                if name_call is not None:
+                    thread_id = str(event.get("threadId") or "")
+                    if not name_call:
+                        await send_message(
+                            thread_id,
+                            "Aquí estoy. ¿Qué necesitas?",
+                            source,
+                        )
+                    else:
+                        name_event = dict(event)
+                        name_message = dict(message_data)
+                        name_message["content"] = f"{PREFIX}asistente {name_call}"
+                        name_event["message"] = name_message
+                        metrics["ai_name_triggers"] += 1
+                        logging.info("[AI_NAME] Llamada por nombre o apodo detectada.")
+                        await handle_command(name_event, source)
+                    return
+
                 # No interceptar comandos naturales; solo entonces evaluar reglas automáticas.
                 author = message_data.get("author") or {}
                 raw_uid = str(author.get("uid") or author.get("nickname") or "unknown")
@@ -12576,6 +12629,6 @@ if __name__ == "__main__":
 
     uvicorn.run(
         "main:app",
-        host="0.0.0.0",
+        host=UVICORN_BIND_HOST,
         port=PORT
     )
