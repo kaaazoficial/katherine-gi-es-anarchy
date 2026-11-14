@@ -976,6 +976,8 @@ class KatherineAI:
         self._simple_answer_cache_ttl = 45.0
         self._simple_answer_cache_limit = 64
         self._provider_usage: OrderedDict[tuple[str, str], dict[str, int]] = OrderedDict()
+        self._token_usage_started_at = time.monotonic()
+        self._token_usage_minute_buckets: OrderedDict[int, dict[str, int]] = OrderedDict()
         self._provider_override: ContextVar[dict[str, str] | None] = ContextVar(
             f"katherine_ai_provider_override_{id(self)}", default=None
         )
@@ -1293,6 +1295,72 @@ class KatherineAI:
             "[AI_LATENCY] proveedor=%s modelo=%s intento=%s tiempo_ms=%.0f",
             self.provider_name, self.model, attempt, elapsed * 1000,
         )
+
+    def _record_provider_token_usage(
+        self, input_tokens: int, output_tokens: int, *, now: float | None = None
+    ) -> None:
+        """Record aggregate token usage in a bounded, process-local 60-minute window."""
+        instant = time.monotonic() if now is None else float(now)
+        minute = int(instant // 60)
+        bucket = self._token_usage_minute_buckets.setdefault(
+            minute, {"input_tokens": 0, "output_tokens": 0, "responses": 0}
+        )
+        bucket["input_tokens"] += max(0, int(input_tokens))
+        bucket["output_tokens"] += max(0, int(output_tokens))
+        bucket["responses"] += 1
+        self._token_usage_minute_buckets.move_to_end(minute)
+
+        oldest_minute = minute - 59
+        for bucket_minute in tuple(self._token_usage_minute_buckets):
+            if bucket_minute < oldest_minute:
+                self._token_usage_minute_buckets.pop(bucket_minute, None)
+        while len(self._token_usage_minute_buckets) > 60:
+            self._token_usage_minute_buckets.popitem(last=False)
+
+        self.metrics["ai_provider_token_usage_responses"] += 1
+
+    def token_usage_snapshot(self, *, now: float | None = None) -> dict[str, int | float | None]:
+        """Return privacy-safe totals, averages, last-hour usage and a cautious daily projection."""
+        instant = time.monotonic() if now is None else float(now)
+        total_input = max(0, int(self.metrics.get("ai_provider_input_tokens", 0)))
+        total_output = max(0, int(self.metrics.get("ai_provider_output_tokens", 0)))
+        total_tokens = total_input + total_output
+        observations = max(
+            0, int(self.metrics.get("ai_provider_token_usage_responses", 0))
+        )
+        elapsed = max(0.0, instant - self._token_usage_started_at)
+
+        cutoff_minute = int(instant // 60) - 59
+        recent = [
+            values for minute, values in self._token_usage_minute_buckets.items()
+            if minute >= cutoff_minute
+        ]
+        last_hour_input = sum(item["input_tokens"] for item in recent)
+        last_hour_output = sum(item["output_tokens"] for item in recent)
+        last_hour_responses = sum(item["responses"] for item in recent)
+
+        tokens_per_hour = total_tokens / elapsed * 3600 if elapsed > 0 else 0.0
+        estimated_daily = (
+            int(round(total_tokens / elapsed * 86400))
+            if elapsed >= 300 and observations >= 3
+            else None
+        )
+        return {
+            "input_tokens": total_input,
+            "output_tokens": total_output,
+            "total_tokens": total_tokens,
+            "usage_responses": observations,
+            "avg_input_tokens_per_response": total_input / observations if observations else None,
+            "avg_output_tokens_per_response": total_output / observations if observations else None,
+            "avg_total_tokens_per_response": total_tokens / observations if observations else None,
+            "last_hour_input_tokens": last_hour_input,
+            "last_hour_output_tokens": last_hour_output,
+            "last_hour_tokens": last_hour_input + last_hour_output,
+            "last_hour_responses": last_hour_responses,
+            "tokens_per_hour_since_start": tokens_per_hour,
+            "estimated_daily_tokens": estimated_daily,
+            "observed_seconds": elapsed,
+        }
 
     def provider_usage_snapshot(self) -> list[dict[str, Any]]:
         """Aggregate token totals by provider/model; never include user/session data."""
@@ -2236,6 +2304,9 @@ class KatherineAI:
             self._provider_usage.popitem(last=False)
         provider_totals["responses"] += 1
 
+        response_input_tokens = 0
+        response_output_tokens = 0
+        usage_reported = False
         if isinstance(usage, dict):
             token_aliases = (
                 (
@@ -2249,14 +2320,25 @@ class KatherineAI:
                 )
             )
             for key, aliases in token_aliases:
-                value = next((usage.get(alias) for alias in aliases if usage.get(alias) is not None), 0)
+                value = next((usage.get(alias) for alias in aliases if usage.get(alias) is not None), None)
+                if value is None:
+                    continue
                 try:
                     numeric_value = max(0, int(value or 0))
-                    self.metrics[key] += numeric_value
-                    target = "input_tokens" if key.endswith("input_tokens") else "output_tokens"
-                    provider_totals[target] += numeric_value
-                except (TypeError, ValueError):
-                    pass
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                self.metrics[key] += numeric_value
+                target = "input_tokens" if key.endswith("input_tokens") else "output_tokens"
+                provider_totals[target] += numeric_value
+                if target == "input_tokens":
+                    response_input_tokens = numeric_value
+                else:
+                    response_output_tokens = numeric_value
+                usage_reported = True
+        if usage_reported:
+            self._record_provider_token_usage(
+                response_input_tokens, response_output_tokens
+            )
         self.metrics["ai_provider_responses_completed"] += 1
         raw = (
             self._extract_gemini_generate_content_text(payload)
