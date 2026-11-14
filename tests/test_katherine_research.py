@@ -1,6 +1,8 @@
 """Regression tests for topic-routed public research adapters."""
 import asyncio
 
+import pytest
+
 import katherine_research as research
 
 
@@ -656,3 +658,36 @@ def test_search_web_bounds_parallel_page_enrichment(monkeypatch):
 
     assert len(results) == 6
     assert maximum_active == 3
+
+
+
+def test_extract_page_content_prefers_article_text_and_removes_boilerplate():
+    markup = """
+    <html><head><title>Artículo técnico</title></head><body>
+      <nav>Menú Inicio Productos</nav>
+      <main><article>
+        <h1>Hallazgo principal</h1>
+        <p>Este artículo explica un hallazgo importante con contexto, metodología,
+        resultados y conclusiones. Su contenido permite comprobar que la extracción
+        conserva el cuerpo útil de la página para un análisis posterior.</p>
+        <p>También incluye una segunda sección con información adicional y detalles
+        concretos que deben mantenerse después de eliminar los elementos secundarios.</p>
+      </article></main>
+      <script>window.stealCredentials = true;</script>
+      <footer>Publicidad y enlaces secundarios</footer>
+    </body></html>
+    """
+    title, text = research.extract_page_content(markup)
+    assert title == "Artículo técnico"
+    assert "Hallazgo principal" in text
+    assert "metodología" in text
+    assert "Menú Inicio" not in text
+    assert "Publicidad" not in text
+    assert "stealCredentials" not in text
+
+
+def test_hardened_xml_parser_rejects_entity_expansion_payload():
+    malicious_xml = b"""<!DOCTYPE feed [<!ENTITY secret "local-secret">]>
+    <feed><title>&secret;</title></feed>"""
+    with pytest.raises(research.ET.EntitiesForbidden):
+        research.ET.fromstring(malicious_xml)
