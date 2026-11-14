@@ -1464,7 +1464,7 @@ async def test_action_requests_keep_full_action_schema_and_standard_budget(monke
             "args": "", "steps": []
         }))
 
-    result = await ai.assist("pausa la música", "room:user", fake_request)
+    result = await ai.assist("por favor pausa la música después de terminar esta canción", "room:user", fake_request)
     assert result["kind"] == "command"
     assert captured["text"]["format"]["schema"] == ACTION_SCHEMA
-    assert captured["max_output_tokens"] == 256
+    assert captured["max_output_tokens"] == 640
