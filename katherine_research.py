@@ -391,8 +391,11 @@ def classify_research_intent(query: str) -> dict[str, bool]:
     ))
     biomedical = bool(re.search(
         r"\b(pubmed|europe pmc|biomedicina|biomedical|medicina|medico|medica|"
-        r"salud|enfermedad(?:es)?|diagnostico|tratamiento|farmacologia|"
-        r"ensayo clinico|ensayos clinicos|clinical trial|clinical trials|"
+        r"salud|enfermedad(?:es)?|diagnostico|tratamiento(?:s)?|farmacologia|"
+        r"estudio(?:s)? clinico(?:s)?|ensayo clinico|ensayos clinicos|"
+        r"clinical trial|clinical trials|clinical research|medical research|"
+        r"diabetes|alzheimer|cancer|oncologia|tumor(?:es)?|biomarcador(?:es)?|"
+        r"sintoma(?:s)?|terapia(?:s)?|disease(?:s)?|"
         r"epidemiologia|neurociencia|genetica|genomica|microbiologia|"
         r"proteina|proteinas|celula|celular|biologia|biology|"
         r"medicamento|medicamentos|vacuna|vacunas)\b", text
@@ -1252,8 +1255,16 @@ async def search_web(
             ),
         ))
 
+    # Keep upstream fan-out bounded per research request. This is only an
+    # in-flight semaphore: no query, result, or conversation is retained.
+    source_semaphore = asyncio.Semaphore(5)
+
+    async def run_source(job: Awaitable[list[dict[str, str]]]):
+        async with source_semaphore:
+            return await job
+
     fetched = await asyncio.gather(
-        *(job for _, job in jobs), return_exceptions=True
+        *(run_source(job) for _, job in jobs), return_exceptions=True
     )
     groups: dict[str, list[dict[str, str]]] = {}
     for (name, _), value in zip(jobs, fetched):
@@ -1294,12 +1305,18 @@ async def search_web(
             seen_domains.add(domain)
             combined.append(source)
 
+    # Page enrichment is deliberately narrower than source discovery to
+    # avoid bursts against public websites. The semaphore exists only for
+    # this search call and holds no completed results.
+    enrichment_semaphore = asyncio.Semaphore(3)
+
     async def enrich(source: dict[str, str]) -> dict[str, str]:
         source_type = str(source.get("source_type") or "")
         if source_type not in {"gdelt_news", "official_software_docs"}:
             return source
         try:
-            page = await fetch_public_page(source["url"], request_func)
+            async with enrichment_semaphore:
+                page = await fetch_public_page(source["url"], request_func)
         except Exception:
             return source
         enriched = {**source, **page}
