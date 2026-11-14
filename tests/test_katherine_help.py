@@ -66,3 +66,15 @@ def test_oversized_category_continues_without_mixing_the_next_category():
         assert _category_heading_count(block) == 1
         assert "GENSHIN IMPACT" not in block
         assert "SOCIAL Y PERFILES" not in block
+
+
+
+def test_reading_volume_command_is_listed_under_music_and_voice():
+    from katherine_help import build_commands_help_text, filter_commands_help_text
+
+    music_help = filter_commands_help_text(build_commands_help_text(), "voz")
+
+    assert "!volumenlectura <0-100>" in music_help
+    assert "!subirvolumenlectura [cantidad]" in music_help
+    assert "!bajarvolumenlectura [cantidad]" in music_help
+    assert "!silenciolectura" in music_help
