@@ -14,3 +14,9 @@ pytest-timeout>=2.4.0,<3.0.0
 # Imported production modules that are required by the isolated app tests.
 pydantic-settings>=2.16.2,<3.0.0
 prometheus-client>=0.26.0,<1.0.0
+
+# Exercise the same web, XML and image paths as production.
+trafilatura>=2.3.1,<3.0.0
+selectolax>=1.0.2,<2.0.0
+Pillow>=13.0.0,<14.0.0
+defusedxml>=0.7.1,<1.0.0
