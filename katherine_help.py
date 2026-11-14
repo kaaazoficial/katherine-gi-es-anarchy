@@ -13,9 +13,9 @@ def _command_help_groups(prefix: str) -> tuple[str, list[tuple[str, list[str]]]]
             f"{prefix}asistente <consulta> — conversación y solicitudes en lenguaje natural.",
             f"{prefix}ia ayuda — guía; {prefix}ia preguntar <consulta> — chat; {prefix}ia genshin <consulta> — consulta de Teyvat.",
             f"{prefix}ia estado — proveedor y sesión; {prefix}ia olvidar — borra contexto temporal.",
-            f"{prefix}ia investigar <tema> | {prefix}ia enlace <URL> | {prefix}ia musica <estilo> | {prefix}ia traducir <idioma> | <texto>.",
             f"{prefix}investigar <tema> | {prefix}investiga <tema> | {prefix}investigacion <tema> | {prefix}investigación <tema> — investigación: comparar, verificar, cronologia o informe.",
-            f"{prefix}enlace <URL> | {prefix}analizarenlace <URL> | {prefix}leerweb <URL> — analiza una página pública.",
+            f"{prefix}analizartexto resumir|corregir|reescribir|extraer|contradicciones <texto> — análisis puntual, sin guardar el texto.",
+            f"{prefix}calcular <operación> — calculadora científica segura (porcentajes, raíces, trigonometría y operaciones).",
             f"{prefix}ia probar | {prefix}ia trazas | {prefix}ia guardian | {prefix}ia analista | {prefix}ia diagnostico — diagnóstico y controles [ADMIN].",
         ]),
         ("GENSHIN IMPACT", [

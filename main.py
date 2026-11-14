@@ -61,6 +61,11 @@ from katherine_research import (
     search_web, fetch_public_page, build_source_context, parse_research_mode,
     is_safe_public_url,
  )
+from katherine_utilities import calculate_expression, format_calculation_result
+from katherine_link_analysis import (
+    inspect_link_signals, format_link_signals, inspect_message_links,
+    extract_message_urls,
+)
 from katherine_game_queries import (
     infer_genshin_data_folder,
     strip_game_scope_qualifier,
@@ -8424,6 +8429,42 @@ async def _handle_command_impl(event: dict, source: str):
         await send_message(thread, final_answer, source, reply)
         return
 
+    if command in ("!calcular", "!calc", "!matematica", "!matemáticas"):
+        expression = query.strip()
+        if not expression:
+            await send_message(thread, "Uso: !calcular <operación>. Ejemplos: 15% de 240 · sqrt(144) · (25*4)+10.", source, reply)
+            return
+        try:
+            value = calculate_expression(expression)
+            await send_message(thread, f"CALCULADORA\n{expression} = {format_calculation_result(value)}", source, reply)
+        except ValueError as exc:
+            await send_message(thread, f"No pude calcularlo: {exc}", source, reply)
+        return
+
+    if command in ("!analizartexto", "!analizatexto", "!texto"):
+        parts = query.strip().split(maxsplit=1)
+        if len(parts) != 2 or parts[0].casefold() not in {"resumir", "corregir", "reescribir", "extraer", "contradicciones"}:
+            await send_message(thread, "Uso: !analizartexto resumir|corregir|reescribir|extraer|contradicciones <texto>.", source, reply)
+            return
+        task_name = parts[0].casefold()
+        task_labels = {
+            "resumir": "Resume", "corregir": "Corrige ortografía, gramática y puntuación",
+            "reescribir": "Reescribe con mayor claridad y coherencia, sin cambiar el significado",
+            "extraer": "Extrae los puntos clave, nombres, fechas y datos explícitos",
+            "contradicciones": "Detecta contradicciones internas y explica qué afirmaciones chocan",
+        }
+        try:
+            answer = await AI_CORE.task_response(
+                "text_analysis", parts[1], external_request,
+                extra_instructions=f"Operación solicitada: {task_labels[task_name]}.",
+                rate_key=build_ai_rate_key(source, thread, author),
+            )
+        except Exception:
+            logging.exception("[AI] Falló el análisis de texto")
+            answer = "No pude analizar ese texto con el proveedor de IA. Inténtalo de nuevo."
+        await send_message(thread, answer, source, reply)
+        return
+
     if command in ("!investigar", "!investiga", "!investigacion"):
         research_mode, research_query = parse_research_mode(query.strip())
         research_mode_label = {
@@ -8480,39 +8521,6 @@ async def _handle_command_impl(event: dict, source: str):
             logging.warning("[RESEARCH] Falló investigación pública: %s", type(exc).__name__)
             answer = "No pude completar la investigación web en este momento. Los comandos clásicos siguen disponibles."
         await send_message(thread, answer, source, reply, allow_safe_links=True)
-        return
-
-    if command in ("!enlace", "!analizarenlace", "!leerweb"):
-        target_url = query.strip()
-        if not target_url:
-            await send_message(thread, "Uso: !enlace https://sitio-publico.com/articulo", source, reply)
-            return
-        try:
-            page = await fetch_public_page(target_url, external_request)
-            context = build_source_context(
-                "Analiza esta página: " + page["title"],
-                [page]
-            )
-            try:
-                summary = await AI_CORE.summarize_research(
-                    "Resume y analiza esta página, distingue afirmaciones, datos y posibles sesgos.",
-                    context, external_request,
-                    rate_key=build_ai_session_key(source, thread, author, message_id)
-                )
-            except Exception:
-                logging.exception("[RESEARCH] Falló análisis IA del enlace")
-                summary = page.get("excerpt", "")[:2500]
-            answer = (
-                f"ANÁLISIS DE ENLACE\n{page['title']}\nDominio: {page['domain']}\n\n"
-                f"{summary}\n\nFuente: {page['domain']}\n"
-                "El contenido de la página se trató como material externo no confiable."
-            )
-        except ValueError as exc:
-            answer = str(exc)
-        except Exception as exc:
-            logging.warning("[RESEARCH] No se pudo leer enlace: %s", type(exc).__name__)
-            answer = "No pude leer esa página. Puede estar bloqueada, requerir acceso o no ofrecer contenido HTML público."
-        await send_message(thread, answer, source, reply)
         return
 
     if command == "!ia":
@@ -12006,12 +12014,58 @@ async def dispatch(event: dict, source: str):
         if author_is_bot:
             metrics["bot_messages_ignored"] += 1
             return
+        # Automatic incoming-link moderation runs before chat context, speech,
+        # AI routing or commands. No link history is retained.
+        if incoming_text and extract_message_urls(incoming_text):
+            try:
+                link_verdict = await inspect_message_links(
+                    incoming_text,
+                    lambda url: fetch_public_page(url, external_request),
+                )
+            except Exception:
+                logging.exception("[LINK_GUARD] Error revisando enlaces entrantes.")
+                link_verdict = {
+                    "blocked": True,
+                    "reason": "No se pudo verificar el enlace de forma segura.",
+                    "category": "inspection_error",
+                }
+            if link_verdict.get("blocked"):
+                message_id = str(
+                    message_data.get("id")
+                    or message_data.get("messageId")
+                    or message_data.get("message_id")
+                    or ""
+                ).strip()
+                deleted = False
+                if message_id:
+                    deletion = await api(
+                        "DELETE",
+                        f"/threads/{event.get('threadId')}/messages/{message_id}",
+                        source,
+                    )
+                    deleted = bool(deletion.get("ok") or deletion.get("status") == 404)
+                metrics["automatic_link_blocks"] = metrics.get("automatic_link_blocks", 0) + 1
+                logging.warning(
+                    "[LINK_GUARD] Mensaje bloqueado | categoria=%s | eliminado=%s",
+                    link_verdict.get("category", "blocked"),
+                    deleted,
+                )
+                if not deleted:
+                    await send_message(
+                        str(event.get("threadId") or ""),
+                        "🛡️ No se permitió el enlace: "
+                        + str(link_verdict.get("reason") or "destino no permitido."),
+                        source,
+                    )
+                return
+
         AI_CORE.record_chat_message(
             str(event.get("threadId") or ""),
             str(author_data.get("nickname") or author_data.get("name") or "Usuario"),
             incoming_text,
             is_bot=author_is_bot,
         )
+
         await enqueue_message_for_speech(event, source)
 
         # NEXUS conserva el enrutamiento determinista cuando IA no está configurada.

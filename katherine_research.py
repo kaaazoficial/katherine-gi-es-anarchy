@@ -15,7 +15,7 @@ import time
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from typing import Any, Awaitable, Callable
-from urllib.parse import parse_qs, quote, urlsplit, urlunsplit
+from urllib.parse import parse_qs, quote, urljoin, urlsplit, urlunsplit
 
 RequestFunc = Callable[..., Awaitable[Any]]
 SEARCH_URL = "https://html.duckduckgo.com/html/"
@@ -210,21 +210,38 @@ async def fetch_public_page(url: str, request_func: RequestFunc) -> dict[str, st
     normalized = normalize_public_url(url)
     if not normalized:
         raise ValueError("Solo puedo analizar enlaces HTTPS públicos y válidos.")
-    response = await request_func(
-        "GET",
-        normalized,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml;q=0.9",
-        },
-        timeout=14,
-        follow_redirects=False,
-        safe_public=True,
-        max_response_bytes=600_000,
-    )
-    status = int(getattr(response, "status_code", 0) or 0)
-    if 300 <= status < 400:
-        raise ValueError("El enlace redirige a otra dirección; por seguridad no seguiré esa redirección.")
+    current_url = normalized
+    redirect_chain = [normalized]
+    response = None
+    for hop in range(4):
+        if not is_safe_public_url(current_url):
+            raise ValueError("Una redirección apunta a una dirección no pública o no segura.")
+        response = await request_func(
+            "GET",
+            current_url,
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml;q=0.9",
+            },
+            timeout=14,
+            follow_redirects=False,
+            safe_public=True,
+            max_response_bytes=600_000,
+        )
+        status = int(getattr(response, "status_code", 0) or 0)
+        if status not in (301, 302, 303, 307, 308):
+            break
+        location = str((getattr(response, "headers", {}) or {}).get("location") or "")
+        if not location or hop >= 3:
+            raise ValueError("El enlace excede el límite de redirecciones.")
+        current_url = urljoin(current_url, location)
+        if not is_safe_public_url(current_url):
+            raise ValueError("Se bloqueó una redirección hacia una dirección privada o no HTTPS.")
+        redirect_chain.append(current_url)
+    if response is None:
+        raise ValueError("No se pudo recuperar la página.")
+    if int(getattr(response, "status_code", 0) or 0) in (301, 302, 303, 307, 308):
+        raise ValueError("El enlace excede el límite de redirecciones.")
     if not getattr(response, "is_success", False):
         raise RuntimeError(f"La página respondió HTTP {status or 'desconocido'}.")
     headers = getattr(response, "headers", {}) or {}
@@ -239,7 +256,9 @@ async def fetch_public_page(url: str, request_func: RequestFunc) -> dict[str, st
     return {
         "title": title or parsed.hostname or "Página web",
         "url": normalized,
-        "domain": parsed.hostname or "",
+        "final_url": current_url,
+        "redirect_chain": redirect_chain,
+        "domain": (urlsplit(current_url).hostname or ""),
         "snippet": "",
         "excerpt": text[:5000],
     }
