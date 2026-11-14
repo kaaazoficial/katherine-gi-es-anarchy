@@ -10,7 +10,7 @@ from katherine_ai import (
 
 
 @pytest.mark.parametrize(
-    ("request", "expected"),
+    ("query", "expected"),
     [
         ("¿Qué es una API?", "conversation"),
         ("¿Quién es Cyno en Genshin Impact?", "genshin"),
@@ -19,12 +19,12 @@ from katherine_ai import (
         ("Reproduce jazz y después pausa la música", "multi_action"),
     ],
 )
-def test_intent_router_benchmark(request, expected):
-    assert classify_request_intent(request) == expected
+def test_intent_router_benchmark(query, expected):
+    assert classify_request_intent(query) == expected
 
 
 @pytest.mark.parametrize(
-    ("request", "intent", "expected"),
+    ("query", "intent", "expected"),
     [
         ("¿Qué es una API?", "conversation", "simple"),
         ("Explícame cómo funciona una base de datos relacional", "conversation", "standard"),
@@ -32,8 +32,8 @@ def test_intent_router_benchmark(request, expected):
         ("Investiga fuentes sobre baterías de sodio", "research", "complex"),
     ],
 )
-def test_difficulty_router_benchmark(request, intent, expected):
-    assert classify_request_difficulty(request, intent) == expected
+def test_difficulty_router_benchmark(query, intent, expected):
+    assert classify_request_difficulty(query, intent) == expected
 
 
 def test_tool_selection_benchmark_does_not_expose_unrelated_commands():
