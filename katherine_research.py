@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import time
+import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, quote, urlsplit, urlunsplit
@@ -371,7 +372,7 @@ def _normalized_query(query: str) -> str:
 
 
 def classify_research_intent(query: str) -> dict[str, bool]:
-    """Classify requests so specialist sources are never mixed into unrelated topics."""
+    """Route research to specialist sources without mixing unrelated subjects."""
     text = _normalized_query(query)
     genshin = bool(re.search(
         r"\b(genshin(?: impact)?|teyvat|natlan|fontaine|sumeru|inazuma|mondstadt|"
@@ -388,12 +389,20 @@ def classify_research_intent(query: str) -> dict[str, bool]:
         r"planeta|planetas|luna|marte|jupiter|saturno|galaxia|nebulosa|"
         r"telescopio|exoplaneta|sistema solar|space|astronomy)\b", text
     ))
-    academic = bool(re.search(
+    biomedical = bool(re.search(
+        r"\b(pubmed|europe pmc|biomedicina|biomedical|medicina|medico|medica|"
+        r"salud|enfermedad(?:es)?|diagnostico|tratamiento|farmacologia|"
+        r"ensayo clinico|ensayos clinicos|clinical trial|clinical trials|"
+        r"epidemiologia|neurociencia|genetica|genomica|microbiologia|"
+        r"proteina|proteinas|celula|celular|biologia|biology|"
+        r"medicamento|medicamentos|vacuna|vacunas)\b", text
+    ))
+    academic = biomedical or bool(re.search(
         r"\b(paper|papers|articulo cientifico|articulos cientificos|"
         r"estudio cientifico|estudios cientificos|investigacion academica|"
         r"literatura cientifica|doi|crossref|openalex|revista cientifica|"
         r"publicacion academica|metaanalisis|meta analisis|scientific study|"
-        r"research paper|academic research)\b", text
+        r"research paper|academic research|arxiv|preprint|preprints)\b", text
     ))
     archive = bool(re.search(
         r"\b(internet archive|archive.org|wayback machine|libro|libros|"
@@ -405,11 +414,18 @@ def classify_research_intent(query: str) -> dict[str, bool]:
         r"\b(fandom|wiki comunitaria|anime|manga|videojuego|videojuegos|"
         r"personaje de videojuego|franquicia de ficcion)\b", text
     ))
+    news = bool(re.search(
+        r"\b(noticia|noticias|actualidad|ultimas noticias|ultimas novedades|"
+        r"noticias recientes|hoy|ayer|esta semana|esta manana|este mes|"
+        r"breaking news|latest news|current events)\b", text
+    ))
     return {
         "genshin": genshin,
         "music": music,
         "nasa": nasa,
         "academic": academic,
+        "biomedical": biomedical,
+        "news": news,
         "archive": archive,
         "fandom": fandom,
     }
@@ -655,6 +671,251 @@ async def search_crossref(
     return results
 
 
+
+async def search_europe_pmc(
+    query: str, request_func: RequestFunc, limit: int = 2
+) -> list[dict[str, str]]:
+    """Search Europe PMC for biomedical and life-science publications."""
+    search_text = re.sub(r"\s+", " ", str(query or "")).strip()
+    if not 3 <= len(search_text) <= 160:
+        return []
+    response = await request_func(
+        "GET",
+        "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+        params={
+            "query": search_text,
+            "format": "json",
+            "resultType": "core",
+            "pageSize": max(1, min(4, int(limit))),
+        },
+        headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+        timeout=15,
+        follow_redirects=False,
+    )
+    if not getattr(response, "is_success", False):
+        return []
+    payload = response.json()
+    items = (
+        ((payload.get("resultList") or {}).get("result") or [])
+        if isinstance(payload, dict) else []
+    )
+    results: list[dict[str, str]] = []
+    for item in items[:max(1, min(4, int(limit)))]:
+        title = _plain(str(item.get("title") or ""), 200)
+        if not title:
+            continue
+        doi = str(item.get("doi") or "").strip()
+        pmcid = str(item.get("pmcid") or "").strip()
+        pmid = str(item.get("pmid") or "").strip()
+        if doi:
+            url = f"https://doi.org/{quote(doi, safe='/')}"
+        elif re.fullmatch(r"PMC\d+", pmcid, flags=re.I):
+            url = f"https://europepmc.org/articles/{pmcid}"
+        elif pmid.isdigit():
+            url = f"https://europepmc.org/article/MED/{pmid}"
+        else:
+            continue
+        authors = _plain(str(item.get("authorString") or ""), 220)
+        journal = _plain(str(item.get("journalTitle") or ""), 160)
+        published = str(
+            item.get("firstPublicationDate")
+            or item.get("dateOfCreation")
+            or item.get("pubYear")
+            or ""
+        )[:30]
+        abstract = _plain(str(item.get("abstractText") or ""), 1500)
+        pub_types = item.get("pubTypeList") or {}
+        pub_type_items = pub_types.get("pubType") if isinstance(pub_types, dict) else []
+        pub_type = ", ".join(
+            _plain(str(value), 60)
+            for value in (pub_type_items or [])[:3]
+        ) if isinstance(pub_type_items, list) else ""
+        excerpt = _plain(
+            f"{authors}. {journal}. {published}. {pub_type}. {abstract}",
+            1800,
+        )
+        results.append({
+            "title": title,
+            "url": url,
+            "domain": "europepmc.org",
+            "snippet": excerpt,
+            "excerpt": excerpt or f"Registro biomédico de Europe PMC, {published}.",
+            "source_type": "europe_pmc",
+            "authors": authors,
+            "publication_date": published,
+            "attribution": (
+                "Europe PMC, índice bibliográfico de biomedicina y ciencias de la vida; "
+                "comprueba si el registro es un artículo revisado, un preprint u otro tipo de publicación."
+            ),
+        })
+    return results
+
+
+_ARXIV_LOCK = asyncio.Lock()
+_ARXIV_LAST_REQUEST = 0.0
+
+
+async def search_arxiv(
+    query: str, request_func: RequestFunc, limit: int = 2
+) -> list[dict[str, str]]:
+    """Search arXiv metadata and abstracts while respecting its 3-second interval."""
+    global _ARXIV_LAST_REQUEST
+    search_text = re.sub(r"\s+", " ", str(query or "")).strip()
+    if not 3 <= len(search_text) <= 160:
+        return []
+    async with _ARXIV_LOCK:
+        delay = 3.05 - (time.monotonic() - _ARXIV_LAST_REQUEST)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        _ARXIV_LAST_REQUEST = time.monotonic()
+        response = await request_func(
+            "GET",
+            "https://export.arxiv.org/api/query",
+            params={
+                "search_query": f'all:{search_text.replace(chr(34), " ")}',
+                "start": 0,
+                "max_results": max(1, min(3, int(limit))),
+                "sortBy": "relevance",
+                "sortOrder": "descending",
+            },
+            headers={"User-Agent": USER_AGENT, "Accept": "application/atom+xml"},
+            timeout=20,
+            follow_redirects=False,
+        )
+    if not getattr(response, "is_success", False):
+        return []
+    try:
+        root = ET.fromstring(str(getattr(response, "text", "") or ""))
+    except ET.ParseError:
+        return []
+    namespace = {"atom": "http://www.w3.org/2005/Atom"}
+    results: list[dict[str, str]] = []
+    for entry in root.findall("atom:entry", namespace)[:max(1, min(3, int(limit)))]:
+        entry_id = str(entry.findtext("atom:id", default="", namespaces=namespace))
+        parsed_id = urlsplit(entry_id)
+        match = re.match(r"^/abs/([A-Za-z0-9./_-]+)$", parsed_id.path)
+        if (
+            parsed_id.hostname not in {"arxiv.org", "export.arxiv.org"}
+            or not match
+        ):
+            continue
+        arxiv_id = match.group(1).strip("/")
+        title = _plain(
+            str(entry.findtext("atom:title", default="", namespaces=namespace)),
+            220,
+        )
+        if not title:
+            continue
+        summary = _plain(
+            str(entry.findtext("atom:summary", default="", namespaces=namespace)),
+            1500,
+        )
+        authors = [
+            _plain(str(author.findtext("atom:name", default="", namespaces=namespace)), 100)
+            for author in entry.findall("atom:author", namespace)[:4]
+        ]
+        authors = [author for author in authors if author]
+        published = str(
+            entry.findtext("atom:published", default="", namespaces=namespace)
+        )[:10]
+        updated = str(
+            entry.findtext("atom:updated", default="", namespaces=namespace)
+        )[:10]
+        excerpt = _plain(
+            f"{', '.join(authors)}. Publicado: {published}. Actualizado: {updated}. {summary}",
+            1750,
+        )
+        results.append({
+            "title": title,
+            "url": f"https://arxiv.org/abs/{quote(arxiv_id, safe='/._-')}",
+            "domain": "arxiv.org",
+            "snippet": excerpt,
+            "excerpt": excerpt or title,
+            "source_type": "arxiv",
+            "authors": ", ".join(authors),
+            "publication_date": published,
+            "updated_at": updated,
+            "attribution": (
+                "arXiv, repositorio de preprints; el depósito no implica por sí solo "
+                "revisión por pares ni aceptación en una revista."
+            ),
+        })
+    return results
+
+
+def _gdelt_indexed_date(value: Any) -> str:
+    raw = str(value or "").strip()
+    match = re.fullmatch(r"(\d{4})(\d{2})(\d{2})T?(\d{2})(\d{2})(\d{2})Z?", raw)
+    if not match:
+        return raw[:40]
+    year, month, day, hour, minute, second = match.groups()
+    return f"{year}-{month}-{day} {hour}:{minute}:{second} UTC"
+
+
+async def search_gdelt_news(
+    query: str, request_func: RequestFunc, limit: int = 3
+) -> list[dict[str, str]]:
+    """Search recent news coverage through the keyless GDELT DOC 2.0 API."""
+    search_text = re.sub(r"\s+", " ", str(query or "")).strip()
+    if not 3 <= len(search_text) <= 160:
+        return []
+    response = await request_func(
+        "GET",
+        "https://api.gdeltproject.org/api/v2/doc/doc",
+        params={
+            "query": search_text,
+            "mode": "ArtList",
+            "format": "json",
+            "maxrecords": max(1, min(8, int(limit))),
+            "timespan": "3m",
+            "sort": "DateDesc",
+        },
+        headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+        timeout=18,
+        follow_redirects=False,
+    )
+    if not getattr(response, "is_success", False):
+        return []
+    payload = response.json()
+    articles = payload.get("articles", []) if isinstance(payload, dict) else []
+    results: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for item in articles[:max(1, min(8, int(limit)))]:
+        url = normalize_public_url(str(item.get("url") or ""))
+        if not url or url in seen_urls:
+            continue
+        parsed = urlsplit(url)
+        title = _plain(str(item.get("title") or ""), 220)
+        if not title or not parsed.hostname:
+            continue
+        seen_urls.add(url)
+        indexed_at = _gdelt_indexed_date(item.get("seendate"))
+        language = _plain(str(item.get("language") or ""), 40)
+        country = _plain(str(item.get("sourcecountry") or ""), 60)
+        excerpt = _plain(
+            f"Medio: {parsed.hostname}. Fecha detectada por GDELT: "
+            f"{indexed_at or 'no indicada'}. Idioma: {language or 'no indicado'}. "
+            f"País de la fuente: {country or 'no indicado'}.",
+            500,
+        )
+        results.append({
+            "title": title,
+            "url": url,
+            "domain": parsed.hostname,
+            "snippet": excerpt,
+            "excerpt": excerpt,
+            "source_type": "gdelt_news",
+            "indexed_at": indexed_at,
+            "language": language,
+            "source_country": country,
+            "attribution": (
+                "GDELT indexa cobertura periodística internacional; no es una fuente primaria "
+                "ni garantiza la exactitud del artículo. Verifica la información en el medio original."
+            ),
+        })
+    return results
+
+
 async def search_nasa(
     query: str, request_func: RequestFunc, limit: int = 2
 ) -> list[dict[str, str]]:
@@ -876,6 +1137,33 @@ async def _search_general_web(
     )
 
 
+
+def _software_document_targets(query: str) -> list[tuple[str, str]]:
+    """Return a small set of official documentation sites relevant to the query."""
+    text = _normalized_query(query)
+    rules = [
+        (r"\b(python|cpython|asyncio|pip)\b", "docs.python.org", "Python"),
+        (r"\b(fastapi)\b", "fastapi.tiangolo.com", "FastAPI"),
+        (r"\b(github|github actions|pull request)\b", "docs.github.com", "GitHub"),
+        (r"\b(render(?:\.com)?|render deploy|render deployment)\b", "render.com", "Render"),
+        (r"\b(postgresql|postgres|sql)\b", "postgresql.org", "PostgreSQL"),
+        (r"\b(docker|dockerfile|containerizacion)\b", "docs.docker.com", "Docker"),
+        (r"\b(javascript|typescript|html|css|dom|frontend|front-end|navegador)\b",
+         "developer.mozilla.org", "MDN Web Docs"),
+        (r"\b(node\.?js|nodejs|npm)\b", "nodejs.org", "Node.js"),
+        (r"\b(react|reactjs)\b", "react.dev", "React"),
+    ]
+    targets: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for pattern, domain, label in rules:
+        if re.search(pattern, text) and domain not in seen:
+            targets.append((domain, label))
+            seen.add(domain)
+        if len(targets) >= 3:
+            break
+    return targets
+
+
 def _research_source_relevance(query: str, source: dict[str, str]) -> int:
     """Rank existing results by lexical overlap without adding API calls."""
     stop = {"para", "sobre", "como", "donde", "cuando", "porque", "desde", "esta", "este", "the", "and", "for", "with", "what", "when", "where", "from", "about"}
@@ -889,7 +1177,7 @@ def _research_source_relevance(query: str, source: dict[str, str]) -> int:
 
 
 async def search_web(
-    query: str, request_func: RequestFunc, limit: int = 5
+    query: str, request_func: RequestFunc, limit: int = 8
 ) -> list[dict[str, str]]:
     """Search general and topic-specific sources without cross-topic contamination."""
     search_text = re.sub(r"\s+", " ", str(query or "")).strip()
@@ -900,15 +1188,20 @@ async def search_web(
     jobs: list[tuple[str, Awaitable[list[dict[str, str]]]]] = [
         ("wikidata", search_wikidata(search_text, request_func, limit=2)),
         ("wikipedia", search_wikipedia(search_text, request_func, limit=2)),
-        ("web", _search_general_web(search_text, request_func, limit=5)),
+        ("web", _search_general_web(search_text, request_func, limit=6)),
     ]
+    if intent["news"]:
+        jobs.append(("news", search_gdelt_news(search_text, request_func, limit=4)))
     if intent["archive"]:
         jobs.append(("archive", search_internet_archive(search_text, request_func, limit=2)))
     if intent["academic"]:
         jobs.extend([
             ("openalex", search_openalex(search_text, request_func, limit=2)),
             ("crossref", search_crossref(search_text, request_func, limit=2)),
+            ("arxiv", search_arxiv(search_text, request_func, limit=2)),
         ])
+    if intent["biomedical"]:
+        jobs.append(("europe_pmc", search_europe_pmc(search_text, request_func, limit=3)))
     if intent["nasa"]:
         jobs.extend([
             ("nasa", search_nasa(search_text, request_func, limit=2)),
@@ -932,15 +1225,32 @@ async def search_web(
                 search_text, "keqingmains.com", request_func,
                 source_type="keqingmains",
                 attribution="KeqingMains, guías y theorycraft comunitario de Genshin Impact; distingue guía general de recomendaciones dependientes de versión.",
-                limit=1,
+                limit=2,
             )),
             ("hoyolab", search_scoped_site(
                 search_text, "hoyolab.com", request_func,
                 source_type="hoyolab",
                 attribution="HoYoLAB, publicaciones y contenido de la comunidad de HoYoverse; comprueba autoría, fecha y si la publicación es oficial.",
-                limit=1,
+                limit=2,
             )),
         ])
+
+    software_targets = _software_document_targets(search_text)
+    for domain, label in software_targets:
+        jobs.append((
+            f"docs:{domain}",
+            search_scoped_site(
+                search_text,
+                domain,
+                request_func,
+                source_type="official_software_docs",
+                attribution=(
+                    f"Documentación oficial de {label}; comprueba la versión del producto "
+                    "y la fecha de la página antes de aplicar sus instrucciones."
+                ),
+                limit=2,
+            ),
+        ))
 
     fetched = await asyncio.gather(
         *(job for _, job in jobs), return_exceptions=True
@@ -948,7 +1258,6 @@ async def search_web(
     groups: dict[str, list[dict[str, str]]] = {}
     for (name, _), value in zip(jobs, fetched):
         if isinstance(value, Exception):
-            # One unavailable provider must not cancel all other sources.
             logging.warning("[RESEARCH] Fuente %s falló: %s", name, type(value).__name__)
             continue
         groups[name] = sorted(
@@ -957,17 +1266,22 @@ async def search_web(
             reverse=True,
         )
 
-    priority = []
+    priority: list[str] = []
+    if intent["news"]:
+        priority.extend(["news", "web"])
     if intent["genshin"]:
         priority.extend(["keqingmains", "hoyolab", "fandom"])
     if intent["nasa"]:
         priority.extend(["nasa_web", "nasa"])
     if intent["music"]:
         priority.extend(["musicbrainz", "jamendo"])
+    if intent["biomedical"]:
+        priority.append("europe_pmc")
     if intent["academic"]:
-        priority.extend(["openalex", "crossref"])
+        priority.extend(["arxiv", "openalex", "crossref"])
     if intent["archive"]:
         priority.append("archive")
+    priority.extend(f"docs:{domain}" for domain, _ in software_targets)
     priority.extend(["wikidata", "wikipedia", "fandom", "web"])
 
     combined: list[dict[str, str]] = []
@@ -981,19 +1295,22 @@ async def search_web(
             combined.append(source)
 
     async def enrich(source: dict[str, str]) -> dict[str, str]:
-        if source.get("source_type"):
+        source_type = str(source.get("source_type") or "")
+        if source_type not in {"gdelt_news", "official_software_docs"}:
             return source
         try:
             page = await fetch_public_page(source["url"], request_func)
         except Exception:
-            source["excerpt"] = source.get("snippet", "")
-            source["source_type"] = "public_web"
             return source
-        page["snippet"] = source.get("snippet", "")
-        page["source_type"] = "public_web"
-        return page
+        enriched = {**source, **page}
+        enriched["title"] = source.get("title") or page.get("title") or "Página pública"
+        enriched["url"] = source["url"]
+        enriched["domain"] = source.get("domain") or page.get("domain") or ""
+        enriched["source_type"] = source_type
+        enriched["attribution"] = source.get("attribution", "")
+        return enriched
 
-    max_results = max(3, min(6, int(limit)))
+    max_results = max(3, min(8, int(limit)))
     selected = combined[:max_results]
     enriched = await asyncio.gather(*(enrich(item) for item in selected))
     return [
@@ -1047,13 +1364,13 @@ def summarize_source_coverage(sources: list[dict[str, str]]) -> dict[str, int]:
     dated = sum(
         1 for item in normalized
         if any(str(item.get(key) or "").strip() for key in (
-            "publication_date", "published_at", "date", "year"
+            "publication_date", "published_at", "date", "year", "indexed_at"
         ))
     )
     academic = sum(
         1 for item in normalized
         if any(term in str(item.get("source_type") or "").casefold()
-               for term in ("academic", "openalex", "crossref", "journal", "paper"))
+               for term in ("academic", "openalex", "crossref", "journal", "paper", "arxiv", "europe_pmc"))
     )
     official = sum(
         1 for item in normalized
@@ -1073,6 +1390,10 @@ def summarize_source_coverage(sources: list[dict[str, str]]) -> dict[str, int]:
         "academic_sources": academic,
         "official_sources": official,
         "community_sources": community,
+        "news_sources": sum(1 for item in normalized if "gdelt_news" in str(item.get("source_type") or "").casefold()),
+        "preprint_sources": sum(1 for item in normalized if "arxiv" in str(item.get("source_type") or "").casefold()),
+        "biomedical_sources": sum(1 for item in normalized if "europe_pmc" in str(item.get("source_type") or "").casefold()),
+        "documentation_sources": sum(1 for item in normalized if "official_software_docs" in str(item.get("source_type") or "").casefold()),
     }
 
 
@@ -1089,7 +1410,7 @@ def build_source_context(query: str, sources: list[dict[str, str]]) -> str:
         "Si hay pocas fuentes, dominios repetidos o fechas ausentes, declara esa limitación. "
         "No describas la búsqueda como exhaustiva ni como consenso por el mero número de resultados.",
     ]
-    for index, source in enumerate(sources[:6], start=1):
+    for index, source in enumerate(sources[:8], start=1):
         source_type = str(source.get("source_type") or "public_web")[:40]
         domain = str(source.get("domain") or "")[:120]
         date = str(
@@ -1097,12 +1418,16 @@ def build_source_context(query: str, sources: list[dict[str, str]]) -> str:
             or source.get("date") or source.get("year") or "No indicada"
         )[:50]
         author = str(source.get("author") or source.get("authors") or "No indicado")[:180]
+        date_label = (
+            "Fecha de indexación indicada por GDELT (no equivale necesariamente a publicación)"
+            if source.get("indexed_at") else "Fecha de publicación declarada"
+        )
         blocks.extend([
             f"FUENTE [{index}]",
             f"Título: {str(source.get('title') or 'Sin título')[:120]}",
             f"Dominio: {domain[:100]}",
             f"Tipo de fuente: {source_type}",
-            f"Fecha de publicación declarada: {date[:40]}",
+            f"{date_label}: {str(source.get('indexed_at') or date)[:50]}",
             f"Autoría declarada: {author[:100]}",
             f"URL: {str(source.get('url') or '')[:280]}",
             f"Atribución/licencia: {str(source.get('attribution') or 'Consulta la licencia del sitio original.')[:120]}",
