@@ -17,6 +17,7 @@ import socket
 import sys
 import unicodedata
 import tempfile
+from email.utils import parsedate_to_datetime
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -299,6 +300,7 @@ def init_db():
         db.execute("CREATE INDEX IF NOT EXISTS idx_gifts_target ON gifts(target_uid, id DESC)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_users_points ON users(points DESC)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_users_activity ON users(message_count DESC)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_users_nickname_last_seen ON users(lower(nickname), last_seen DESC)")
         db.execute("""CREATE TABLE IF NOT EXISTS chat_settings (
             thread_id TEXT NOT NULL,
             setting_key TEXT NOT NULL,
@@ -321,6 +323,9 @@ def init_db():
             removed_by TEXT
         )""")
         db.execute("CREATE INDEX IF NOT EXISTS idx_warnings_target ON moderation_warnings(thread_id,target_uid,active,id DESC)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_warnings_target_uid ON moderation_warnings(target_uid)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_warnings_moderator_uid ON moderation_warnings(moderator_uid)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_warnings_created_at ON moderation_warnings(created_at)")
         db.execute("""CREATE TABLE IF NOT EXISTS dj_playlists (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             thread_id TEXT NOT NULL,
@@ -349,6 +354,7 @@ def init_db():
             PRIMARY KEY(thread_id, uid, day_key)
         )""")
         db.execute("CREATE INDEX IF NOT EXISTS idx_activity_daily_day ON chat_activity_daily(thread_id,day_key)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_activity_daily_retention ON chat_activity_daily(day_key)")
         db.execute("""CREATE TABLE IF NOT EXISTS chat_activity_hourly (
             thread_id TEXT NOT NULL,
             day_key TEXT NOT NULL,
@@ -356,6 +362,7 @@ def init_db():
             message_count INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(thread_id, day_key, hour_of_day)
         )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_activity_hourly_retention ON chat_activity_hourly(day_key)")
         db.execute("""CREATE TABLE IF NOT EXISTS admin_audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             thread_id TEXT NOT NULL,
@@ -366,6 +373,7 @@ def init_db():
             created_at REAL NOT NULL
         )""")
         db.execute("CREATE INDEX IF NOT EXISTS idx_admin_audit_thread ON admin_audit_log(thread_id,id DESC)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_admin_audit_created_at ON admin_audit_log(created_at)")
         db.execute("""CREATE TABLE IF NOT EXISTS auto_reply_rules (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             thread_id TEXT NOT NULL,
@@ -1510,6 +1518,25 @@ async def pin_public_https_url(value: str) -> tuple[str, dict, dict]:
     return pinned_url, {"Host": host}, {"sni_hostname": host}
 
 
+def retry_after_seconds(value: Any) -> float | None:
+    """Parse standard Retry-After values (delta-seconds or HTTP-date)."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        seconds = float(raw)
+        return max(0.0, seconds) if seconds >= 0 else None
+    except (TypeError, ValueError, OverflowError):
+        pass
+    try:
+        retry_at = parsedate_to_datetime(raw)
+        if retry_at.tzinfo is None:
+            return None
+        return max(0.0, (retry_at - datetime.now(retry_at.tzinfo)).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 async def external_request(method: str, url: str, **kwargs):
     """HTTP compartido con telemetría, DNS pinning opcional y límites de lectura."""
     safe_public = bool(kwargs.pop("safe_public", False))
@@ -1631,11 +1658,8 @@ async def external_request(method: str, url: str, **kwargs):
                         safe_retry and response.status_code in (429, 500, 502, 503, 504)
                         and attempt + 1 < attempts
                     ):
-                        retry_after = response.headers.get("Retry-After", "")
-                        try:
-                            delay = min(3.0, max(0.4, float(retry_after)))
-                        except (TypeError, ValueError):
-                            delay = 0.45 * (attempt + 1)
+                        retry_after = retry_after_seconds(response.headers.get("Retry-After"))
+                        delay = min(3.0, max(0.4, retry_after)) if retry_after is not None else 0.45 * (attempt + 1)
                         await asyncio.sleep(delay)
                         continue
                     return response
