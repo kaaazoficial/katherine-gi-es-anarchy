@@ -201,7 +201,6 @@ _ANARCHY_HOSTS = {
 }
 _BLOCKED_COMMUNITY_HOSTS = (
     "duckapps.com.br",
-    "kyodo.app",
 )
 _MAX_MESSAGE_URLS = 8
 _LINK_FETCH_TIMEOUT_SECONDS = 6.0
@@ -245,7 +244,7 @@ def classify_link_policy(url: str) -> dict:
 
     for blocked_root in _BLOCKED_COMMUNITY_HOSTS:
         if host == blocked_root or host.endswith("." + blocked_root):
-            label = "Ducks" if blocked_root == "duckapps.com.br" else "Kyodo"
+            label = "Ducks"
             return {
                 "blocked": True,
                 "reason": f"Los enlaces a {label} no están permitidos en esta comunidad.",
