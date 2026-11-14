@@ -80,6 +80,7 @@ def render_prometheus_metrics(
         ("katherine_ai_provider_input_tokens", "ai_provider_input_tokens", "Input tokens reported by the AI provider."),
         ("katherine_ai_provider_output_tokens", "ai_provider_output_tokens", "Output tokens reported by the AI provider."),
         ("katherine_ai_provider_responses_completed", "ai_provider_responses_completed", "Structured AI responses completed."),
+        ("katherine_ai_provider_token_usage_responses", "ai_provider_token_usage_responses", "Successful AI responses with token usage reported by the provider."),
         ("katherine_ai_provider_failovers", "ai_provider_failovers", "AI requests completed through a backup provider."),
         ("katherine_ai_provider_primary_failures", "ai_provider_primary_failures", "AI provider failures before fallback."),
         ("katherine_ai_provider_circuit_opened", "ai_provider_circuit_opened", "Times an AI provider circuit breaker opened."),
