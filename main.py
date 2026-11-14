@@ -62,6 +62,7 @@ from katherine_research import (
     is_safe_public_url,
  )
 from katherine_utilities import calculate_expression, format_calculation_result
+from katherine_images import validate_avatar_image_bytes
 from katherine_link_analysis import (
     inspect_message_links,
     extract_message_urls,
@@ -7619,6 +7620,15 @@ async def resolve_avatar_image(source_url: str) -> tuple[bytes, str]:
             continue
         if len(image_bytes) > AVATAR_MAX_BYTES:
             last_problem = "La imagen supera el límite de 512 KB que acepta Anarchy Apps."
+            continue
+        try:
+            validate_avatar_image_bytes(
+                image_bytes,
+                mime,
+                max_bytes=AVATAR_MAX_BYTES,
+            )
+        except ValueError as exc:
+            last_problem = str(exc)
             continue
 
         return image_bytes, mime

@@ -12,7 +12,7 @@ import logging
 import os
 import re
 import time
-import xml.etree.ElementTree as ET
+from defusedxml import ElementTree as ET
 from html.parser import HTMLParser
 from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, quote, urljoin, urlsplit, urlunsplit
@@ -152,15 +152,79 @@ class _PageParser(HTMLParser):
             self.text_parts.append(data)
 
 
+def _selectolax_prepare_html(markup: str) -> tuple[str, str, str]:
+    """Use the fast HTML5 parser to remove non-content regions and expose a fallback."""
+    from selectolax.lexbor import LexborHTMLParser
+
+    tree = LexborHTMLParser(markup)
+    title_node = tree.css_first("title")
+    title = _plain(title_node.text(separator=" ", strip=True), 180) if title_node else ""
+
+    for node in tree.css(
+        "script, style, noscript, svg, nav, footer, header, form, iframe, "
+        "aside, template"
+    ):
+        node.decompose()
+
+    body = tree.body or tree.root
+    fallback_text = body.text(separator=" ", strip=True) if body else ""
+    cleaned_markup = body.html if body and body.tag == "body" else (
+        tree.root.html if tree.root else markup
+    )
+    return title, cleaned_markup, _plain(fallback_text, 5000)
+
+
 def extract_page_content(markup: str) -> tuple[str, str]:
-    """Extract a bounded title and readable text from an HTML page."""
+    """Extract bounded page text with Trafilatura, Selectolax and a stdlib fallback.
+
+    The HTML source is already size-limited by fetch_public_page. No extraction
+    cache is used, so page contents are not retained between requests.
+    """
+    raw = str(markup or "")[:600_000]
+    if not raw:
+        return "", ""
+
+    title = ""
+    selectolax_text = ""
+    cleaned_markup = raw
+    try:
+        title, cleaned_markup, selectolax_text = _selectolax_prepare_html(raw)
+    except Exception:
+        # Keep extraction available if a malformed document defeats the fast parser.
+        pass
+
+    extracted_text = ""
+    try:
+        import trafilatura
+
+        extracted = trafilatura.extract(
+            cleaned_markup,
+            output_format="txt",
+            include_comments=False,
+            include_tables=False,
+            include_links=False,
+            favor_precision=True,
+            fast=True,
+            deduplicate=False,
+            max_tree_size=600_000,
+        )
+        extracted_text = _plain(extracted or "", 5000)
+    except Exception:
+        # The Selectolax and stdlib paths below are deliberately independent.
+        pass
+
+    if len(extracted_text) >= 80:
+        return title, extracted_text[:5000]
+    if len(selectolax_text) >= 80:
+        return title, selectolax_text[:5000]
+
     parser = _PageParser()
-    parser.feed(str(markup or "")[:600_000])
-    title = _plain(" ".join(parser.title_parts), 180)
+    parser.feed(raw)
+    fallback_title = _plain(" ".join(parser.title_parts), 180)
     text = re.sub(r"[ \t]+", " ", " ".join(parser.text_parts))
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     compact = re.sub(r"\s+", " ", " ".join(lines)).strip()
-    return title, compact[:5000]
+    return title or fallback_title, (compact or selectolax_text)[:5000]
 
 
 def _unwrap_search_link(value: str) -> str | None:

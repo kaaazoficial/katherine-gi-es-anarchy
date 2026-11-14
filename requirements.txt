@@ -11,3 +11,9 @@ edge-tts>=7.0.0
 pydantic-settings>=2.16.2,<3.0.0
 rapidfuzz>=3.14.6,<4.0.0
 prometheus-client>=0.26.0,<1.0.0
+
+# Bounded HTML extraction, HTML5 parsing, image validation and hardened XML.
+trafilatura>=2.3.1,<3.0.0
+selectolax>=1.0.2,<2.0.0
+Pillow>=13.0.0,<14.0.0
+defusedxml>=0.7.1,<1.0.0
