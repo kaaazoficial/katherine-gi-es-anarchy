@@ -2609,12 +2609,12 @@ def build_commands_help_text() -> str:
     """Complete command index in compact plain text; no interactive buttons."""
     groups = [
         ("AYUDA E INTELIGENCIA ARTIFICIAL", [
-            f"{PREFIX}ayuda / {PREFIX}comandos / {PREFIX}menu — muestra esta guía.",
+            f"{PREFIX}ayuda / {PREFIX}comandos / {PREFIX}menu / {PREFIX}menú — muestra esta guía.",
             f"{PREFIX}asistente <consulta> — conversación y solicitudes en lenguaje natural.",
             f"{PREFIX}ia ayuda — guía; {PREFIX}ia preguntar <consulta> — chat; {PREFIX}ia genshin <consulta> — consulta de Teyvat.",
             f"{PREFIX}ia estado — proveedor y sesión; {PREFIX}ia olvidar — borra contexto temporal.",
-            f"{PREFIX}ia investigar|enlace|musica|traducir — investigación, páginas, búsqueda musical y traducción.",
-            f"{PREFIX}investigar|investiga|investigacion <tema> — investigación; admite comparar, verificar, cronologia e informe.",
+            f"{PREFIX}ia investigar <tema>|{PREFIX}ia enlace <URL>|{PREFIX}ia musica <estilo>|{PREFIX}ia traducir <idioma> | <texto>.",
+            f"{PREFIX}investigar|{PREFIX}investiga|{PREFIX}investigacion|{PREFIX}investigación <tema> — investigación: comparar, verificar, cronologia o informe.",
             f"{PREFIX}enlace|analizarenlace|leerweb <URL> — analiza una página pública.",
             f"{PREFIX}ia probar|trazas|guardian|analista|diagnostico — diagnóstico y controles [ADMIN].",
         ]),
@@ -2631,9 +2631,12 @@ def build_commands_help_text() -> str:
         ("SOCIAL Y PERFILES", [
             f"{PREFIX}perfil [@usuario] — consulta perfil; {PREFIX}bio <texto> — edita biografía.",
             f"{PREFIX}miestado <texto> — actualiza estado; {PREFIX}actividad [hoy|semana] — actividad.",
-            f"{PREFIX}interaccion @usuario — acciones sociales; también: abrazo, abrazar, beso, besar, patada, golpe, cachetada.",
-            "Más acciones: acariciar, mimar, morder, consolar, felicitar, saludar, proteger, bailar, cosquillas, chocar, highfive.",
-            "Otras acciones: ayudar, regalar, acompañar, asustar, curar, cargar, empujar, regañar, admirar, apoyar, dormir, ignorar, mirar e invitar.",
+            f"{PREFIX}interaccion @usuario — acciones sociales; también puedes usar comandos directos:",
+            f"{PREFIX}abrazo|{PREFIX}abrazar|{PREFIX}beso|{PREFIX}besar|{PREFIX}patada|{PREFIX}golpe|{PREFIX}cachetada @usuario.",
+            f"{PREFIX}acariciar|{PREFIX}mimar|{PREFIX}morder|{PREFIX}consolar|{PREFIX}felicitar|{PREFIX}saludar|{PREFIX}proteger @usuario.",
+            f"{PREFIX}bailar|{PREFIX}cosquillas|{PREFIX}chocar|{PREFIX}highfive|{PREFIX}ayudar|{PREFIX}regalar|{PREFIX}acompañar @usuario.",
+            f"{PREFIX}asustar|{PREFIX}curar|{PREFIX}cargar|{PREFIX}empujar|{PREFIX}regañar|{PREFIX}admirar|{PREFIX}apoyar @usuario.",
+            f"{PREFIX}dormir|{PREFIX}ignorar|{PREFIX}mirar|{PREFIX}invitar @usuario.",
             f"{PREFIX}roast @usuario — broma; {PREFIX}afinidad|amistad @usuario — vínculo.",
             f"{PREFIX}regalo @usuario [mensaje] — envía regalo; {PREFIX}muro — regalos recibidos.",
         ]),
@@ -2645,7 +2648,7 @@ def build_commands_help_text() -> str:
             f"{PREFIX}duelo @usuario — reta; {PREFIX}ship <usuario1> <usuario2> — compatibilidad.",
             f"{PREFIX}azar <mínimo> <máximo> — número; {PREFIX}verdad — pregunta; {PREFIX}dado / {PREFIX}moneda — azar.",
             f"{PREFIX}8ball <pregunta> — respuesta; {PREFIX}chiste / {PREFIX}frase / {PREFIX}reto / {PREFIX}suerte — entretenimiento.",
-            f"{PREFIX}evento|eventos — eventos de comunidad; crear, consultar estado o cerrar según permisos.",
+            f"{PREFIX}evento|{PREFIX}eventos — eventos de comunidad; crear, consultar estado o cerrar según permisos.",
         ]),
         ("MÚSICA Y VOZ", [
             f"{PREFIX}join — entra a la llamada; {PREFIX}salirsala — sale; {PREFIX}salas — lista salas.",
