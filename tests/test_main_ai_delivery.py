@@ -520,3 +520,4 @@ def test_command_help_is_compact_and_keeps_main_categories():
     assert len(help_text) < 1500
     assert "TEYVAT" in help_text and "MÚSICA Y VOZ" in help_text
     assert "!menu" in help_text and "UID autorizado" in help_text
+    assert "salirsala" in help_text and "mantiene la llamada" in help_text
