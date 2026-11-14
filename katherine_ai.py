@@ -580,7 +580,7 @@ def classify_request_intent(
         "enviar", "regala", "regalar", "actualiza", "cambia", "borra",
         "elimina", "reinicia", "transfiere", "paga", "lanza", "tira",
         "juega", "inicia", "activa", "desactiva", "conecta", "entra",
-        "unete", "lee", "deja de leer", "resume", "investiga",
+        "unete", "lee", "deja de leer", "resume", "investiga", "calcula", "calcular", "resuelve",
         "investigar", "analiza", "analizar", "revisa",
     )
     action_count = sum(
