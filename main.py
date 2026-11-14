@@ -10754,6 +10754,27 @@ Uso: !enciclopedia <nombre>""",
             f"IA proveedor: {int(AI_CORE.metrics.get('ai_provider_requests', 0))} solicitudes · {int(AI_CORE.metrics.get('ai_provider_429', 0))} límites 429 · {int(AI_CORE.metrics.get('ai_provider_retries', 0))} reintentos",
             f"IA tokens: {int(AI_CORE.metrics.get('ai_provider_input_tokens', 0))} entrada · {int(AI_CORE.metrics.get('ai_provider_output_tokens', 0))} salida · {AI_CORE.metrics.get('ai_provider_queue_wait_seconds', 0):.1f} s de espera acumulada",
             *(
+                lambda costs: (
+                    [
+                        "Coste IA estimado por proveedor/modelo (USD, tarifas públicas estándar):",
+                        *[
+                            (
+                                f"  {item['provider']} · {item['model']}: "
+                                f"${item['estimated_cost_usd']:.6f}"
+                            )
+                            if item["cost_known"] else
+                            f"  {item['provider']} · {item['model']}: sin tarifa configurada"
+                            for item in costs
+                        ],
+                        (
+                            f"Total estimado con tarifas conocidas: "
+                            f"${sum(item.get('estimated_cost_usd', 0.0) for item in costs if item['cost_known']):.6f} USD"
+                        ),
+                    ]
+                    if costs else ["Coste IA estimado: aún sin uso registrado"]
+                )
+            )(AI_CORE.provider_usage_snapshot()),
+            *(
                 lambda usage: [
                     (
                         f"Promedio por respuesta ({usage['usage_responses']} con uso informado): "
