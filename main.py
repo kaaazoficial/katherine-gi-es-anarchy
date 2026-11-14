@@ -4,6 +4,7 @@ import os
 import re
 import json
 import importlib
+import threading
 import time
 import hmac
 import hashlib
@@ -39,66 +40,70 @@ TTS_IMPORT_ERROR = ""
 _LIVEKIT_IMPORT_ATTEMPTED = False
 _AUDIO_IMPORT_ATTEMPTED = False
 _TTS_IMPORT_ATTEMPTED = False
+_OPTIONAL_IMPORT_LOCK = threading.RLock()
 
 
 def load_livekit_dependency() -> bool:
     """Load LiveKit only when a voice room is actually requested."""
     global livekit_rtc, DJ_IMPORT_ERROR, _LIVEKIT_IMPORT_ATTEMPTED
-    if livekit_rtc is not None:
-        return True
-    if _LIVEKIT_IMPORT_ATTEMPTED:
-        return False
-    _LIVEKIT_IMPORT_ATTEMPTED = True
-    try:
-        livekit_rtc = importlib.import_module("livekit.rtc")
-        DJ_IMPORT_ERROR = ""
-        return True
-    except Exception as exc:
-        livekit_rtc = None
-        DJ_IMPORT_ERROR = str(exc)[:240]
-        logging.warning("[VOZ] LiveKit no está disponible: %s", type(exc).__name__)
-        return False
+    with _OPTIONAL_IMPORT_LOCK:
+        if livekit_rtc is not None:
+            return True
+        if _LIVEKIT_IMPORT_ATTEMPTED:
+            return False
+        _LIVEKIT_IMPORT_ATTEMPTED = True
+        try:
+            livekit_rtc = importlib.import_module("livekit.rtc")
+            DJ_IMPORT_ERROR = ""
+            return True
+        except Exception as exc:
+            livekit_rtc = None
+            DJ_IMPORT_ERROR = str(exc)[:240]
+            logging.warning("[VOZ] LiveKit no está disponible: %s", type(exc).__name__)
+            return False
 
 
 def load_audio_dependencies() -> bool:
     """Load PyAV and NumPy on demand for actual audio decoding/playback."""
     global pyav, np, DJ_IMPORT_ERROR, _AUDIO_IMPORT_ATTEMPTED
-    if pyav is not None and np is not None:
+    with _OPTIONAL_IMPORT_LOCK:
+        if pyav is not None and np is not None:
+            return load_livekit_dependency()
+        if _AUDIO_IMPORT_ATTEMPTED:
+            return False
+        _AUDIO_IMPORT_ATTEMPTED = True
+        try:
+            loaded_av = importlib.import_module("av")
+            loaded_numpy = importlib.import_module("numpy")
+        except Exception as exc:
+            pyav = None
+            np = None
+            DJ_IMPORT_ERROR = str(exc)[:240]
+            logging.warning("[DJ] Dependencias de audio no disponibles: %s", type(exc).__name__)
+            return False
+        pyav = loaded_av
+        np = loaded_numpy
         return load_livekit_dependency()
-    if _AUDIO_IMPORT_ATTEMPTED:
-        return False
-    _AUDIO_IMPORT_ATTEMPTED = True
-    try:
-        loaded_av = importlib.import_module("av")
-        loaded_numpy = importlib.import_module("numpy")
-    except Exception as exc:
-        pyav = None
-        np = None
-        DJ_IMPORT_ERROR = str(exc)[:240]
-        logging.warning("[DJ] Dependencias de audio no disponibles: %s", type(exc).__name__)
-        return False
-    pyav = loaded_av
-    np = loaded_numpy
-    return load_livekit_dependency()
 
 
 def load_tts_dependency() -> bool:
     """Load Edge TTS only when reading aloud is enabled."""
     global edge_tts, TTS_IMPORT_ERROR, _TTS_IMPORT_ATTEMPTED
-    if edge_tts is not None:
-        return True
-    if _TTS_IMPORT_ATTEMPTED:
-        return False
-    _TTS_IMPORT_ATTEMPTED = True
-    try:
-        edge_tts = importlib.import_module("edge_tts")
-        TTS_IMPORT_ERROR = ""
-        return True
-    except Exception as exc:
-        edge_tts = None
-        TTS_IMPORT_ERROR = str(exc)[:240]
-        logging.warning("[TTS] Edge TTS no está disponible: %s", type(exc).__name__)
-        return False
+    with _OPTIONAL_IMPORT_LOCK:
+        if edge_tts is not None:
+            return True
+        if _TTS_IMPORT_ATTEMPTED:
+            return False
+        _TTS_IMPORT_ATTEMPTED = True
+        try:
+            edge_tts = importlib.import_module("edge_tts")
+            TTS_IMPORT_ERROR = ""
+            return True
+        except Exception as exc:
+            edge_tts = None
+            TTS_IMPORT_ERROR = str(exc)[:240]
+            logging.warning("[TTS] Edge TTS no está disponible: %s", type(exc).__name__)
+            return False
 
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from contextvars import ContextVar
