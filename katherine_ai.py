@@ -199,7 +199,7 @@ AI_COMMAND_CATALOG = {
     "subirvolumen": "sin argumentos: aumenta volumen.",
     "bajarvolumen": "sin argumentos: reduce volumen.",
     "silencio": "sin argumentos: silencia audio.",
-};
+}
 
 GROQ_STRICT_JSON_MODELS = frozenset({
     "openai/gpt-oss-20b",

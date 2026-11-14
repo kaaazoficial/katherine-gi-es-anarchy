@@ -7,12 +7,14 @@ on:
       - "**/*.py"
       - "requirements*.txt"
       - ".github/workflows/quality-security.yml"
+      - "ruff.toml"
   pull_request:
     branches: [main]
     paths:
       - "**/*.py"
       - "requirements*.txt"
       - ".github/workflows/quality-security.yml"
+      - "ruff.toml"
   workflow_dispatch:
 
 permissions:
@@ -48,12 +50,8 @@ jobs:
           python -m pip install -r requirements-dev.txt
           python -m pip install -r requirements.txt
 
-      - name: Ruff undefined-name gate
-        run: ruff check . --select F821 --output-format=github
-
-      - name: Ruff full baseline report
+      - name: Ruff correctness gate
         run: ruff check . --output-format=github
-        continue-on-error: true
 
       - name: Bandit high-severity security gate
         run: bandit -r . -x ./tests,./.git -lll
