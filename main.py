@@ -3386,9 +3386,20 @@ async def audio_mixer_loop(thread_id: str) -> None:
         )
         if not len(mixed):
             continue
-        audio_frame = livekit_rtc.AudioFrame.create(48000, 1, len(mixed))
+        # LiveKit voice frames use a consistent 10 ms cadence at 48 kHz.
+        if len(mixed) < DJ_MIXER_FRAME_SAMPLES:
+            mixed = np.pad(
+                mixed,
+                (0, DJ_MIXER_FRAME_SAMPLES - len(mixed)),
+                mode="constant",
+            )
+        elif len(mixed) > DJ_MIXER_FRAME_SAMPLES:
+            mixed = mixed[:DJ_MIXER_FRAME_SAMPLES]
+        audio_frame = livekit_rtc.AudioFrame.create(
+            48000, 1, DJ_MIXER_FRAME_SAMPLES
+        )
         destination = np.frombuffer(audio_frame.data, dtype=np.int16)
-        destination[:len(mixed)] = mixed
+        destination[:DJ_MIXER_FRAME_SAMPLES] = mixed
         try:
             await state["audio_source"].capture_frame(audio_frame)
         except asyncio.CancelledError:
@@ -3941,6 +3952,7 @@ async def disable_room_reading(thread_id: str):
         except asyncio.CancelledError:
             pass
     state["speaking"].clear()
+    await drain_audio_queue(state.get("speech_audio_queue"))
     return True, "Lectura en voz alta desactivada. Katherine seguirá dentro de la llamada."
 
 
