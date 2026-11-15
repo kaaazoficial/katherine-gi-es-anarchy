@@ -996,6 +996,11 @@ DJ_MIXER_PREBUFFER_FRAMES = 10
 DJ_MIXER_MAX_PENDING_FRAMES = 12
 DJ_AUDIO_SOURCE_QUEUE_MS = 250
 DJ_AUDIO_ENQUEUE_TIMEOUT_SECONDS = 3.0
+DJ_AUDIO_FILE_CACHE_TTL_SECONDS = 900
+DJ_AUDIO_FILE_CACHE_MAX_BYTES = 100 * 1024 * 1024
+DJ_AUDIO_FILE_CACHE_MAX_ENTRIES = 5
+DJ_AUDIO_FILE_CACHE: dict[str, dict] = {}
+DJ_AUDIO_DOWNLOAD_LOCKS = weakref.WeakKeyDictionary()
 JAMENDO_CLIENT_ID = os.getenv("JAMENDO_CLIENT_ID", "").strip()
 IA_BASE = "https://archive.org"
 JAMENDO_API = "https://api.jamendo.com/v3.0/tracks/"
@@ -1204,11 +1209,12 @@ def cleanup_expired_state():
             BOT_SENT_MESSAGES.pop(key, None)
     AI_CORE.cleanup(now=now)
 
-    # Expire process-local catalogs, user favorites and transient identifiers.
+    # Expire process-local catalogs, downloaded audio and transient identifiers.
     for store in (DJ_ARCHIVE_CACHE, DJ_SOURCE_CACHE):
         for key, item in list(store.items()):
             if not isinstance(item, dict) or float(item.get("expires", 0) or 0) <= now:
                 store.pop(key, None)
+    cleanup_dj_audio_file_cache(now=now)
     monotonic_now = time.monotonic()
     for host, expires_at in list(DJ_SOURCE_COOLDOWNS.items()):
         if float(expires_at or 0) <= monotonic_now:
@@ -5032,7 +5038,7 @@ async def stop_dj_room(
         temporary_audio = state.get("temporary_audio_path")
         if temporary_audio:
             try:
-                Path(temporary_audio).unlink(missing_ok=True)
+                cleanup_dj_audio_file(temporary_audio)
             except OSError:
                 logging.warning("[DJ] No pude borrar el audio temporal de %s", thread_id)
 
@@ -5119,7 +5125,7 @@ async def stop_dj_playback(thread_id: str) -> bool:
         temporary = queued.get("temporary") if isinstance(queued, dict) else None
         if temporary:
             try:
-                Path(temporary).unlink(missing_ok=True)
+                cleanup_dj_audio_file(temporary)
             except OSError:
                 logging.warning("[DJ] No pude borrar un archivo pendiente de %s", key)
     queue = state.get("queue")
@@ -5128,7 +5134,7 @@ async def stop_dj_playback(thread_id: str) -> bool:
     temporary_audio = state.get("temporary_audio_path")
     if temporary_audio:
         try:
-            Path(temporary_audio).unlink(missing_ok=True)
+            cleanup_dj_audio_file(temporary_audio)
         except OSError:
             logging.warning("[DJ] No pude borrar el audio temporal de %s", key)
     state["temporary_audio_path"] = None
@@ -5455,7 +5461,7 @@ async def enqueue_message_for_speech(event: dict, source: str):
         )
 
 
-async def download_dj_audio(url: str, file_extension: str | None = None) -> Path:
+async def _download_dj_audio_uncached(url: str, file_extension: str | None = None) -> Path:
     """Stream a catalog track to disk with allowlist, DNS pinning and strict byte caps."""
     try:
         parsed = urlparse(str(url))
@@ -5636,6 +5642,211 @@ async def download_dj_audio(url: str, file_extension: str | None = None) -> Path
             pass
         raise
 
+
+def _dj_audio_download_lock(cache_key: str) -> asyncio.Lock:
+    """Return a per-event-loop lock so duplicate requests share one download."""
+    loop = asyncio.get_running_loop()
+    locks = DJ_AUDIO_DOWNLOAD_LOCKS.get(loop)
+    if locks is None:
+        locks = {}
+        DJ_AUDIO_DOWNLOAD_LOCKS[loop] = locks
+    lock = locks.get(cache_key)
+    if lock is None:
+        if len(locks) >= 256:
+            locks.pop(next(iter(locks)), None)
+        lock = asyncio.Lock()
+        locks[cache_key] = lock
+    return lock
+
+
+def _dj_audio_cached_path_is_active(path: Path) -> bool:
+    """Protect cached files currently used by a room or queued temporary item."""
+    target = str(path.resolve())
+    for state in DJ_ROOMS.values():
+        if not isinstance(state, dict):
+            continue
+        current = state.get("temporary_audio_path")
+        if current:
+            try:
+                if str(Path(current).resolve()) == target:
+                    return True
+            except (OSError, TypeError, ValueError):
+                pass
+        for item in list(state.get("queue") or []):
+            if not isinstance(item, dict) or not item.get("temporary"):
+                continue
+            try:
+                if str(Path(item["temporary"]).resolve()) == target:
+                    return True
+            except (OSError, TypeError, ValueError):
+                continue
+    return False
+
+
+def dj_audio_path_is_cached(path: str | Path | None) -> bool:
+    """Identify cache-owned files so normal playback cleanup does not unlink them."""
+    if not path:
+        return False
+    try:
+        target = str(Path(path).resolve())
+    except (OSError, TypeError, ValueError):
+        return False
+    return any(
+        str(item.get("path") or "") == target
+        for item in DJ_AUDIO_FILE_CACHE.values()
+        if isinstance(item, dict)
+    )
+
+
+def cleanup_dj_audio_file(path: str | Path | None) -> bool:
+    """Remove ordinary temporary files, but leave cache-owned files to the TTL cleaner."""
+    if not path or dj_audio_path_is_cached(path):
+        return False
+    cleanup_dj_audio_file(path)
+    return True
+
+
+def cleanup_dj_audio_file_cache(
+    now: float | None = None,
+    protected_paths: set[str] | None = None,
+) -> int:
+    """Expire and size-bound the transient audio cache without deleting active tracks."""
+    current_time = time.time() if now is None else float(now)
+    protected = set(protected_paths or ())
+    for item in DJ_AUDIO_FILE_CACHE.values():
+        if isinstance(item, dict) and item.get("path"):
+            try:
+                candidate = Path(item["path"])
+                if _dj_audio_cached_path_is_active(candidate):
+                    protected.add(str(candidate.resolve()))
+            except (OSError, TypeError, ValueError):
+                continue
+
+    removed = 0
+    for key, item in list(DJ_AUDIO_FILE_CACHE.items()):
+        if not isinstance(item, dict):
+            DJ_AUDIO_FILE_CACHE.pop(key, None)
+            continue
+        path = Path(str(item.get("path") or ""))
+        try:
+            resolved = str(path.resolve())
+            exists = path.is_file()
+        except OSError:
+            exists = False
+            resolved = ""
+        if not exists:
+            DJ_AUDIO_FILE_CACHE.pop(key, None)
+            continue
+        if float(item.get("expires", 0) or 0) <= current_time and resolved not in protected:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                continue
+            DJ_AUDIO_FILE_CACHE.pop(key, None)
+            metrics["dj_download_cache_evictions"] += 1
+            removed += 1
+
+    def cached_size() -> int:
+        total = 0
+        for item in DJ_AUDIO_FILE_CACHE.values():
+            try:
+                total += max(0, int(item.get("size", 0)))
+            except (TypeError, ValueError, OverflowError):
+                pass
+        return total
+
+    current_size = cached_size()
+    while (
+        len(DJ_AUDIO_FILE_CACHE) > DJ_AUDIO_FILE_CACHE_MAX_ENTRIES
+        or current_size > DJ_AUDIO_FILE_CACHE_MAX_BYTES
+    ):
+        candidates = sorted(
+            DJ_AUDIO_FILE_CACHE.items(),
+            key=lambda pair: float(pair[1].get("expires", 0) or 0)
+            if isinstance(pair[1], dict) else 0.0,
+        )
+        evicted = False
+        for key, item in candidates:
+            if not isinstance(item, dict):
+                DJ_AUDIO_FILE_CACHE.pop(key, None)
+                evicted = True
+                break
+            path = Path(str(item.get("path") or ""))
+            try:
+                resolved = str(path.resolve())
+            except (OSError, TypeError, ValueError):
+                resolved = ""
+            if not resolved or resolved in protected:
+                continue
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                continue
+            try:
+                current_size -= max(0, int(item.get("size", 0)))
+            except (TypeError, ValueError, OverflowError):
+                pass
+            DJ_AUDIO_FILE_CACHE.pop(key, None)
+            metrics["dj_download_cache_evictions"] += 1
+            removed += 1
+            evicted = True
+            break
+        if not evicted:
+            break
+    return removed
+
+
+async def download_dj_audio(url: str, file_extension: str | None = None) -> Path:
+    """Reuse recently validated tracks with a bounded, process-local disk cache."""
+    source = str(url or "").strip()
+    if not dj_audio_url_allowed(source):
+        return await _download_dj_audio_uncached(source, file_extension)
+
+    key_material = source + "\\0" + str(file_extension or "")
+    cache_key = hashlib.sha256(key_material.encode("utf-8")).hexdigest()
+    async with _dj_audio_download_lock(cache_key):
+        now = time.time()
+        cached = DJ_AUDIO_FILE_CACHE.get(cache_key)
+        if isinstance(cached, dict):
+            cached_path = Path(str(cached.get("path") or ""))
+            try:
+                cached_exists = cached_path.is_file() and cached_path.stat().st_size > 0
+                cached_active = _dj_audio_cached_path_is_active(cached_path)
+            except OSError:
+                cached_exists = False
+                cached_active = False
+            if cached_exists and (
+                float(cached.get("expires", 0) or 0) > now or cached_active
+            ):
+                cached["expires"] = now + DJ_AUDIO_FILE_CACHE_TTL_SECONDS
+                cached["last_used"] = now
+                metrics["dj_download_cache_hits"] += 1
+                return cached_path
+            DJ_AUDIO_FILE_CACHE.pop(cache_key, None)
+            if cached_exists and not cached_active:
+                try:
+                    cached_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+        metrics["dj_download_cache_misses"] += 1
+        downloaded_path = await _download_dj_audio_uncached(source, file_extension)
+        try:
+            file_size = downloaded_path.stat().st_size
+        except OSError:
+            return downloaded_path
+        if 0 < file_size <= DJ_AUDIO_FILE_CACHE_MAX_BYTES:
+            cache_path = str(downloaded_path.resolve())
+            DJ_AUDIO_FILE_CACHE[cache_key] = {
+                "path": cache_path,
+                "size": file_size,
+                "expires": time.time() + DJ_AUDIO_FILE_CACHE_TTL_SECONDS,
+                "last_used": time.time(),
+            }
+            cleanup_dj_audio_file_cache(
+                protected_paths={cache_path}
+            )
+        return downloaded_path
 
 
 _AUDIO_DECODE_EOF = object()
@@ -5869,7 +6080,7 @@ async def dj_playback_loop(
     async def cleanup_temporary(path):
         if path:
             try:
-                Path(path).unlink(missing_ok=True)
+                cleanup_dj_audio_file(path)
             except OSError:
                 logging.warning("[DJ] No pude borrar una pista temporal de %s", thread_id)
 
@@ -6152,7 +6363,7 @@ async def start_dj_room(
         temporary = queued.get("temporary")
         if temporary:
             try:
-                Path(temporary).unlink(missing_ok=True)
+                cleanup_dj_audio_file(temporary)
             except OSError:
                 pass
     state["queue"].clear()
@@ -6160,7 +6371,7 @@ async def start_dj_room(
     old_temporary = state.get("temporary_audio_path")
     if old_temporary:
         try:
-            Path(old_temporary).unlink(missing_ok=True)
+            cleanup_dj_audio_file(old_temporary)
         except OSError:
             logging.warning("[DJ] No pude borrar la pista temporal anterior.")
 
