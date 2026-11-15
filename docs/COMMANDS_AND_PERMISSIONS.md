@@ -82,4 +82,13 @@ La batería determinista del enrutador se ejecuta con `pytest -q tests/test_kath
 
 ## Menciones de usuarios en respuestas
 
-Cuando el evento contiene `message.mentions` con UID y nombre, Katherine conserva `@nombre` en el texto y adjunta la referencia estructurada en el campo `mentions` del mensaje saliente. No usa sintaxis de otra plataforma como `<@UID>`. La asociación se limita al mensaje que originó la respuesta y solo vive en memoria; si no hay UID verificable, no inventa una mención.
+Anarchy incluye `message.mentions` en los eventos entrantes, por lo que Katherine puede identificar menciones recibidas. Sin embargo, el esquema documentado para enviar mensajes solo incluye `content`, `buttons` y `replyMessageId`; no documenta un campo de menciones salientes. Por eso `@nombre` se envía como texto normal y no como una mención enlazada al perfil. No se usa sintaxis de Discord ni campos no documentados.
+
+
+## Límites de moderación de enlaces
+
+Katherine inspecciona automáticamente enlaces en mensajes entrantes y en ediciones, y deja de procesar el contenido cuando detecta un destino no permitido o no verificable. La API de Anarchy no permite que un bot elimine mensajes escritos por otros usuarios: el mensaje original y su enlace siguen visibles. Katherine avisa en el chat y un moderador debe retirarlo manualmente. No se informa de una eliminación si Anarchy no la ha realizado.
+
+## Retención de actividad
+
+`!actividad` utiliza agregados diarios por usuario con un máximo de siete días de retención automática. No se guardan textos de mensajes. Los mensajes ordinarios ya no actualizan el registro general de usuarios ni un contador acumulado de por vida; los datos necesarios para funciones explícitas (por ejemplo, puntos, afinidad o recompensas) siguen sujetos a sus plazos de expiración.
