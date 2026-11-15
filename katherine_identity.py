@@ -185,7 +185,7 @@ def detect_affectionate_expression(message: str) -> str | None:
 
     if re.search(r"\b(?:te\s+amo|te\s+adoro|te\s+quiero\s+con\s+todo)\b", text):
         return "love"
-    if re.search(r"\b(?:te\s+quiero|te\s+aprecio|tqm|tkm|me\s+caes\s+muy\s+bien)\b", text):
+    if re.search(r"\b(?:te\s+quiero|te\s+aprecio|tqm|tkm|me\s+caes\s+(?:muy\s+)?bien)\b", text):
         return "care"
     if re.search(r"\b(?:gracias|mil\s+gracias|te\s+agradezco|gracias\s+por)\b", text):
         return "gratitude"
