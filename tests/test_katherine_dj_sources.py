@@ -459,3 +459,31 @@ def test_dj_remote_queue_item_is_enqueued_without_downloading(monkeypatch):
             katherine.DJ_ROOMS.pop("deferred-test", None)
 
     asyncio.run(scenario())
+
+
+
+def test_take_audio_frame_preserves_samples_and_pads_short_frames():
+    first = np.arange(700, dtype=np.int16)
+    frame1, remainder = katherine.take_audio_frame(
+        np.empty(0, dtype=np.int16), first, frame_size=480
+    )
+    assert len(frame1) == 480
+    assert np.array_equal(frame1, first[:480])
+    assert np.array_equal(remainder, first[480:])
+
+    frame2, remainder2 = katherine.take_audio_frame(
+        remainder, np.empty(0, dtype=np.int16), frame_size=480
+    )
+    assert len(frame2) == 480
+    assert np.array_equal(frame2[:220], first[480:])
+    assert np.all(frame2[220:] == 0)
+    assert len(remainder2) == 0
+
+
+def test_take_audio_frame_keeps_extra_input_for_next_tick():
+    pending = np.arange(100, dtype=np.int16)
+    incoming = np.arange(900, dtype=np.int16) + 100
+    frame, remainder = katherine.take_audio_frame(pending, incoming, frame_size=480)
+    expected = np.concatenate((pending, incoming))
+    assert np.array_equal(frame, expected[:480])
+    assert np.array_equal(remainder, expected[480:])
