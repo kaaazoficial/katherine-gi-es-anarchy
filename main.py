@@ -12844,6 +12844,19 @@ async def dispatch(event: dict, source: str):
                 return
             name_call = extract_katherine_call(incoming_text)
             if name_call is not None:
+                raw_uid = str(author_data.get("uid") or author_data.get("nickname") or "unknown")
+                if name_call:
+                    await maybe_send_spelling_feedback(
+                        str(event.get("threadId") or ""),
+                        raw_uid,
+                        str(author_data.get("nickname") or "Viajero"),
+                        incoming_text,
+                    )
+                    corrected_call = await asyncio.to_thread(
+                        detect_spanish_spelling_issues, name_call
+                    )
+                    if corrected_call:
+                        name_call = corrected_call.corrected_text
                 affection = detect_affectionate_expression(name_call)
                 if affection:
                     affectionate_replies = {
@@ -12885,20 +12898,6 @@ async def dispatch(event: dict, source: str):
                     )
                     metrics["affectionate_name_replies"] += 1
                     return
-
-            if name_call:
-                raw_uid = str(author_data.get("uid") or author_data.get("nickname") or "unknown")
-                await maybe_send_spelling_feedback(
-                    str(event.get("threadId") or ""),
-                    raw_uid,
-                    str(author_data.get("nickname") or "Viajero"),
-                    incoming_text,
-                )
-                corrected_call = await asyncio.to_thread(
-                    detect_spanish_spelling_issues, name_call
-                )
-                if corrected_call:
-                    name_call = corrected_call.corrected_text
 
             routing_text = (
                 f"Katherine, {name_call}" if name_call is not None and name_call
