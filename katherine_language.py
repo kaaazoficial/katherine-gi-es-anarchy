@@ -152,8 +152,18 @@ def detect_spanish_spelling_issues(
         return None
 
     normalized_tokens = [match.group(1).casefold() for match in tokens]
-    explicit_present = any(word in _COMMON_FIXES for word in normalized_tokens) or (
-        bool(normalized_tokens) and normalized_tokens[0] == "ola"
+    greeting_match = re.match(
+        r"^([¡!¿?]*\\s*)(ola)\\b",
+        visible,
+        flags=re.IGNORECASE,
+    )
+    explicit_greeting = bool(
+        greeting_match
+        and not _overlaps(*greeting_match.span(2), ranges)
+    )
+    explicit_present = (
+        any(word in _COMMON_FIXES for word in normalized_tokens)
+        or explicit_greeting
     )
     if not explicit_present and not any(
         word in _SPANISH_MARKERS for word in normalized_tokens
@@ -162,6 +172,12 @@ def detect_spanish_spelling_issues(
 
     checker = spell_checker or _get_spellchecker()
     replacements: list[tuple[int, int, str, str]] = []
+    if explicit_greeting and greeting_match:
+        start, end = greeting_match.span(2)
+        original_word = greeting_match.group(2)
+        replacements.append((
+            start, end, _preserve_case(original_word, "hola"), original_word
+        ))
 
     # Context resolves a few common accent pairs without guessing from a word
     # in isolation (e.g. "como estas?" -> "cómo estás?").
@@ -203,7 +219,6 @@ def detect_spanish_spelling_issues(
         if len(replacements) >= 2:
             break
 
-    first_token_start = tokens[0].start(1)
     for match in tokens:
         start, end = match.span(1)
         if _overlaps(start, end, ranges):
@@ -211,8 +226,6 @@ def detect_spanish_spelling_issues(
         word = match.group(1)
         normalized = word.casefold()
         explicit = _COMMON_FIXES.get(normalized)
-        if normalized == "ola" and start == first_token_start:
-            explicit = "hola"
         if explicit:
             replacements.append((
                 start, end, _preserve_case(word, explicit), word
@@ -234,7 +247,7 @@ def detect_spanish_spelling_issues(
                     or normalized in _CHAT_SLANG
                     or normalized in _COMMON_FIXES
                     or normalized in _AMBIGUOUS_ACCENT_WORDS
-                    or (normalized == "ola" and start == first_token_start)
+
                     or any(old == word for _a, _b, _c, old in replacements)
                     or (word.isupper() and len(word) <= 8)
                 ):
