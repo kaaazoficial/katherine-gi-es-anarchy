@@ -956,6 +956,7 @@ DJ_SEARCH_RESULT_LIMIT = 10
 DJ_TRANSITION_FADE_SECONDS = 0.5
 DJ_TTS_DUCK_GAIN = 0.28
 DJ_MIXER_FRAME_SAMPLES = 480
+DJ_MIXER_PREBUFFER_FRAMES = 5
 DJ_AUDIO_ENQUEUE_TIMEOUT_SECONDS = 3.0
 JAMENDO_CLIENT_ID = os.getenv("JAMENDO_CLIENT_ID", "").strip()
 IA_BASE = "https://archive.org"
@@ -3430,6 +3431,20 @@ async def audio_mixer_loop(thread_id: str) -> None:
                             np.asarray(incoming, dtype=np.int16).reshape(-1),
                         ))
 
+            # Buffer a short lead-in before starting a track. This absorbs
+            # small decoder/event-loop stalls without adding a long audible delay.
+            if (
+                len(pending_music)
+                and not state.get("music_buffer_started", False)
+                and not state.get("music_decoder_finished", False)
+                and not len(pending_speech)
+                and len(pending_music) < DJ_MIXER_PREBUFFER_FRAMES * DJ_MIXER_FRAME_SAMPLES
+            ):
+                await asyncio.sleep(0.002)
+                continue
+            if len(pending_music) and not state.get("music_buffer_started", False):
+                state["music_buffer_started"] = True
+
             # No se envía un flujo de silencio permanente: LiveKit solo recibe
             # frames mientras haya música o voz pendientes.
             if not len(pending_music) and not len(pending_speech):
@@ -4617,6 +4632,7 @@ async def _dj_play_single(thread_id: str, path: Path, state: dict) -> bool:
 
         return True
     finally:
+        state["music_decoder_finished"] = True
         container.close()
 
 
@@ -4651,6 +4667,8 @@ async def dj_playback_loop(
             state["filename"] = current_title
             state["track_started_at"] = time.time()
             state["skip_event"].clear()
+            state["music_buffer_started"] = False
+            state["music_decoder_finished"] = False
             played_ok = False
             try:
                 for attempt in range(3):
