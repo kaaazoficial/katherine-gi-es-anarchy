@@ -812,7 +812,8 @@ def build_ai_instructions(
     intent_text = {
         "action": (
             "ACCIÓN EXPLÍCITA: elige solo el comando que corresponde a la petición. "
-            "Respeta sus argumentos y permisos; no inventes datos ni confirmes éxito antes del resultado."
+            "Respeta sus argumentos y permisos. No inventes datos. "
+            "No confirmes éxito antes del resultado real."
         ),
         "multi_action": (
             "PLAN: máximo tres consultas independientes de solo lectura. "
