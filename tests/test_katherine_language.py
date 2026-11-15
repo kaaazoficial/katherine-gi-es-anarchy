@@ -65,3 +65,23 @@ def test_ambiguous_missing_accents_are_not_rewritten():
     assert detect_spanish_spelling_issues(
         "Esta es mi tarea, como la ves?", spell_checker=FakeSpellChecker()
     ) is None
+
+
+
+def test_question_marks_disambiguate_common_accent_errors():
+    result = detect_spanish_spelling_issues(
+        "Ola, como estas?",
+        spell_checker=FakeSpellChecker(),
+    )
+    assert result is not None
+    assert result.corrected_text == "Hola, cómo estás?"
+
+
+def test_contextual_está_correction_does_not_change_demonstrative_esta():
+    checker = FakeSpellChecker()
+    assert detect_spanish_spelling_issues(
+        "Esta bien, gracias.", spell_checker=checker
+    ).corrected_text == "Está bien, gracias."
+    assert detect_spanish_spelling_issues(
+        "Esta casa es bonita.", spell_checker=checker
+    ) is None
