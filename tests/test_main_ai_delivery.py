@@ -471,6 +471,7 @@ async def test_reply_to_katherine_routes_plain_text_to_assistant(monkeypatch):
     async def no_spelling(*_args, **_kwargs):
         return False
     monkeypatch.setattr(bot_main, "maybe_send_spelling_feedback", no_spelling)
+    monkeypatch.setattr(bot_main, "detect_spanish_spelling_issues", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(bot_main, "interpret_natural_request", lambda _text: None)
     captured = []
 
