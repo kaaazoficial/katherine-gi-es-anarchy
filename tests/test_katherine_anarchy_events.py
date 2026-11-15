@@ -18,7 +18,7 @@ def clean_voice_state():
     VOICE_ROOMS.clear()
 
 
-def test_official_room_join_and_speaker_payloads_track_speaking_state():
+def test_official_room_join_and_speaker_payloads_track_speaker_role():
     assert update_voice_room_event({
         "type": "room.join",
         "threadId": "room-1",
@@ -29,7 +29,7 @@ def test_official_room_join_and_speaker_payloads_track_speaking_state():
     participants = get_voice_participants("room-1", now=100)
     assert len(participants) == 1
     assert participants[0]["name"] == "Viajero"
-    assert participants[0]["speaking"] is False
+    assert participants[0]["speaker_role"] is False
 
     assert update_voice_room_event({
         "type": "room.speaker",
@@ -38,7 +38,7 @@ def test_official_room_join_and_speaker_payloads_track_speaking_state():
         "speaker": True,
     }, now=101)
     participants = get_voice_participants("room-1", now=101)
-    assert participants[0]["speaking"] is True
+    assert participants[0]["speaker_role"] is True
 
     assert update_voice_room_event({
         "type": "room.speaker",
@@ -47,11 +47,13 @@ def test_official_room_join_and_speaker_payloads_track_speaking_state():
         "speaker": False,
     }, now=102)
     participants = get_voice_participants("room-1", now=102)
-    assert participants[0]["speaking"] is False
+    assert participants[0]["speaker_role"] is False
 
     output = format_voice_state("room-1", now=102)
     assert "Viajero" in output
     assert "u-1" not in output
+    assert "ROL DE HABLANTE" in output
+    assert "HABLANDO" not in output
 
 
 def test_room_leave_removes_only_the_departing_participant():
