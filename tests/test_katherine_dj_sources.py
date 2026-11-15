@@ -494,7 +494,7 @@ def test_take_audio_frame_keeps_extra_input_for_next_tick(monkeypatch):
 
 
 
-def test_split_complete_audio_frames_keeps_decoder_boundaries_contiguous():
+def test_split_complete_audio_frames_keeps_decoder_boundaries_contiguous(monkeypatch):
     monkeypatch.setattr(katherine, "np", np)
     first = np.arange(300, dtype=np.int16)
     second = np.arange(300, dtype=np.int16) + 300
