@@ -4,8 +4,8 @@ from __future__ import annotations
 import re
 
 
-_TAG = re.compile(r"^\\[(?:CB|C)\\]\\s*", re.IGNORECASE)
-_BULLET = re.compile(r"^(?:[-*•▪◦▸]|\\d+[.)])\\s+")
+_TAG = re.compile(r"^\[(?:CB|C)\]\s*", re.IGNORECASE)
+_BULLET = re.compile(r"^(?:[-*•▪◦▸]|\d+[.)])\s+")
 _CODE_FENCE = re.compile(r"^\\s*```")
 _TITLE_PUNCTUATION = (".", "!", "?", "…")
 
