@@ -3314,7 +3314,7 @@ def mix_audio_samples(
     speech_samples: Any,
     music_volume: float = 0.75,
     duck_gain: float = 1.0,
-) -> np.ndarray:
+) -> Any:
     """Mix one mono music/TTS frame with a peak ceiling to prevent clipping."""
     music = np.asarray(music_samples, dtype=np.int16).reshape(-1) if music_samples is not None else np.empty(0, dtype=np.int16)
     speech = np.asarray(speech_samples, dtype=np.int16).reshape(-1) if speech_samples is not None else np.empty(0, dtype=np.int16)
@@ -3362,7 +3362,7 @@ def split_complete_audio_frames(
     pending: Any,
     incoming: Any = None,
     frame_size: int = DJ_MIXER_FRAME_SAMPLES,
-) -> tuple[list[np.ndarray], np.ndarray]:
+) -> tuple[list[Any], Any]:
     """Join decoder chunks and return only full PCM frames plus the remainder."""
     buffer = np.asarray(pending, dtype=np.int16).reshape(-1)
     chunk = (
