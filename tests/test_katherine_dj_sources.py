@@ -412,49 +412,50 @@ def test_dj_mixer_ducks_music_and_limits_peak():
 
 
 def test_dj_remote_queue_item_is_enqueued_without_downloading(monkeypatch):
-    async def fake_dependencies():
-        return True
-
     async def fake_ensure(thread_id):
         return True, "connected"
 
     async def fail_download(*args, **kwargs):
         raise AssertionError("Queued tracks must not download before playback")
 
-    state = {
-        "task": __import__("asyncio").create_task(asyncio.sleep(60)),
-        "queue": __import__("collections").deque(),
-        "volume": 0.75,
-        "audio_source": object(),
-        "pause_event": asyncio.Event(),
-        "skip_event": asyncio.Event(),
-        "stop_event": asyncio.Event(),
-        "playback_stop_event": asyncio.Event(),
-    }
-    state["pause_event"].set()
-    katherine.DJ_ROOMS["deferred-test"] = state
     monkeypatch.setattr(katherine, "load_audio_dependencies", lambda: True)
     monkeypatch.setattr(katherine, "ensure_voice_room", fake_ensure)
     monkeypatch.setattr(katherine, "download_dj_audio", fail_download)
-    try:
-        ok, message = asyncio.run(katherine.start_dj_room(
-            "deferred-test",
-            "https://archive.org/download/item/song.mp3",
-            False,
-            track_metadata={"title": "Queued song", "extension": ".mp3"},
-            enqueue=True,
-        ))
-        assert ok
-        assert len(state["queue"]) == 1
-        assert state["queue"][0]["remote"] is True
-        assert state["queue"][0]["path"].startswith("https://")
-        assert "descargará" in message
-    finally:
-        task = state.get("task")
-        if task and not task.done():
-            task.cancel()
-            try:
-                asyncio.run(task)
-            except BaseException:
-                pass
-        katherine.DJ_ROOMS.pop("deferred-test", None)
+
+    async def scenario():
+        state = {
+            "task": asyncio.create_task(asyncio.sleep(60)),
+            "queue": __import__("collections").deque(),
+            "volume": 0.75,
+            "audio_source": object(),
+            "pause_event": asyncio.Event(),
+            "skip_event": asyncio.Event(),
+            "stop_event": asyncio.Event(),
+            "playback_stop_event": asyncio.Event(),
+        }
+        state["pause_event"].set()
+        katherine.DJ_ROOMS["deferred-test"] = state
+        try:
+            ok, message = await katherine.start_dj_room(
+                "deferred-test",
+                "https://archive.org/download/item/song.mp3",
+                False,
+                track_metadata={"title": "Queued song", "extension": ".mp3"},
+                enqueue=True,
+            )
+            assert ok
+            assert len(state["queue"]) == 1
+            assert state["queue"][0]["remote"] is True
+            assert state["queue"][0]["path"].startswith("https://")
+            assert "descargará" in message
+        finally:
+            task = state.get("task")
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            katherine.DJ_ROOMS.pop("deferred-test", None)
+
+    asyncio.run(scenario())
