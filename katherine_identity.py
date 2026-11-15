@@ -27,17 +27,29 @@ _GREETING_RE = re.compile(
     r"disculpa|perdona|escucha|gracias)\s*[,!:;]?\s+",
     flags=re.IGNORECASE,
 )
+_CALL_PREFIX_RE = re.compile(
+    r"^[¡!¿?]*\s*(?:oye|ey|hey|escucha|disculpa|perdona)\s*[,!:;]?\s+",
+    flags=re.IGNORECASE,
+)
 _NAME_TOKEN_RE = re.compile(
     r"(?<![\w])@?([^\W\d_][\w'-]{1,23})(?![\w])",
     flags=re.UNICODE,
 )
 _DIRECT_REQUEST_RE = re.compile(
     r"\b(?:que|qué|como|cómo|quien|quién|cuando|cuándo|donde|dónde|"
-    r"puedes|podrias|podrías|quieres|ayudame|ayúdame|ayudas|"
+    r"puedes|podrias|podrías|quieres|ayudarme|ayudame|ayúdame|ayudas|"
     r"dime|explica|explicame|explícame|revisa|mira|escucha|consulta|"
     r"busca|recomiendame|recomiéndame|cuentame|cuéntame|"
     r"haz|resuelve|enseña|ensename|enséñame|"
     r"opinas|crees|sabes|puedes|me ayudas)\b",
+    flags=re.IGNORECASE,
+)
+_DIRECT_CALL_START_RE = re.compile(
+    r"^[\s,;:!?¡¿]*(?:puedes|podrias|podrías|quieres|ayudarme|ayudame|ayúdame|"
+    r"ayudas|dime|explica|explicame|explícame|revisa|mira|escucha|consulta|"
+    r"busca|recomiendame|recomiéndame|cuentame|cuéntame|haz|resuelve|"
+    r"enseña|ensename|enséñame|me ayudas)\b"
+    r"|^[\s,;:!?¡¿]*¿\s*(?:que|qué|como|cómo|quien|quién|cuando|cuándo|donde|dónde)\b",
     flags=re.IGNORECASE,
 )
 _AFFECTION_RE = re.compile(r"\bte\s+(?:amo|quiero)\b", flags=re.IGNORECASE)
@@ -93,11 +105,9 @@ def _is_direct_vocative(text: str, match: re.Match) -> bool:
     # reference such as "Hoy hablé con Katherine en el chat".
     return bool(
         _DIRECT_REQUEST_RE.search(before)
-        or _DIRECT_REQUEST_RE.search(after)
+        or _DIRECT_CALL_START_RE.search(after)
         or "?" in before
         or "¿" in before
-        or "?" in after
-        or "¿" in after
     )
 
 
@@ -105,15 +115,21 @@ def _remove_vocative(text: str, start: int, end: int) -> str:
     """Remove the name and its adjacent vocative separators without mangling the sentence."""
     before = text[:start].rstrip()
     after = text[end:].lstrip()
+
+    # Remove an address prefix that only served to call Katherine.
+    greeting = _CALL_PREFIX_RE.match(before + " ")
+    if greeting:
+        before = before[greeting.end():].strip()
+
     if before.endswith((",", ":", ";")):
         before = before[:-1].rstrip()
-    if after.startswith((",", ":", ";")):
-        after = after[1:].lstrip()
+    after = re.sub(r"^[,;:!]+\s*", "", after)
+
     if before and after:
         result = f"{before} {after}"
     else:
         result = before or after
-    result = re.sub(r"\s+([,;:])", r"\1", result)
+    result = re.sub(r"\s+([,;:!?])", r"\1", result)
     result = re.sub(r"([,;:])(?:\s*[,;:])+", r"\1", result)
     result = re.sub(r"\s{2,}", " ", result)
     return result.strip(" ,;:—")

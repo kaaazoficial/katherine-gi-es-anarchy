@@ -3314,7 +3314,7 @@ def mix_audio_samples(
     speech_samples: Any,
     music_volume: float = 0.75,
     duck_gain: float = 1.0,
-) -> np.ndarray:
+) -> Any:
     """Mix one mono music/TTS frame with a peak ceiling to prevent clipping."""
     music = np.asarray(music_samples, dtype=np.int16).reshape(-1) if music_samples is not None else np.empty(0, dtype=np.int16)
     speech = np.asarray(speech_samples, dtype=np.int16).reshape(-1) if speech_samples is not None else np.empty(0, dtype=np.int16)
@@ -3358,11 +3358,35 @@ def take_audio_frame(pending: Any, incoming: Any, frame_size: int = DJ_MIXER_FRA
     return frame.astype(np.int16, copy=False), remainder.astype(np.int16, copy=False)
 
 
+def split_complete_audio_frames(
+    pending: Any,
+    incoming: Any = None,
+    frame_size: int = DJ_MIXER_FRAME_SAMPLES,
+) -> tuple[list[Any], Any]:
+    """Join decoder chunks and return only full PCM frames plus the remainder."""
+    buffer = np.asarray(pending, dtype=np.int16).reshape(-1)
+    chunk = (
+        np.asarray(incoming, dtype=np.int16).reshape(-1)
+        if incoming is not None else np.empty(0, dtype=np.int16)
+    )
+    if len(chunk):
+        buffer = np.concatenate((buffer, chunk))
+    complete_length = (len(buffer) // frame_size) * frame_size
+    complete = buffer[:complete_length]
+    remainder = buffer[complete_length:]
+    frames = [
+        complete[offset:offset + frame_size].copy()
+        for offset in range(0, complete_length, frame_size)
+    ]
+    return frames, remainder.copy()
+
+
 async def audio_mixer_loop(thread_id: str) -> None:
-    """Clocked 10 ms mono mixer; never drops samples from variable-sized inputs."""
+    """Mezcla audio en bloques de 10 ms, sin publicar silencio cuando no hay contenido."""
     state = DJ_ROOMS.get(str(thread_id))
     if not state:
         return
+
     music_queue = state.get("music_audio_queue")
     speech_queue = state.get("speech_audio_queue")
     pending_music = np.empty(0, dtype=np.int16)
@@ -3371,74 +3395,188 @@ async def audio_mixer_loop(thread_id: str) -> None:
     frame_seconds = DJ_MIXER_FRAME_SAMPLES / 48000.0
     loop = asyncio.get_running_loop()
     next_frame_at = loop.time()
+    consecutive_failures = 0
 
-    while not state["stop_event"].is_set():
-        # Accumulate full decoded chunks instead of truncating everything after
-        # the first 480 samples. This was cutting most TTS frames on some codecs.
-        if music_queue is not None:
-            while True:
-                try:
-                    incoming = music_queue.get_nowait()
-                except asyncio.QueueEmpty:
+    try:
+        while not state["stop_event"].is_set():
+            if DJ_ROOMS.get(str(thread_id)) is not state:
+                return
+
+            if music_queue is not None:
+                while True:
+                    try:
+                        incoming = music_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if incoming is not None and len(incoming):
+                        pending_music = np.concatenate((
+                            pending_music,
+                            np.asarray(incoming, dtype=np.int16).reshape(-1),
+                        ))
+
+            if speech_queue is not None:
+                while True:
+                    try:
+                        incoming = speech_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if incoming is not None and len(incoming):
+                        pending_speech = np.concatenate((
+                            pending_speech,
+                            np.asarray(incoming, dtype=np.int16).reshape(-1),
+                        ))
+
+            # No se envía un flujo de silencio permanente: LiveKit solo recibe
+            # frames mientras haya música o voz pendientes.
+            if not len(pending_music) and not len(pending_speech):
+                next_frame_at = loop.time()
+                await asyncio.sleep(0.01)
+                continue
+
+            has_speech = len(pending_speech) > 0 or state["speaking"].is_set()
+            target_duck = (
+                DJ_TTS_DUCK_GAIN
+                if state.get("duck_enabled", True) and has_speech
+                else 1.0
+            )
+            if target_duck < duck_gain:
+                duck_gain = max(target_duck, duck_gain - 0.18)
+            else:
+                duck_gain = min(target_duck, duck_gain + 0.04)
+
+            music_frame, pending_music = take_audio_frame(pending_music, None)
+            speech_frame, pending_speech = take_audio_frame(pending_speech, None)
+            mixed = mix_audio_samples(
+                music_frame,
+                speech_frame,
+                music_volume=state.get("volume", 0.75),
+                duck_gain=duck_gain,
+            )
+            audio_frame = livekit_rtc.AudioFrame.create(
+                48000, 1, DJ_MIXER_FRAME_SAMPLES
+            )
+            destination = np.frombuffer(audio_frame.data, dtype=np.int16)
+            destination[:DJ_MIXER_FRAME_SAMPLES] = mixed[:DJ_MIXER_FRAME_SAMPLES]
+
+            try:
+                await state["audio_source"].capture_frame(audio_frame)
+                consecutive_failures = 0
+                metrics["audio_mixer_frames_sent"] += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                consecutive_failures += 1
+                metrics["audio_mixer_capture_errors"] += 1
+                logging.warning(
+                    "[DJ_MIXER] Falló la emisión en %s (%s, intento %s/3).",
+                    thread_id, type(exc).__name__, consecutive_failures,
+                )
+                if is_livekit_audio_source_failure(exc):
+                    state["_cleanup_started"] = True
+                    state["reading_enabled"] = False
+                    state["mixer_retry_after"] = time.monotonic() + 30.0
+                    metrics["tts_livekit_source_failures"] += 1
+                    logging.error(
+                        "[TTS] LiveKit invalidó la fuente de audio en %s. "
+                        "Se desactiva la lectura para evitar bloquear la cola.",
+                        thread_id,
+                    )
                     break
-                if incoming is not None and len(incoming):
-                    pending_music = np.concatenate((pending_music, np.asarray(incoming, dtype=np.int16).reshape(-1)))
-        if speech_queue is not None:
-            while True:
-                try:
-                    incoming = speech_queue.get_nowait()
-                except asyncio.QueueEmpty:
+                if consecutive_failures >= 3:
+                    state["mixer_retry_after"] = time.monotonic() + 2.0
+                    state["mixer_consecutive_failures"] = (
+                        int(state.get("mixer_consecutive_failures", 0)) + 1
+                    )
+                    if state["mixer_consecutive_failures"] >= 3:
+                        state["reading_enabled"] = False
+                        logging.error(
+                            "[TTS] Se pausó la lectura en %s tras tres ciclos "
+                            "de fallos del mezclador.",
+                            thread_id,
+                        )
                     break
-                if incoming is not None and len(incoming):
-                    pending_speech = np.concatenate((pending_speech, np.asarray(incoming, dtype=np.int16).reshape(-1)))
+                await asyncio.sleep(0.2)
+                continue
 
-        has_speech = len(pending_speech) > 0 or state["speaking"].is_set()
-        duck_enabled = bool(state.get("duck_enabled", True))
-        target_duck = DJ_TTS_DUCK_GAIN if duck_enabled and has_speech else 1.0
-        if target_duck < duck_gain:
-            duck_gain = max(target_duck, duck_gain - 0.18)
-        else:
-            duck_gain = min(target_duck, duck_gain + 0.04)
+            next_frame_at += frame_seconds
+            delay = next_frame_at - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            else:
+                next_frame_at = loop.time()
+    finally:
+        current = asyncio.current_task()
+        if state.get("mixer_task") is current:
+            state["mixer_task"] = None
 
-        music_frame, pending_music = take_audio_frame(pending_music, None)
-        speech_frame, pending_speech = take_audio_frame(pending_speech, None)
 
-        mixed = mix_audio_samples(
-            music_frame,
-            speech_frame,
-            music_volume=state.get("volume", 0.75),
-            duck_gain=duck_gain,
-        )
-        audio_frame = livekit_rtc.AudioFrame.create(
-            48000, 1, DJ_MIXER_FRAME_SAMPLES
-        )
-        destination = np.frombuffer(audio_frame.data, dtype=np.int16)
-        destination[:DJ_MIXER_FRAME_SAMPLES] = mixed[:DJ_MIXER_FRAME_SAMPLES]
+def ensure_audio_mixer_running(thread_id: str, state: dict | None = None) -> bool:
+    """Start or recover the single LiveKit audio writer for this room."""
+    key = str(thread_id or "")
+    current = state or DJ_ROOMS.get(key)
+    if (
+        not key or not current or DJ_ROOMS.get(key) is not current
+        or current.get("stop_event") is None
+        or current["stop_event"].is_set()
+        or current.get("_cleanup_started")
+        or current.get("audio_source") is None
+    ):
+        return False
+    task = current.get("mixer_task")
+    if task is not None and not task.done():
+        return True
+    if time.monotonic() < float(current.get("mixer_retry_after", 0) or 0):
+        return False
+    current["mixer_task"] = asyncio.create_task(
+        audio_mixer_loop(key),
+        name=f"katherine-audio-mixer:{key}",
+    )
+    metrics["audio_mixer_restarts"] += 1
+    return True
 
-        try:
-            await state["audio_source"].capture_frame(audio_frame)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            if DJ_ROOMS.get(str(thread_id)) is state and not state["stop_event"].is_set():
-                logging.exception("[DJ_MIXER] Falló la salida de audio en %s", thread_id)
-            break
-
-        next_frame_at += frame_seconds
-        delay = next_frame_at - loop.time()
-        if delay > 0:
-            await asyncio.sleep(delay)
-        else:
-            # Do not burst stale frames after scheduler stalls; reset the clock.
-            next_frame_at = loop.time()
 
 async def enqueue_audio_samples(queue: asyncio.Queue | None, samples: Any) -> None:
-    """Send a bounded mono PCM chunk to the shared audio mixer."""
-    if queue is None:
+    """Encola PCM mono en bloques completos de 10 ms a 48 kHz."""
+    if queue is None or samples is None:
         return
-    array = np.asarray(samples, dtype=np.int16).reshape(-1).copy()
-    if len(array):
-        await queue.put(array)
+    array = np.asarray(samples, dtype=np.int16).reshape(-1)
+    for offset in range(0, len(array), DJ_MIXER_FRAME_SAMPLES):
+        chunk = array[offset:offset + DJ_MIXER_FRAME_SAMPLES]
+        if not len(chunk):
+            continue
+        if len(chunk) < DJ_MIXER_FRAME_SAMPLES:
+            chunk = np.pad(
+                chunk,
+                (0, DJ_MIXER_FRAME_SAMPLES - len(chunk)),
+                mode="constant",
+            )
+        await queue.put(np.asarray(chunk, dtype=np.int16).copy())
+
+
+def ensure_speech_worker_running(thread_id: str, state: dict | None = None) -> bool:
+    """Recover the TTS worker if it stopped while reading remained enabled."""
+    key = str(thread_id or "")
+    current = state or DJ_ROOMS.get(key)
+    if (
+        not key or not current or DJ_ROOMS.get(key) is not current
+        or not current.get("reading_enabled")
+        or current.get("stop_event") is None
+        or current["stop_event"].is_set()
+        or not load_tts_dependency()
+    ):
+        return False
+    task = current.get("speech_task")
+    if task is not None and not task.done():
+        return True
+    if not ensure_audio_mixer_running(key, current):
+        return False
+    current["speech_task"] = asyncio.create_task(
+        speech_queue_worker(key),
+        name=f"katherine-tts-worker:{key}",
+    )
+    metrics["tts_worker_restarts"] += 1
+    return True
+
 
 
 def find_live_room_for_thread(
@@ -3615,10 +3753,8 @@ async def ensure_voice_room(thread_id: str):
                 "started_at": time.time()
             }
             room_state = DJ_ROOMS[thread_id]
-            room_state["mixer_task"] = asyncio.create_task(
-                audio_mixer_loop(thread_id),
-                name=f"katherine-audio-mixer:{thread_id}",
-            )
+            if not ensure_audio_mixer_running(thread_id, room_state):
+                raise RuntimeError("No pude iniciar el mezclador de audio de LiveKit.")
 
             def on_livekit_disconnected(reason=None):
                 current_state = DJ_ROOMS.get(thread_id)
@@ -3796,12 +3932,60 @@ def clean_speech_text(content: str, include_links: bool = False, include_mention
 
 
 async def stream_speech_file(thread_id: str, file_path: str):
+    """Decode TTS and preserve sample continuity across PyAV decoder frames."""
     state = DJ_ROOMS.get(str(thread_id))
-    if not state:
-        return
-    if not await asyncio.to_thread(load_audio_dependencies):
+    if not state or not await asyncio.to_thread(load_audio_dependencies):
         return
     container = pyav.open(file_path, mode="r")
+    pending = np.empty(0, dtype=np.int16)
+
+    async def send_full_frames(final: bool = False) -> None:
+        nonlocal pending
+        frames, pending = split_complete_audio_frames(pending)
+        if final and len(pending):
+            final_frame = np.pad(
+                pending,
+                (0, DJ_MIXER_FRAME_SAMPLES - len(pending)),
+                mode="constant",
+            )
+            frames.append(final_frame.astype(np.int16, copy=False))
+            pending = np.empty(0, dtype=np.int16)
+
+        for frame in frames:
+            if (
+                DJ_ROOMS.get(str(thread_id)) is not state
+                or state["stop_event"].is_set()
+                or not state.get("reading_enabled")
+            ):
+                return
+            tts_volume = max(0.0, min(1.0, float(state.get("tts_volume", 0.75))))
+            if tts_volume <= 0:
+                frame = np.zeros_like(frame)
+            elif tts_volume < 1:
+                frame = np.clip(
+                    frame.astype(np.float32) * tts_volume,
+                    -32768, 32767
+                ).astype(np.int16)
+
+            # Restart the writer if it ended unexpectedly; do not fill a dead
+            # queue until the TTS worker becomes permanently blocked.
+            while not ensure_audio_mixer_running(thread_id, state):
+                if (
+                    DJ_ROOMS.get(str(thread_id)) is not state
+                    or state["stop_event"].is_set()
+                    or not state.get("reading_enabled")
+                ):
+                    return
+                await asyncio.sleep(0.1)
+            try:
+                await asyncio.wait_for(
+                    enqueue_audio_samples(state.get("speech_audio_queue"), frame),
+                    timeout=3.0,
+                )
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError("El mezclador no consume la cola de voz.") from exc
+            metrics["tts_audio_frames_enqueued"] += 1
+
     try:
         audio_stream = next(
             (stream for stream in container.streams if stream.type == "audio"),
@@ -3820,34 +4004,24 @@ async def stream_speech_file(thread_id: str, file_path: str):
                 or state["stop_event"].is_set()
                 or not state.get("reading_enabled")
             ):
-                break
+                return
             for frame in resampler.resample(decoded):
                 samples = np.asarray(frame.to_ndarray(), dtype=np.int16).reshape(-1)
-                for offset in range(0, len(samples), 480):
-                    if (
-                        DJ_ROOMS.get(str(thread_id)) is not state
-                        or state["stop_event"].is_set()
-                        or not state.get("reading_enabled")
-                    ):
-                        return
-                    chunk = samples[offset:offset + 480]
-                    if not len(chunk):
-                        continue
-                    # Volumen independiente para TTS; se lee en cada bloque para
-                    # permitir cambios en tiempo real mientras Katherine habla.
-                    tts_volume = max(
-                        0.0, min(1.0, float(state.get("tts_volume", 0.75)))
-                    )
-                    if tts_volume <= 0:
-                        chunk = np.zeros_like(chunk)
-                    elif tts_volume < 1:
-                        chunk = np.clip(
-                            chunk.astype(np.float32) * tts_volume,
-                            -32768, 32767
-                        ).astype(np.int16)
-                    await enqueue_audio_samples(
-                        state.get("speech_audio_queue"), chunk
-                    )
+                if len(samples):
+                    pending = np.concatenate((pending, samples))
+                    await send_full_frames()
+
+        # Flush any samples retained by the resampler before padding the single
+        # final partial 10 ms frame, rather than padding at every decoder boundary.
+        try:
+            for frame in resampler.resample(None):
+                samples = np.asarray(frame.to_ndarray(), dtype=np.int16).reshape(-1)
+                if len(samples):
+                    pending = np.concatenate((pending, samples))
+                    await send_full_frames()
+        except (TypeError, ValueError, AttributeError):
+            pass
+        await send_full_frames(final=True)
     finally:
         container.close()
 
@@ -3856,7 +4030,12 @@ async def speech_queue_worker(thread_id: str):
     state = DJ_ROOMS.get(str(thread_id))
     if not state or not load_tts_dependency():
         return
+    metrics["tts_worker_starts"] += 1
+    logging.info("[TTS] Worker de lectura activo en %s.", thread_id)
     while not state["stop_event"].is_set():
+        if not state.get("reading_enabled"):
+            await asyncio.sleep(0.1)
+            continue
         queue = state.get("speech_priority_queue")
         try:
             text_to_read = queue.get_nowait()
@@ -3881,7 +4060,10 @@ async def speech_queue_worker(thread_id: str):
                 state.get("tts_voice", TTS_VOICE),
                 rate=state.get("tts_rate", "+0%")
             )
-            await communicate.save(temp_path)
+            await asyncio.wait_for(communicate.save(temp_path), timeout=45.0)
+            if not Path(temp_path).is_file() or Path(temp_path).stat().st_size < 64:
+                raise RuntimeError("Edge TTS generó un archivo de audio vacío.")
+            metrics["tts_audio_files_generated"] += 1
 
             if (
                 DJ_ROOMS.get(str(thread_id)) is state
@@ -3914,8 +4096,10 @@ async def speech_queue_worker(thread_id: str):
                                     break
                     state["speech_task"] = None
                 break
+            metrics["tts_read_errors"] += 1
             logging.warning(
-                "[TTS] No se pudo leer un mensaje | error=%s | detalle=%s",
+                "[TTS] No se pudo leer un mensaje en %s | error=%s | detalle=%s",
+                thread_id,
                 type(exc).__name__,
                 sanitize_ai_trace_text(exc, 240),
             )
@@ -3942,11 +4126,16 @@ async def enable_room_reading(thread_id: str):
 
     state = DJ_ROOMS[str(thread_id)]
     state["reading_enabled"] = True
-    task = state.get("speech_task")
-    if task is None or task.done():
-        state["speech_task"] = asyncio.create_task(
-            speech_queue_worker(str(thread_id))
+    if not ensure_audio_mixer_running(str(thread_id), state):
+        state["reading_enabled"] = False
+        return False, (
+            "La salida de audio todavía se está recuperando. "
+            "Vuelve a ejecutar !leer en unos segundos."
         )
+    if not ensure_speech_worker_running(str(thread_id), state):
+        state["reading_enabled"] = False
+        return False, "No pude iniciar el lector TTS. Revisa los registros de audio e inténtalo otra vez."
+    logging.info("[TTS] Lectura habilitada en %s.", thread_id)
     return True, "Lectura en voz alta activada. Leeré los mensajes de texto de esta sala."
 
 
@@ -4041,9 +4230,11 @@ async def enqueue_message_for_speech(event: dict, source: str):
         return
     recent[digest] = now
     is_directed = bool(re.match(r"^(?:oye[, ]+)?katherine\b", content, flags=re.I))
+    priority_queue = state.get("speech_priority_queue")
     queue = (
-        state.get("speech_priority_queue") or state["speech_queue"]
-        if is_directed else state["speech_queue"]
+        priority_queue
+        if is_directed and priority_queue is not None
+        else state["speech_queue"]
     )
     if queue.full():
         try:
@@ -4053,9 +4244,20 @@ async def enqueue_message_for_speech(event: dict, source: str):
             pass
     try:
         queue.put_nowait(speech_text)
+        logging.info(
+            "[TTS] Mensaje encolado en %s (%s caracteres; prioridad=%s).",
+            thread_id, len(speech_text), is_directed,
+        )
+        metrics["tts_messages_enqueued"] += 1
         metrics["tts_priority_enqueued" if is_directed else "tts_regular_enqueued"] += 1
+        ensure_audio_mixer_running(thread_id, state)
+        ensure_speech_worker_running(thread_id, state)
     except asyncio.QueueFull:
-        logging.warning("[TTS] Cola %s llena; se omitió un mensaje en %s", "prioritaria" if is_directed else "normal", thread_id)
+        metrics["tts_messages_dropped"] += 1
+        logging.warning(
+            "[TTS] Cola %s llena; se omitió un mensaje en %s",
+            "prioritaria" if is_directed else "normal", thread_id
+        )
 
 
 async def download_dj_audio(url: str, file_extension: str | None = None) -> Path:
@@ -11723,7 +11925,7 @@ Uso: !enciclopedia <nombre>""",
 
             test_query = " ".join(args[1:]).strip() or "ambient instrumental"
             normalized_query = clean_archive_value(test_query, 80)
-            archive_terms = re.findall(r"[\\wáéíóúñü-]+", normalized_query, flags=re.I)[:5]
+            archive_terms = re.findall(r"[\wáéíóúñü-]+", normalized_query, flags=re.I)[:5]
             if not normalized_query or not archive_terms:
                 await send_message(
                     thread,

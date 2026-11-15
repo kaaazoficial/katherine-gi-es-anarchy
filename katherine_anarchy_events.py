@@ -207,7 +207,10 @@ def format_voice_state(
         return empty
 
     shown = selected[:15]
-    lines = [heading, *(f"• {item['name']}" for item in shown)]
+    lines = [heading]
+    for item in shown:
+        role = "sí" if item.get("speaker_role") else "no"
+        lines.append(f"• {item['name']} · ROL DE HABLANTE: {role}")
     if len(selected) > len(shown):
         lines.append(f"… y {len(selected) - len(shown)} más.")
     return "\n".join(lines)
