@@ -962,6 +962,9 @@ JAMENDO_CLIENT_ID = os.getenv("JAMENDO_CLIENT_ID", "").strip()
 IA_BASE = "https://archive.org"
 JAMENDO_API = "https://api.jamendo.com/v3.0/tracks/"
 WIKIMEDIA_API = "https://commons.wikimedia.org/w/api.php"
+CCMIXTER_API = "https://ccmixter.org/api/query"
+AUDIUS_API = "https://api.audius.co/v1"
+AUDIUS_APP_NAME = "KatherineAnarchy"
 IA_ALLOWED_LICENSES = {
     "creativecommons.org/publicdomain/zero/1.0": "CC0 · Dominio público",
     "creativecommons.org/publicdomain/mark/1.0": "Public Domain Mark",
@@ -2935,6 +2938,10 @@ def dj_audio_host_allowed(host: str) -> bool:
         or normalized == "upload.wikimedia.org"
         or normalized == "jamendo.com"
         or normalized.endswith(".jamendo.com")
+        or normalized == "ccmixter.org"
+        or normalized.endswith(".ccmixter.org")
+        or normalized == "audius.co"
+        or normalized.endswith(".audius.co")
     )
 
 
@@ -2957,6 +2964,10 @@ def dj_source_cooldown_key(host: str) -> str:
         return "archive.org"
     if key == "jamendo.com" or key.endswith(".jamendo.com"):
         return "jamendo.com"
+    if key == "ccmixter.org" or key.endswith(".ccmixter.org"):
+        return "ccmixter.org"
+    if key == "audius.co" or key.endswith(".audius.co"):
+        return "audius.co"
     return key
 
 
@@ -2975,7 +2986,10 @@ def dj_source_cooldown_remaining(host: str, now: float | None = None) -> int:
 
 def cool_down_dj_source(host: str, seconds: int = 600) -> None:
     key = dj_source_cooldown_key(host)
-    if key in {"upload.wikimedia.org", "archive.org", "jamendo.com"}:
+    if key in {
+        "upload.wikimedia.org", "archive.org", "jamendo.com",
+        "ccmixter.org", "audius.co",
+    }:
         DJ_SOURCE_COOLDOWNS[key] = time.monotonic() + max(30, min(1800, int(seconds)))
         metrics["dj_source_cooldowns"] += 1
         logging.warning("[DJ] Fuente %s en pausa temporal por fallos de descarga.", key)
@@ -3194,11 +3208,277 @@ async def search_jamendo_audio(query: str, limit: int = 5) -> list[dict]:
     return tracks[:limit]
 
 
+
+async def search_ccmixter_audio(query: str, limit: int = 5) -> list[dict]:
+    """Search ccMixter's public Query API and resolve only CC-licensed audio streams."""
+    query = clean_archive_value(query, 80)
+    if not query:
+        return []
+    cache_key = "ccmixter:" + query.casefold()
+    cached = DJ_SOURCE_CACHE.get(cache_key)
+    if cached and cached.get("expires", 0) > time.time():
+        return cached.get("tracks", [])[:limit]
+
+    response = await external_request(
+        "GET",
+        CCMIXTER_API,
+        params={
+            "f": "json",
+            "dataview": "upload_list_wide",
+            "limit": max(5, min(15, limit * 3)),
+            "search": query,
+            "search_type": "all",
+            "sort": "rank",
+            "ord": "DESC",
+        },
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Katherine-AnarchyBot/3.3 (licensed music catalog; https://github.com/kaaazoficial/katherine-gi-es-anarchy)",
+        },
+        timeout=20,
+    )
+    if not response.is_success:
+        if response.status_code in (403, 429, 500, 502, 503, 504):
+            cool_down_dj_source("ccmixter.org", 600)
+        raise RuntimeError(f"ccMixter respondió HTTP {response.status_code}.")
+
+    try:
+        payload = response.json()
+    except Exception as exc:
+        raise RuntimeError("No pude interpretar los resultados de ccMixter.") from exc
+
+    def extract_records(value: Any) -> list[dict]:
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if not isinstance(value, dict):
+            return []
+        for key in ("records", "results", "items", "uploads"):
+            candidate = value.get(key)
+            if isinstance(candidate, list):
+                return [item for item in candidate if isinstance(item, dict)]
+            if isinstance(candidate, dict):
+                nested = extract_records(candidate)
+                if nested:
+                    return nested
+        return []
+
+    records = extract_records(payload)
+    semaphore = asyncio.Semaphore(3)
+
+    async def resolve_record(record: dict) -> dict | None:
+        license_url = str(
+            record.get("license_url")
+            or record.get("upload_license_url")
+            or ""
+        ).strip()
+        license_label = archive_license_label(license_url)
+        if not license_label:
+            return None
+
+        upload_id = str(record.get("upload_id") or record.get("id") or "").strip()
+        stream_url = str(record.get("stream_url") or "").strip()
+        if not stream_url and upload_id.isdigit():
+            stream_url = (
+                "https://ccmixter.org/api/query/stream.m3u"
+                f"?f=m3u&ids={quote(upload_id, safe='')}"
+            )
+        if not stream_url:
+            return None
+        stream_url = urljoin("https://ccmixter.org/", stream_url)
+        parsed_stream = urlsplit(stream_url)
+        if (
+            parsed_stream.scheme == "http"
+            and (parsed_stream.hostname or "").lower().endswith("ccmixter.org")
+            and not parsed_stream.username
+            and not parsed_stream.password
+        ):
+            stream_url = urlunsplit((
+                "https", parsed_stream.netloc, parsed_stream.path,
+                parsed_stream.query, parsed_stream.fragment,
+            ))
+        if not dj_audio_url_allowed(stream_url):
+            return None
+
+        async with semaphore:
+            playlist = await external_request(
+                "GET",
+                stream_url,
+                headers={
+                    "Accept": "audio/x-mpegurl, application/vnd.apple.mpegurl, text/plain, */*",
+                    "User-Agent": "Katherine-AnarchyBot/3.3",
+                },
+                timeout=20,
+            )
+        if not playlist.is_success:
+            if playlist.status_code in (403, 429, 500, 502, 503, 504):
+                cool_down_dj_source("ccmixter.org", 600)
+            return None
+
+        audio_url = ""
+        for line in str(playlist.text or "").splitlines():
+            candidate_line = line.strip()
+            if not candidate_line or candidate_line.startswith("#"):
+                continue
+            candidate = urljoin(stream_url, candidate_line)
+            parsed_candidate = urlsplit(candidate)
+            if (
+                parsed_candidate.scheme == "http"
+                and (parsed_candidate.hostname or "").lower().endswith("ccmixter.org")
+                and not parsed_candidate.username
+                and not parsed_candidate.password
+            ):
+                candidate = urlunsplit((
+                    "https", parsed_candidate.netloc, parsed_candidate.path,
+                    parsed_candidate.query, parsed_candidate.fragment,
+                ))
+            if dj_audio_url_allowed(candidate):
+                audio_url = candidate
+                break
+        if not audio_url:
+            return None
+
+        item_url = str(record.get("file_page_url") or record.get("item_url") or "")
+        if item_url and not item_url.startswith("https://"):
+            item_url = ""
+        title = clean_archive_value(
+            record.get("upload_name") or record.get("title") or "Pista de ccMixter",
+            160,
+        )
+        creator = clean_archive_value(
+            record.get("user_real_name") or record.get("user_name")
+            or record.get("creator") or "Autor no indicado",
+        )
+        return {
+            "identifier": upload_id or audio_url,
+            "title": title,
+            "creator": creator,
+            "license": license_label,
+            "license_url": license_url,
+            "item_url": item_url or "https://ccmixter.org/",
+            "url": audio_url,
+            "extension": Path(urlsplit(audio_url).path).suffix.lower() or ".mp3",
+            "source": "ccMixter",
+            "source_key": "ccmixter",
+        }
+
+    candidates = records[:max(5, min(12, limit * 3))]
+    resolved = await asyncio.gather(
+        *(resolve_record(record) for record in candidates),
+        return_exceptions=True,
+    )
+    tracks = [item for item in resolved if isinstance(item, dict)]
+    DJ_SOURCE_CACHE[cache_key] = {
+        "tracks": tracks,
+        "expires": time.time() + 900,
+    }
+    if len(DJ_SOURCE_CACHE) > 300:
+        oldest = min(
+            DJ_SOURCE_CACHE,
+            key=lambda key: DJ_SOURCE_CACHE[key].get("expires", 0),
+        )
+        DJ_SOURCE_CACHE.pop(oldest, None)
+    return tracks[:limit]
+
+
+async def search_audius_audio(query: str, limit: int = 5) -> list[dict]:
+    """Search Audius and play only tracks the platform marks as streamable."""
+    query = clean_archive_value(query, 80)
+    if not query:
+        return []
+    cache_key = "audius:" + query.casefold()
+    cached = DJ_SOURCE_CACHE.get(cache_key)
+    if cached and cached.get("expires", 0) > time.time():
+        return cached.get("tracks", [])[:limit]
+
+    response = await external_request(
+        "GET",
+        f"{AUDIUS_API}/tracks/search",
+        params={
+            "query": query,
+            "limit": max(10, min(30, limit * 4)),
+            "app_name": AUDIUS_APP_NAME,
+        },
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Katherine-AnarchyBot/3.3 (Audius music integration; https://github.com/kaaazoficial/katherine-gi-es-anarchy)",
+        },
+        timeout=20,
+    )
+    if not response.is_success:
+        if response.status_code in (403, 429, 500, 502, 503, 504):
+            cool_down_dj_source("api.audius.co", 600)
+        raise RuntimeError(f"Audius respondió HTTP {response.status_code}.")
+
+    try:
+        payload = response.json()
+        tracks_data = payload.get("data") or payload.get("results") or []
+        if not isinstance(tracks_data, list):
+            raise ValueError("La respuesta de Audius no contiene una lista de pistas.")
+    except Exception as exc:
+        raise RuntimeError("No pude interpretar los resultados de Audius.") from exc
+
+    tracks = []
+    for item in tracks_data:
+        if not isinstance(item, dict):
+            continue
+        streamable = item.get("isStreamable", item.get("is_streamable"))
+        if streamable is not True and str(streamable).strip().lower() not in ("true", "1"):
+            continue
+
+        track_id = str(item.get("id") or item.get("track_id") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", track_id):
+            continue
+
+        user = item.get("user") if isinstance(item.get("user"), dict) else {}
+        stream_url = (
+            f"{AUDIUS_API}/tracks/{quote(track_id, safe='')}/stream"
+            f"?app_name={quote(AUDIUS_APP_NAME, safe='')}"
+        )
+        if not dj_audio_url_allowed(stream_url):
+            continue
+        permalink = str(item.get("permalink") or "")
+        tracks.append({
+            "identifier": track_id,
+            "track_id": track_id,
+            "title": clean_archive_value(
+                item.get("title") or item.get("name") or "Pista de Audius",
+                160,
+            ),
+            "creator": clean_archive_value(
+                user.get("name") or item.get("artist_name")
+                or item.get("creator") or "Artista independiente",
+            ),
+            "duration": item.get("duration"),
+            "item_url": permalink if permalink.startswith("https://") else "https://audius.co/",
+            "url": stream_url,
+            "extension": ".mp3",
+            "source": "Audius",
+            "source_key": "audius",
+            "license": "Reproducción mediante el servicio oficial de Audius",
+        })
+        if len(tracks) >= limit:
+            break
+
+    DJ_SOURCE_CACHE[cache_key] = {
+        "tracks": tracks,
+        "expires": time.time() + 900,
+    }
+    if len(DJ_SOURCE_CACHE) > 300:
+        oldest = min(
+            DJ_SOURCE_CACHE,
+            key=lambda key: DJ_SOURCE_CACHE[key].get("expires", 0),
+        )
+        DJ_SOURCE_CACHE.pop(oldest, None)
+    return tracks[:limit]
+
+
 async def search_music_catalog(query: str, limit: int = 5) -> list[dict]:
     """Search configured catalogs concurrently, de-duplicate and rank their results."""
     providers = [
         ("archive", search_archive_audio, "archive.org"),
         ("commons", search_wikimedia_audio, "upload.wikimedia.org"),
+        ("ccmixter", search_ccmixter_audio, "ccmixter.org"),
+        ("audius", search_audius_audio, "api.audius.co"),
     ]
     if JAMENDO_CLIENT_ID:
         providers.append(("jamendo", search_jamendo_audio, "jamendo.com"))

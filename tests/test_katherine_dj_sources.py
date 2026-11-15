@@ -21,6 +21,15 @@ def test_dj_audio_hosts_are_exact_and_https_only():
     assert katherine.dj_audio_url_allowed(
         "https://prod-1.storage.jamendo.com/download/track/123/mp32/"
     )
+    assert katherine.dj_audio_url_allowed(
+        "https://ccmixter.org/content/artist/song.mp3"
+    )
+    assert katherine.dj_audio_url_allowed(
+        "https://api.audius.co/v1/tracks/123/stream"
+    )
+    assert katherine.dj_audio_url_allowed(
+        "https://content-node.audius.co/audio/123.mp3"
+    )
     assert not katherine.dj_audio_url_allowed(
         "https://user:pass@archive.org/download/item/song.mp3"
     )
@@ -32,6 +41,9 @@ def test_dj_audio_hosts_are_exact_and_https_only():
     )
     assert not katherine.dj_audio_url_allowed(
         "https://example.com/song.mp3"
+    )
+    assert not katherine.dj_audio_url_allowed(
+        "https://ccmixter.org.evil.example/song.mp3"
     )
 
 
@@ -109,8 +121,16 @@ def test_music_catalog_combines_sources_and_survives_one_failure(monkeypatch):
     async def jamendo(query, limit):
         raise RuntimeError("Jamendo temporalmente fuera")
 
+    async def ccmixter(query, limit):
+        return []
+
+    async def audius(query, limit):
+        return []
+
     monkeypatch.setattr(katherine, "search_archive_audio", archive)
     monkeypatch.setattr(katherine, "search_wikimedia_audio", commons)
+    monkeypatch.setattr(katherine, "search_ccmixter_audio", ccmixter)
+    monkeypatch.setattr(katherine, "search_audius_audio", audius)
     monkeypatch.setattr(katherine, "search_jamendo_audio", jamendo)
     monkeypatch.setattr(katherine, "JAMENDO_CLIENT_ID", "test-client")
 
@@ -126,6 +146,8 @@ def test_music_catalog_raises_only_when_every_source_fails(monkeypatch):
 
     monkeypatch.setattr(katherine, "search_archive_audio", fail)
     monkeypatch.setattr(katherine, "search_wikimedia_audio", fail)
+    monkeypatch.setattr(katherine, "search_ccmixter_audio", fail)
+    monkeypatch.setattr(katherine, "search_audius_audio", fail)
     monkeypatch.setattr(katherine, "JAMENDO_CLIENT_ID", "")
 
     try:
@@ -253,6 +275,10 @@ def test_dj_source_cooldown_normalizes_provider_cdn_hosts(monkeypatch):
     assert katherine.dj_source_is_cooled("archive.org")
     katherine.cool_down_dj_source("upload.wikimedia.org", 600)
     assert katherine.dj_source_is_cooled("upload.wikimedia.org")
+    katherine.cool_down_dj_source("content-node.audius.co", 600)
+    assert katherine.dj_source_is_cooled("api.audius.co")
+    katherine.cool_down_dj_source("ccmixter.org", 600)
+    assert katherine.dj_source_is_cooled("ccmixter.org")
     katherine.DJ_SOURCE_COOLDOWNS.clear()
 
 
@@ -1071,3 +1097,122 @@ def test_music_mixer_does_not_start_before_optional_audio_dependencies(monkeypat
 
     assert katherine.ensure_audio_mixer_running(thread_id, state) is False
     assert state["mixer_task"] is None
+
+
+def test_audius_search_uses_official_stream_endpoint_and_ignores_unstreamable_tracks(monkeypatch):
+    class FakeResponse:
+        is_success = True
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "data": [
+                    {
+                        "id": "track_123",
+                        "title": "Ambient Lights",
+                        "isStreamable": True,
+                        "user": {"name": "Independent Artist"},
+                        "permalink": "https://audius.co/artist/ambient-lights",
+                    },
+                    {
+                        "id": "track_456",
+                        "title": "Unavailable Track",
+                        "isStreamable": False,
+                        "user": {"name": "Other Artist"},
+                    },
+                ]
+            }
+
+    calls = []
+
+    async def fake_request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return FakeResponse()
+
+    monkeypatch.setattr(katherine, "external_request", fake_request)
+    katherine.DJ_SOURCE_CACHE.pop("audius:ambient lights", None)
+
+    tracks = asyncio.run(katherine.search_audius_audio("ambient lights", limit=5))
+
+    assert len(tracks) == 1
+    assert tracks[0]["source"] == "Audius"
+    assert tracks[0]["creator"] == "Independent Artist"
+    assert tracks[0]["url"] == (
+        "https://api.audius.co/v1/tracks/track_123/stream"
+        "?app_name=KatherineAnarchy"
+    )
+    assert calls[0][1].endswith("/tracks/search")
+    assert calls[0][2]["params"]["query"] == "ambient lights"
+
+
+def test_ccmixter_search_requires_allowed_license_and_resolves_audio_playlist(monkeypatch):
+    class FakeResponse:
+        def __init__(self, payload=None, text=""):
+            self.payload = payload
+            self.text = text
+            self.is_success = True
+            self.status_code = 200
+
+        def json(self):
+            return self.payload
+
+    calls = []
+
+    async def fake_request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        if url == katherine.CCMIXTER_API:
+            return FakeResponse(payload={
+                "records": [
+                    {
+                        "upload_id": "123",
+                        "upload_name": "Creative Ambient",
+                        "user_name": "Artist One",
+                        "license_url": "https://creativecommons.org/licenses/by/3.0/",
+                        "file_page_url": "https://ccmixter.org/files/artistone/123",
+                        "stream_url": "https://ccmixter.org/api/query/stream.m3u?f=m3u&ids=123",
+                    },
+                    {
+                        "upload_id": "456",
+                        "upload_name": "Restricted Track",
+                        "user_name": "Artist Two",
+                        "license_url": "https://creativecommons.org/licenses/by-nc-nd/3.0/",
+                        "stream_url": "https://ccmixter.org/api/query/stream.m3u?f=m3u&ids=456",
+                    },
+                ]
+            })
+        return FakeResponse(
+            text="#EXTM3U\n#EXTINF:180,Creative Ambient\n"
+            "https://ccmixter.org/content/artistone/creative-ambient.mp3\n"
+        )
+
+    monkeypatch.setattr(katherine, "external_request", fake_request)
+    katherine.DJ_SOURCE_CACHE.pop("ccmixter:ambient", None)
+
+    tracks = asyncio.run(katherine.search_ccmixter_audio("ambient", limit=5))
+
+    assert len(tracks) == 1
+    assert tracks[0]["source"] == "ccMixter"
+    assert tracks[0]["title"] == "Creative Ambient"
+    assert tracks[0]["license"] == "CC BY 3.0 · Requiere atribución"
+    assert tracks[0]["url"].endswith("/creative-ambient.mp3")
+    assert len(calls) == 2
+
+
+def test_music_catalog_keeps_results_when_new_sources_fail(monkeypatch):
+    async def ok_archive(query, limit):
+        return [{"url": "https://archive.org/good.mp3", "title": "Safe track"}]
+
+    async def fail(*args, **kwargs):
+        raise RuntimeError("HTTP 503")
+
+    monkeypatch.setattr(katherine, "search_archive_audio", ok_archive)
+    monkeypatch.setattr(katherine, "search_wikimedia_audio", fail)
+    monkeypatch.setattr(katherine, "search_ccmixter_audio", fail)
+    monkeypatch.setattr(katherine, "search_audius_audio", fail)
+    monkeypatch.setattr(katherine, "JAMENDO_CLIENT_ID", "")
+
+    tracks = asyncio.run(katherine.search_music_catalog("safe track", limit=5))
+
+    assert len(tracks) == 1
+    assert tracks[0]["url"] == "https://archive.org/good.mp3"
