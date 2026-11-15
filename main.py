@@ -4456,7 +4456,7 @@ async def audio_mixer_loop(thread_id: str) -> None:
             # for the next 20 ms LiveKit frame. Previously this stopped at one
             # output frame while waiting for the larger prebuffer, deadlocking
             # the producer against the bounded queue.
-                    incoming_chunks = []
+            incoming_chunks = []
             pending_sample_count = len(pending_music)
             while (
                 music_queue is not None
