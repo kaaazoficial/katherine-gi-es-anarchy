@@ -113,7 +113,9 @@ def initialize_database(session_factory):
         db.execute("CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_gifts_target ON gifts(target_uid, id DESC)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_users_points ON users(points DESC)")
-        db.execute("CREATE INDEX IF NOT EXISTS idx_users_activity ON users(message_count DESC)")
+        # Lifetime message counts are not used; clear values left by older builds.
+        db.execute("UPDATE users SET message_count=0 WHERE message_count<>0")
+        db.execute("DROP INDEX IF EXISTS idx_users_activity")
         db.execute("CREATE INDEX IF NOT EXISTS idx_users_nickname_last_seen ON users(lower(nickname), last_seen DESC)")
         db.execute("""CREATE TABLE IF NOT EXISTS chat_settings (
             thread_id TEXT NOT NULL,
