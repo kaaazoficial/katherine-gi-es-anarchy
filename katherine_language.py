@@ -49,6 +49,12 @@ _CHAT_SLANG = frozenset({
     "lol", "lmao", "xD", "k", "ke", "q", "xq", "pq", "pa", "na",
     "tmb", "tb", "ntp", "xfa", "pls", "okey",
 })
+_AMBIGUOUS_ACCENT_WORDS = frozenset({
+    "aun", "como", "cuando", "cuanto", "cual", "cuales", "de", "el",
+    "esta", "este", "mas", "mi", "que", "quien", "solo", "si", "se",
+    "tu", "donde",
+})
+
 _DOMAIN_WORDS = frozenset({
     "genshin", "teyvat", "hoyoverse", "mihoyo", "anarchy", "katherine",
     "katherin", "katherina", "kathrine", "katheryne", "cyno", "nahida",
@@ -138,7 +144,9 @@ def detect_spanish_spelling_issues(
         return None
 
     normalized_tokens = [match.group(1).casefold() for match in tokens]
-    explicit_present = any(word in _COMMON_FIXES for word in normalized_tokens)
+    explicit_present = any(word in _COMMON_FIXES for word in normalized_tokens) or (
+        bool(normalized_tokens) and normalized_tokens[0] == "ola"
+    )
     if not explicit_present and not any(
         word in _SPANISH_MARKERS for word in normalized_tokens
     ):
@@ -176,6 +184,7 @@ def detect_spanish_spelling_issues(
                     or normalized in _DOMAIN_WORDS
                     or normalized in _CHAT_SLANG
                     or normalized in _COMMON_FIXES
+                    or normalized in _AMBIGUOUS_ACCENT_WORDS
                     or (normalized == "ola" and start == len(visible) - len(visible.lstrip()))
                     or any(old == word for _a, _b, _c, old in replacements)
                     or (word.isupper() and len(word) <= 8)
