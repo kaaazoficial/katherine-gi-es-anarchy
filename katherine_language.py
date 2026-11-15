@@ -153,7 +153,7 @@ def detect_spanish_spelling_issues(
 
     normalized_tokens = [match.group(1).casefold() for match in tokens]
     greeting_match = re.match(
-        r"^([¡!¿?]*\\s*)(ola)\\b",
+        r"^([¡!¿?]*\s*)(ola)\b",
         visible,
         flags=re.IGNORECASE,
     )
