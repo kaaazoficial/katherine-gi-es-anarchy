@@ -520,28 +520,25 @@ def test_split_complete_audio_frames_keeps_decoder_boundaries_contiguous(monkeyp
     assert np.array_equal(joined, np.arange(480, 1440, dtype=np.int16))
 
 
-def test_audio_mixer_does_not_publish_silence_and_sends_queued_speech(monkeypatch):
+def test_music_mixer_ignores_tts_queue_and_publishes_music_only(monkeypatch):
     import types
 
     monkeypatch.setattr(katherine, "np", np)
-    thread_id = "tts-mixer-idle-test"
+    thread_id = "music-mixer-isolation-test"
     captured = []
 
     class FakeAudioSource:
         async def capture_frame(self, frame):
-            captured.append(bytes(frame.data))
+            captured.append(np.frombuffer(bytes(frame.data), dtype=np.int16).copy())
 
     class FakeAudioFrame:
         @staticmethod
         def create(sample_rate, channels, samples):
-            assert sample_rate == 48000
-            assert channels == 1
-            assert samples == 480
+            assert (sample_rate, channels, samples) == (48000, 1, 480)
             return types.SimpleNamespace(data=bytearray(samples * 2))
 
     monkeypatch.setattr(
-        katherine,
-        "livekit_rtc",
+        katherine, "livekit_rtc",
         types.SimpleNamespace(AudioFrame=FakeAudioFrame),
     )
 
@@ -552,28 +549,35 @@ def test_audio_mixer_does_not_publish_silence_and_sends_queued_speech(monkeypatc
             "speech_audio_queue": asyncio.Queue(maxsize=8),
             "speaking": asyncio.Event(),
             "audio_source": FakeAudioSource(),
-            "volume": 0.75,
+            "volume": 1.0,
             "duck_enabled": True,
+            "music_duck_gain": 1.0,
+            "music_buffer_started": True,
             "mixer_task": None,
         }
         katherine.DJ_ROOMS[thread_id] = state
         try:
             task = asyncio.create_task(katherine.audio_mixer_loop(thread_id))
             state["mixer_task"] = task
-            await asyncio.sleep(0.035)
+            await asyncio.sleep(0.025)
             assert captured == []
 
             await state["speech_audio_queue"].put(
                 np.full(480, 1234, dtype=np.int16)
             )
+            await asyncio.sleep(0.025)
+            assert captured == []
+
+            await state["music_audio_queue"].put(
+                np.full(480, 4321, dtype=np.int16)
+            )
             for _ in range(20):
                 if captured:
                     break
                 await asyncio.sleep(0.01)
-            assert captured
-            spoken = np.frombuffer(captured[0], dtype=np.int16)
-            assert len(spoken) == 480
-            assert np.all(spoken == 1234)
+            assert len(captured) == 1
+            assert np.all(captured[0] == 4321)
+            assert state["speech_audio_queue"].qsize() == 1
         finally:
             state["stop_event"].set()
             task = state.get("mixer_task")
@@ -582,6 +586,69 @@ def test_audio_mixer_does_not_publish_silence_and_sends_queued_speech(monkeypatc
             katherine.DJ_ROOMS.pop(thread_id, None)
 
     asyncio.run(scenario())
+
+
+def test_stream_speech_file_uses_independent_livekit_source(monkeypatch):
+    import types
+
+    monkeypatch.setattr(katherine, "np", np)
+    thread_id = "tts-independent-source-test"
+    captured = []
+
+    class FakeAudioSource:
+        async def capture_frame(self, frame):
+            captured.append(np.frombuffer(bytes(frame.data), dtype=np.int16).copy())
+
+    class FakeAudioFrame:
+        @staticmethod
+        def create(sample_rate, channels, samples):
+            assert (sample_rate, channels, samples) == (48000, 1, 480)
+            return types.SimpleNamespace(data=bytearray(samples * 2))
+
+    class FakeDecodedFrame:
+        def to_ndarray(self):
+            return np.full((1, 480), 3210, dtype=np.int16)
+
+    class FakeResampler:
+        def __init__(self, **kwargs):
+            pass
+
+        def resample(self, frame):
+            return [FakeDecodedFrame()] if frame is not None else []
+
+    class FakeContainer:
+        streams = [types.SimpleNamespace(type="audio")]
+
+        def decode(self, stream):
+            yield object()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        katherine, "livekit_rtc",
+        types.SimpleNamespace(AudioFrame=FakeAudioFrame),
+    )
+    monkeypatch.setattr(
+        katherine, "pyav",
+        types.SimpleNamespace(
+            open=lambda *args, **kwargs: FakeContainer(),
+            AudioResampler=FakeResampler,
+        ),
+    )
+    monkeypatch.setattr(katherine, "load_audio_dependencies", lambda: True)
+    state = {
+        "stop_event": asyncio.Event(),
+        "reading_enabled": True,
+        "tts_volume": 1.0,
+        "speech_audio_source": FakeAudioSource(),
+    }
+    monkeypatch.setattr(katherine, "DJ_ROOMS", {thread_id: state})
+
+    asyncio.run(katherine.stream_speech_file(thread_id, "fake-tts.mp3"))
+
+    assert len(captured) == 1
+    assert np.all(captured[0] == 3210)
 
 
 def test_enqueue_message_for_speech_puts_plain_user_text_in_the_queue(monkeypatch):
@@ -630,7 +697,7 @@ def test_enqueue_message_for_speech_puts_plain_user_text_in_the_queue(monkeypatc
     asyncio.run(scenario())
 
 
-def test_enable_room_reading_starts_mixer_and_tts_worker(monkeypatch):
+def test_enable_room_reading_starts_tts_without_starting_music_mixer(monkeypatch):
     thread_id = "tts-enable-test"
 
     async def fake_ensure_voice_room(value):
@@ -638,6 +705,7 @@ def test_enable_room_reading_starts_mixer_and_tts_worker(monkeypatch):
         katherine.DJ_ROOMS[thread_id] = {
             "stop_event": asyncio.Event(),
             "audio_source": object(),
+            "speech_audio_source": object(),
             "reading_enabled": False,
             "speech_task": None,
             "mixer_task": None,
@@ -650,7 +718,6 @@ def test_enable_room_reading_starts_mixer_and_tts_worker(monkeypatch):
     monkeypatch.setattr(katherine, "load_tts_dependency", lambda: True)
     monkeypatch.setattr(katherine, "load_audio_dependencies", lambda: True)
     monkeypatch.setattr(katherine, "ensure_voice_room", fake_ensure_voice_room)
-    monkeypatch.setattr(katherine, "audio_mixer_loop", wait_until_stopped)
     monkeypatch.setattr(katherine, "speech_queue_worker", wait_until_stopped)
 
     async def scenario():
@@ -659,20 +726,16 @@ def test_enable_room_reading_starts_mixer_and_tts_worker(monkeypatch):
             assert ok, message
             state = katherine.DJ_ROOMS[thread_id]
             assert state["reading_enabled"] is True
-            assert state["mixer_task"] is not None
-            assert not state["mixer_task"].done()
+            assert state["mixer_task"] is None
             assert state["speech_task"] is not None
             assert not state["speech_task"].done()
         finally:
             state = katherine.DJ_ROOMS.get(thread_id)
             if state:
                 state["stop_event"].set()
-                tasks = [
-                    task for task in (state.get("mixer_task"), state.get("speech_task"))
-                    if task is not None
-                ]
-                if tasks:
-                    await asyncio.gather(*tasks, return_exceptions=True)
+                task = state.get("speech_task")
+                if task:
+                    await asyncio.gather(task, return_exceptions=True)
             katherine.DJ_ROOMS.pop(thread_id, None)
 
     asyncio.run(scenario())
