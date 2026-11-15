@@ -194,7 +194,10 @@ def detect_affectionate_expression(message: str) -> str | None:
         r"(?:linda|bonita|hermosa|preciosa|guapa|adorable|tierna|"
         r"encantadora|genial|increible|especial|maravillosa|unica)\b"
         r"|\bme\s+encanta\s+(?:hablar\s+contigo|tu\s+forma\s+de\s+ser)\b"
-        r"|\bme\s+alegras\s+el\s+dia\b",
+        r"|\bme\s+alegras\s+el\s+dia\b"
+        r"|\bque\s+(?:linda|bonita|hermosa|preciosa|genial|tierna)\s+(?:eres|te\s+ves)\b"
+        r"|\beres\s+(?:la\s+mejor|un\s+amor|un\s+sol)\b"
+        r"|\bme\s+haces\s+feliz\b",
         text,
     ):
         return "compliment"
