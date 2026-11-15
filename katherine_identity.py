@@ -58,6 +58,15 @@ _NEGATED_AFFECTION_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+_WARM_VOCATIVE_RE = re.compile(
+    r"\b(?:gracias|mil\s+gracias|te\s+agradezco|tqm|tkm|te\s+(?:amo|quiero|adoro)|"
+    r"me\s+caes\s+(?:muy\s+)?bien|eres\s+(?:(?:muy|tan|super)\s+)?"
+    r"(?:linda|bonita|hermosa|preciosa|guapa|adorable|tierna|encantadora|"
+    r"genial|increible|especial|maravillosa|unica)|"
+    r"me\s+encanta\s+hablar\s+contigo|te\s+extra[nñ]e)\b",
+    flags=re.IGNORECASE,
+)
+
 
 def _normalize_name(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", str(value or "").casefold())
@@ -96,6 +105,7 @@ def _is_direct_vocative(text: str, match: re.Match) -> bool:
             _GREETING_RE.match(before_trimmed + " ")
             or _DIRECT_REQUEST_RE.search(before)
             or _AFFECTION_RE.search(before)
+            or _WARM_VOCATIVE_RE.search(before)
             or "?" in before
             or "¿" in before
             or "!" in before
