@@ -36,9 +36,6 @@ def test_dj_audio_hosts_are_exact_and_https_only():
     assert katherine.dj_audio_url_allowed(
         "https://cdn.freesound.org/previews/12/12345_67890-hq.mp3"
     )
-    assert katherine.dj_audio_url_allowed(
-        "https://media.uncommonear.com/p/fp-0000000001.mp3"
-    )
     assert not katherine.dj_audio_url_allowed(
         "https://user:pass@archive.org/download/item/song.mp3"
     )
@@ -55,7 +52,6 @@ def test_dj_audio_hosts_are_exact_and_https_only():
         "https://ccmixter.org.evil.example/song.mp3"
     )
     assert not katherine.dj_audio_url_allowed("https://[broken-host/audio.mp3")
-    assert not katherine.dj_audio_url_allowed("https://media.uncommonear.com.evil.test/song.mp3")
 
 
 
@@ -926,6 +922,7 @@ def test_music_enqueue_restarts_a_stopped_mixer_and_delivers_frames(monkeypatch)
             "skip_event": asyncio.Event(),
             "music_audio_queue": asyncio.Queue(maxsize=1),
             "mixer_task": None,
+            "audio_source": object(),
         }
         katherine.DJ_ROOMS[thread_id] = state
         try:
@@ -1308,7 +1305,7 @@ def test_dj_mixer_drains_full_prebuffer_before_first_livekit_frame(monkeypatch):
 
 
 
-def test_freesound_search_uses_preview_and_excludes_noncommercial_license(monkeypatch):
+def test_freesound_search_uses_official_page_links_and_only_commercial_licenses(monkeypatch):
     class FakeResponse:
         is_success = True
         status_code = 200
@@ -1330,6 +1327,18 @@ def test_freesound_search_uses_preview_and_excludes_noncommercial_license(monkey
                         },
                     },
                     {
+                        "id": 12347,
+                        "name": "Soft Ambient",
+                        "username": "ArtistThree",
+                        "license": "Creative Commons 0",
+                        "duration": 90.0,
+                        "filesize": 2048,
+                        "url": "https://freesound.org/people/ArtistThree/sounds/12347/",
+                        "previews": {
+                            "preview-hq-ogg": "https://freesound.org/data/previews/12/12347_67890-hq.ogg"
+                        },
+                    },
+                    {
                         "id": 12346,
                         "name": "Noncommercial track",
                         "username": "ArtistTwo",
@@ -1339,6 +1348,30 @@ def test_freesound_search_uses_preview_and_excludes_noncommercial_license(monkey
                         "url": "https://freesound.org/people/ArtistTwo/sounds/12346/",
                         "previews": {
                             "preview-hq-mp3": "https://cdn.freesound.org/previews/12/12346_67890-hq.mp3"
+                        },
+                    },
+                    {
+                        "id": 12348,
+                        "name": "Untrusted preview",
+                        "username": "ArtistFour",
+                        "license": "Attribution",
+                        "duration": 120.0,
+                        "filesize": 1024,
+                        "url": "https://freesound.org/people/ArtistFour/sounds/12348/",
+                        "previews": {
+                            "preview-hq-mp3": "https://evil.example/preview.mp3"
+                        },
+                    },
+                    {
+                        "id": 12349,
+                        "name": "Untrusted page URL",
+                        "username": "ArtistFive",
+                        "license": "Attribution",
+                        "duration": 120.0,
+                        "filesize": 1024,
+                        "url": "https://evil.example/sounds/12349/",
+                        "previews": {
+                            "preview-hq-mp3": "https://cdn.freesound.org/previews/12/12349_67890-hq.mp3"
                         },
                     },
                 ]
@@ -1356,13 +1389,34 @@ def test_freesound_search_uses_preview_and_excludes_noncommercial_license(monkey
 
     tracks = asyncio.run(katherine.search_freesound_audio("ambient piano", limit=5))
 
-    assert len(tracks) == 1
-    assert tracks[0]["source"] == "Freesound"
-    assert tracks[0]["license"] == "CC BY 4.0 · Requiere atribución"
-    assert tracks[0]["url"].endswith("12345_67890-hq.mp3")
-    assert tracks[0]["credit_line"]
-    assert calls[0][2]["headers"]["Authorization"] == "Token test-freesound-key"
-    assert calls[0][2]["params"]["fields"].count("previews") == 1
+    assert [track["identifier"] for track in tracks] == ["12345", "12347"]
+    by_id = {track["identifier"]: track for track in tracks}
+    attribution = by_id["12345"]
+    assert attribution["source"] == "Freesound"
+    assert attribution["license"] == "CC BY 4.0 · Requiere atribución"
+    assert attribution["item_url"] == "https://freesound.org/people/ArtistOne/sounds/12345/"
+    assert attribution["url"].endswith("12345_67890-hq.mp3")
+    assert "[Ambient Piano](https://freesound.org/people/ArtistOne/sounds/12345/)" in attribution["credit_line"]
+    assert "[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)" in attribution["credit_line"]
+    assert by_id["12347"]["license"] == "CC0 · Dominio público"
+    assert by_id["12347"]["credit_line"] == ""
+
+    method, url, request = calls[0]
+    assert method == "GET"
+    assert url == "https://freesound.org/apiv2/search/"
+    assert request["headers"]["Authorization"] == "Token test-freesound-key"
+    assert request["params"]["filter"] == 'duration:[30 TO *] license:(Attribution OR "Creative Commons 0")'
+    assert "previews" in request["params"]["fields"]
+    assert "url" in request["params"]["fields"]
+
+
+def test_freesound_search_is_disabled_without_an_api_key(monkeypatch):
+    async def unexpected_request(*args, **kwargs):
+        raise AssertionError("Freesound must not be called without its API key")
+
+    monkeypatch.setattr(katherine, "FREESOUND_API_KEY", "")
+    monkeypatch.setattr(katherine, "external_request", unexpected_request)
+    assert asyncio.run(katherine.search_freesound_audio("ambient piano")) == []
 
 
 def test_recoverable_dj_failure_includes_track_valueerror_and_runtimeerror_markers():
