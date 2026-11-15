@@ -873,6 +873,7 @@ async def test_unaddressed_typos_do_not_trigger_spelling_corrections(monkeypatch
         return None
     monkeypatch.setattr(bot_main, "enqueue_message_for_speech", no_speech)
     monkeypatch.setattr(bot_main, "maybe_send_auto_reply", lambda *_args, **_kwargs: asyncio.sleep(0, result=False))
+    monkeypatch.setattr(bot_main, "record_chat_activity", lambda *_args, **_kwargs: None)
     sent = []
 
     async def capture_send(*args, **kwargs):
