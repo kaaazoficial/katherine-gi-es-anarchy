@@ -6129,6 +6129,8 @@ async def dj_playback_loop(
                 raise
             except DJAudioOutputUnavailable as exc:
                 metrics["dj_playback_errors"] += 1
+                metrics["dj_audio_output_unavailable"] += 1
+                metrics["dj_redecode_avoided"] += 1
                 state["playback_stop_event"].set()
                 logging.warning(
                     "[DJ] Salida de audio no disponible en %s; se evita repetir la decodificación de %s (%s).",
