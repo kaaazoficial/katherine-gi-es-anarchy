@@ -569,3 +569,105 @@ def test_message_user_and_activity_updates_share_one_transaction(database, monke
         ).fetchone()
     assert daily["message_count"] == 1
     assert hourly["message_count"] == 1
+
+
+async def test_game_data_coalesces_concurrent_identical_requests(monkeypatch):
+    calls = 0
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    payload = {"name": "Cyno", "rarity": 5}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return payload
+
+    async def fake_request(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+        return Response()
+
+    monkeypatch.setattr(katherine, "external_request", fake_request)
+    monkeypatch.setattr(katherine, "cache", {})
+    monkeypatch.setattr(katherine, "_GAME_REQUEST_INFLIGHT", __import__("weakref").WeakKeyDictionary())
+
+    first = asyncio.create_task(katherine.game_data("characters", "Cyno"))
+    await entered.wait()
+    second = asyncio.create_task(katherine.game_data("characters", "Cyno"))
+    await asyncio.sleep(0)
+    release.set()
+    result_a, result_b = await asyncio.gather(first, second)
+
+    assert calls == 1
+    assert result_a == payload
+    assert result_b == payload
+    assert katherine.metrics["game_api_singleflight_waits"] >= 1
+
+
+async def test_game_data_does_not_coalesce_different_queries(monkeypatch):
+    calls = []
+
+    class Response:
+        def __init__(self, name):
+            self.name = name
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"name": self.name}
+
+    async def fake_request(method, url, *, params, timeout):
+        calls.append(params["query"])
+        return Response(params["query"])
+
+    monkeypatch.setattr(katherine, "external_request", fake_request)
+    monkeypatch.setattr(katherine, "cache", {})
+    monkeypatch.setattr(katherine, "_GAME_REQUEST_INFLIGHT", __import__("weakref").WeakKeyDictionary())
+
+    cyno, nahida = await asyncio.gather(
+        katherine.game_data("characters", "Cyno"),
+        katherine.game_data("characters", "Nahida"),
+    )
+
+    assert calls == ["Cyno", "Nahida"]
+    assert cyno["name"] == "Cyno"
+    assert nahida["name"] == "Nahida"
+
+
+def test_profile_query_returns_viewer_affinity_in_one_read(database):
+    database.record_user("viewer", "Viajero")
+    database.record_user("target", "Objetivo")
+    database.add_affinity("viewer", "target", cooldown=0)
+
+    profile, affinity = database.get_user_profile("target", "viewer")
+
+    assert profile["nickname"] == "Objetivo"
+    assert affinity == 1
+
+
+def test_profile_lookup_by_nickname_is_scoped_and_returns_affinity(database):
+    database.record_user("room-1:viewer", "Viajero")
+    database.record_user("room-1:target", "Ana")
+    database.record_user("room-2:target", "Ana")
+    database.add_affinity("room-1:viewer", "room-1:target", cooldown=0)
+
+    profile, affinity = database.find_user_profile_by_nickname(
+        "Ana", "room-1", "room-1:viewer"
+    )
+
+    assert profile["uid"] == "room-1:target"
+    assert affinity == 1
+
+
+def test_active_moderation_warning_count_uses_active_only(database):
+    warning_id = database.add_moderation_warning(
+        "room", "target", "Objetivo", "admin", "Moderador", "Aviso"
+    )
+    assert database.count_active_moderation_warnings("room", "target") == 1
+    assert database.revoke_moderation_warning("room", warning_id, "admin")
+    assert database.count_active_moderation_warnings("room", "target") == 0
