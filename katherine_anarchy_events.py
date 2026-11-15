@@ -22,7 +22,7 @@ def _as_bool(value: Any) -> bool | None:
         return bool(value)
     if isinstance(value, str):
         normalized = value.strip().casefold()
-        if normalized in {"true", "1", "yes", "si", "sí", "on", "speaking"}:
+        if normalized in {"true", "1", "yes", "si", "sí", "on", "speaker_role"}:
             return True
         if normalized in {"false", "0", "no", "off", "silent", "not_speaking"}:
             return False
@@ -80,14 +80,12 @@ def _participant(event: dict) -> tuple[str, str] | None:
     return uid, name or uid[:24]
 
 
-def _speaking_value(event: dict, default: bool = False) -> bool:
+def _speaker_role_value(event: dict, default: bool = False) -> bool:
+    """Read Anarchy's speaker/listener role flag, not microphone activity."""
     for item in _containers(event):
-        for field in (
-            "speaker", "isSpeaking", "is_speaking", "speaking", "isActive", "active"
-        ):
-            parsed = _as_bool(item.get(field))
-            if parsed is not None:
-                return parsed
+        parsed = _as_bool(item.get("speaker"))
+        if parsed is not None:
+            return parsed
     return default
 
 
@@ -155,8 +153,8 @@ def update_voice_room_event(event: dict, now: float | None = None) -> bool:
     participant = participants.get(uid, {})
     participant.update({
         "name": name,
-        "speaking": _speaking_value(
-            event, default=bool(participant.get("speaking"))
+        "speaker_role": _speaker_role_value(
+            event, default=bool(participant.get("speaker_role"))
         ),
         "last_seen": timestamp,
     })
@@ -186,7 +184,7 @@ def get_voice_participants(thread_id: str, now: float | None = None) -> list[dic
         return []
     return sorted(
         (dict(item, uid=uid) for uid, item in state["participants"].items()),
-        key=lambda item: (not bool(item.get("speaking")), str(item.get("name", "")).casefold()),
+        key=lambda item: (not bool(item.get("speaker_role")), str(item.get("name", "")).casefold()),
     )
 
 
@@ -196,10 +194,10 @@ def format_voice_state(
     """Format current participant state without exposing internal identifiers."""
     participants = get_voice_participants(thread_id, now=now)
     selected_mode = str(mode or "participantes").strip().casefold()
-    if selected_mode in {"hablando", "speakers", "speaking"}:
-        selected = [item for item in participants if item.get("speaking")]
-        heading = "🎙️ PARTICIPANTES HABLANDO"
-        empty = "No hay participantes marcados como hablando en este momento."
+    if selected_mode in {"hablando", "speakers", "speaker_role"}:
+        selected = [item for item in participants if item.get("speaker_role")]
+        heading = "🎙️ PARTICIPANTES CON ROL DE HABLANTE"
+        empty = "No hay participantes con rol de hablante detectados en esta llamada."
     else:
         selected = participants
         heading = "🎧 PARTICIPANTES EN LA LLAMADA"
@@ -209,7 +207,10 @@ def format_voice_state(
         return empty
 
     shown = selected[:15]
-    lines = [heading, *(f"• {item['name']}" for item in shown)]
+    lines = [heading]
+    for item in shown:
+        role = "sí" if item.get("speaker_role") else "no"
+        lines.append(f"• {item['name']} · ROL DE HABLANTE: {role}")
     if len(selected) > len(shown):
         lines.append(f"… y {len(selected) - len(shown)} más.")
     return "\n".join(lines)

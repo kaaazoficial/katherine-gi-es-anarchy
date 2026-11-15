@@ -6,6 +6,9 @@ httpx>=0.27.0
 pytest>=8.0.0
 pytest-asyncio>=0.23
 
+# Procesamiento PCM puro para probar el mezclador sin conectar a LiveKit.
+numpy>=1.26.0
+
 # HTTP mocking, property-based tests, coverage and bounded test execution.
 pytest-cov>=7.1.0,<8.0.0
 respx>=0.23.1,<1.0.0
@@ -15,6 +18,7 @@ pytest-timeout>=2.4.0,<3.0.0
 pydantic-settings>=2.16.2,<3.0.0
 prometheus-client>=0.26.0,<1.0.0
 rapidfuzz>=3.14.6,<4.0.0
+pyspellchecker>=0.9.1,<1.0.0
 
 # Exercise the same web, XML and image paths as production.
 trafilatura>=2.3.1,<3.0.0

@@ -1,80 +1,76 @@
-"""Tests for Katherine's plain-text contextual command help."""
-from katherine_help import build_commands_help_text, filter_commands_help_text
+from katherine_help import (
+    build_commands_help_blocks,
+    build_commands_help_text,
+    filter_commands_help_text,
+)
 
 
-def test_help_supports_category_aliases_and_custom_prefix():
-    text = build_commands_help_text("$")
-    assert "$ayuda [categoria]" in text
-    assert "$diagnostico" in text
-    assert "$ayuda" in filter_commands_help_text(text, "administración")
-    assert "GENSHIN IMPACT" not in filter_commands_help_text(text, "administración")
-
-
-def test_help_unknown_category_returns_available_categories():
-    response = filter_commands_help_text(build_commands_help_text(), "desconocida")
-    assert "Categoría no reconocida" in response
-    assert "genshin" in response
-
-
-def test_help_without_topic_returns_full_catalog():
+def test_full_help_matches_the_supplied_anarchy_layout():
     text = build_commands_help_text()
-    assert filter_commands_help_text(text, None) == text
-    assert "MÚSICA Y VOZ" in text
-    assert "SOCIAL Y PERFILES" in text
-
-
-
-def test_full_command_help_is_split_into_standalone_category_blocks():
-    from katherine_help import build_commands_help_blocks
-
-    blocks = build_commands_help_blocks("$")
-    expected_categories = [
-        "AYUDA E INTELIGENCIA ARTIFICIAL",
-        "GENSHIN IMPACT",
-        "SOCIAL Y PERFILES",
-        "JUEGOS, ECONOMÍA Y COMUNIDAD",
-        "MÚSICA Y VOZ",
-        "UTILIDADES Y MULTIMEDIA",
-        "ADMINISTRACIÓN · UID AUTORIZADO",
+    assert text.startswith("[CB] KATHERINE · GUÍA DE COMANDOS\n[C] Prefijo principal: !")
+    assert "[C] Usa !ayuda <categoría> para consultar una sola sección." in text
+    expected = [
+        "1. AYUDA E INTELIGENCIA ARTIFICIAL",
+        "2. GENSHIN IMPACT",
+        "3. SOCIAL Y PERFILES",
+        "4. JUEGOS, ECONOMÍA Y COMUNIDAD",
+        "5. MÚSICA Y VOZ",
+        "6. UTILIDADES Y MULTIMEDIA",
+        "7. ADMINISTRACIÓN (UID AUTORIZADO)",
     ]
+    positions = [text.index(f"[CB] {title}") for title in expected]
+    assert positions == sorted(positions)
+    assert text.count("[C] ══════════════════════════════") == 7
+    assert "[CB] ▸ Ayuda y Navegación" in text
+    assert "[CB] ▸ Reproductor DJ" in text
+    assert "[CB] ▸ Moderación y Configuración" in text
 
-    assert len(blocks) == len(expected_categories)
-    for block, category in zip(blocks, expected_categories):
-        assert "Prefijo principal: $" in block
-        assert f"── {category} ──" in block
-        assert _category_heading_count(block) == 1
+
+def test_help_prefix_and_aliases_are_preserved():
+    text = build_commands_help_text("$")
+    assert "$ayuda <categoría>" in text
+    assert "$comandos / $menu / $menú" in text
+    assert "$dj probar <tema>" in text
+
+
+def test_category_help_uses_same_visual_format():
+    full = build_commands_help_text()
+    for alias, title in [
+        ("ia", "1. AYUDA E INTELIGENCIA ARTIFICIAL"),
+        ("genshin", "2. GENSHIN IMPACT"),
+        ("social", "3. SOCIAL Y PERFILES"),
+        ("juegos", "4. JUEGOS, ECONOMÍA Y COMUNIDAD"),
+        ("musica", "5. MÚSICA Y VOZ"),
+        ("multimedia", "6. UTILIDADES Y MULTIMEDIA"),
+        ("admin", "7. ADMINISTRACIÓN (UID AUTORIZADO)"),
+    ]:
+        section = filter_commands_help_text(full, alias)
+        assert section.startswith("[CB] KATHERINE · GUÍA DE COMANDOS")
+        assert f"[CB] {title}" in section
+        assert "[C] ══════════════════════════════" in section
+
+
+def test_unknown_category_uses_requested_layout_and_prefix():
+    response = filter_commands_help_text(build_commands_help_text("$"), "inexistente")
+    assert "[CB] KATHERINE · GUÍA DE COMANDOS" in response
+    assert "Ejemplo: $ayuda genshin." in response
+
+
+def test_full_help_is_split_into_seven_category_messages():
+    blocks = build_commands_help_blocks()
+    assert len(blocks) == 7
+    for i, block in enumerate(blocks):
+        assert "[C] ══════════════════════════════" in block
+        assert f"[CB] {i + 1}." in block
         assert len(block.encode("utf-16-le")) // 2 <= 1800
 
 
-def _category_heading_count(block: str) -> int:
-    return sum(
-        1 for line in block.splitlines()
-        if line.startswith("── ") and line.endswith(" ──")
-    )
-
-
-def test_oversized_category_continues_without_mixing_the_next_category():
-    from katherine_help import build_commands_help_blocks
-
-    blocks = build_commands_help_blocks(max_units=800)
-    music_blocks = [
-        block for block in blocks
-        if "MÚSICA Y VOZ" in block
-    ]
-    assert music_blocks
-    for block in music_blocks:
-        assert _category_heading_count(block) == 1
-        assert "GENSHIN IMPACT" not in block
-        assert "SOCIAL Y PERFILES" not in block
-
-
-
-def test_reading_volume_command_is_listed_under_music_and_voice():
-    from katherine_help import build_commands_help_text, filter_commands_help_text
-
-    music_help = filter_commands_help_text(build_commands_help_text(), "voz")
-
-    assert "!volumenlectura <0-100>" in music_help
-    assert "!subirvolumenlectura [cantidad]" in music_help
-    assert "!bajarvolumenlectura [cantidad]" in music_help
-    assert "!silenciolectura" in music_help
+def test_music_section_has_current_music_controls():
+    music = filter_commands_help_text(build_commands_help_text(), "musica")
+    for command in (
+        "!dj buscar", "!dj pausa", "!dj reanudar", "!dj saltar",
+        "!dj cola", "!dj actual", "!dj detener", "!dj fuentes",
+        "!dj ambiente", "!dj favorito", "!dj probar", "!playlist",
+        "!volumen", "!leer", "!noleer", "!tts",
+    ):
+        assert command in music

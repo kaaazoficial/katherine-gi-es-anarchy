@@ -62,7 +62,8 @@ from katherine_research import (
  )
 from katherine_utilities import calculate_expression, format_calculation_result
 from katherine_images import validate_avatar_image_bytes
-from katherine_identity import extract_katherine_call
+from katherine_identity import detect_affectionate_expression, extract_katherine_call
+from katherine_language import detect_spanish_spelling_issues
 from katherine_link_analysis import (
     inspect_message_links,
     extract_message_urls,
@@ -844,6 +845,8 @@ cache: dict[str, tuple[float, Any]] = {}
 polls: dict[str, dict] = {}
 AUTO_REPLY_CHAT_COOLDOWN: dict[str, float] = {}
 AUTO_REPLY_USER_COOLDOWN: dict[tuple[str, str], float] = {}
+SPELLING_CHAT_COOLDOWN: dict[str, float] = {}
+SPELLING_USER_COOLDOWN: dict[tuple[str, str], float] = {}
 
 EXTERNAL_GLOBAL_LIMIT = asyncio.Semaphore(10)
 EXTERNAL_HOST_LIMITS = {}
@@ -949,6 +952,10 @@ DJ_SOURCE_CACHE: dict[str, dict] = {}
 DJ_SOURCE_COOLDOWNS: dict[str, float] = {}
 DJ_REMOTE_AUDIO_MAX_BYTES = 80 * 1024 * 1024
 DJ_QUEUE_MAX_TRACKS = 10
+DJ_SEARCH_RESULT_LIMIT = 10
+DJ_TRANSITION_FADE_SECONDS = 0.5
+DJ_TTS_DUCK_GAIN = 0.28
+DJ_MIXER_FRAME_SAMPLES = 480
 JAMENDO_CLIENT_ID = os.getenv("JAMENDO_CLIENT_ID", "").strip()
 IA_BASE = "https://archive.org"
 JAMENDO_API = "https://api.jamendo.com/v3.0/tracks/"
@@ -2782,9 +2789,9 @@ async def archive_item_details(identifier: str) -> dict | None:
             file_size = int(audio_file.get("size") or 0)
         except (TypeError, ValueError):
             file_size = 0
-        if file_size and file_size > 150 * 1024 * 1024:
+        if file_size and file_size > DJ_REMOTE_AUDIO_MAX_BYTES:
             continue
-        if audio_file.get("private") == "true":
+        if audio_file.get("private") is True or str(audio_file.get("private") or "").lower() == "true":
             continue
         allowed_files.append((filename, file_size))
 
@@ -2795,10 +2802,11 @@ async def archive_item_details(identifier: str) -> dict | None:
         ".mp3": 0, ".ogg": 1, ".m4a": 2,
         ".opus": 3, ".wav": 4, ".flac": 5
     }
+    # Prefer smaller files to reduce download time, RAM/disk pressure and decode risk.
     allowed_files.sort(
         key=lambda pair: (
+            pair[1] if pair[1] else 10**15,
             extension_priority.get(Path(pair[0]).suffix.lower(), 99),
-            pair[1] if pair[1] else 10**15
         )
     )
     filename = allowed_files[0][0]
@@ -2938,22 +2946,46 @@ def dj_audio_url_allowed(url: str) -> bool:
     )
 
 
-def dj_source_is_cooled(host: str, now: float | None = None) -> bool:
+def dj_source_cooldown_key(host: str) -> str:
+    """Normalize catalog and CDN hosts to one provider-level cooldown key."""
     key = str(host or "").lower().rstrip(".")
+    if key == "upload.wikimedia.org":
+        return key
+    if key == "archive.org" or key.endswith(".archive.org"):
+        return "archive.org"
+    if key == "jamendo.com" or key.endswith(".jamendo.com"):
+        return "jamendo.com"
+    return key
+
+
+def dj_source_is_cooled(host: str, now: float | None = None) -> bool:
+    key = dj_source_cooldown_key(host)
     expires_at = float(DJ_SOURCE_COOLDOWNS.get(key, 0) or 0)
     return expires_at > (time.monotonic() if now is None else now)
 
 
+def dj_source_cooldown_remaining(host: str, now: float | None = None) -> int:
+    key = dj_source_cooldown_key(host)
+    current = time.monotonic() if now is None else now
+    expires_at = float(DJ_SOURCE_COOLDOWNS.get(key, 0) or 0)
+    return max(0, int(expires_at - current + 0.999))
+
+
 def cool_down_dj_source(host: str, seconds: int = 600) -> None:
-    key = str(host or "").lower().rstrip(".")
-    if (
-        key == "upload.wikimedia.org"
-        or key == "jamendo.com"
-        or key.endswith(".jamendo.com")
-    ):
+    key = dj_source_cooldown_key(host)
+    if key in {"upload.wikimedia.org", "archive.org", "jamendo.com"}:
         DJ_SOURCE_COOLDOWNS[key] = time.monotonic() + max(30, min(1800, int(seconds)))
         metrics["dj_source_cooldowns"] += 1
         logging.warning("[DJ] Fuente %s en pausa temporal por fallos de descarga.", key)
+
+
+def cool_down_dj_source_on_http_failure(host: str, status_code: int) -> bool:
+    """Pause a catalog after access/rate/server failures, not missing individual files."""
+    if int(status_code) not in (401, 403, 429, 500, 502, 503, 504):
+        return False
+    before = dj_source_is_cooled(host)
+    cool_down_dj_source(host, 600)
+    return dj_source_is_cooled(host) or before
 
 
 async def search_wikimedia_audio(query: str, limit: int = 5) -> list[dict]:
@@ -3161,13 +3193,13 @@ async def search_jamendo_audio(query: str, limit: int = 5) -> list[dict]:
 
 
 async def search_music_catalog(query: str, limit: int = 5) -> list[dict]:
-    """Search every configured catalog concurrently and fairly mix their results."""
+    """Search configured catalogs concurrently, de-duplicate and rank their results."""
     providers = [
-        ("archive", search_archive_audio, None),
+        ("archive", search_archive_audio, "archive.org"),
         ("commons", search_wikimedia_audio, "upload.wikimedia.org"),
     ]
     if JAMENDO_CLIENT_ID:
-        providers.append(("jamendo", search_jamendo_audio, "prod-1.storage.jamendo.com"))
+        providers.append(("jamendo", search_jamendo_audio, "jamendo.com"))
 
     active_providers = [
         provider for provider in providers
@@ -3214,20 +3246,366 @@ async def search_music_catalog(query: str, limit: int = 5) -> list[dict]:
         if len(mixed) >= limit:
             break
 
-    if not mixed and errors and len(errors) == len(providers):
+    if not mixed and errors and len(errors) == len(active_providers):
         raise RuntimeError("Todos los catálogos musicales están temporalmente fuera de servicio.")
-    return mixed[:limit]
+    return rank_dj_results(query, mixed, limit=limit)
+
+
+
+
+def normalize_dj_search_text(value: Any) -> str:
+    """Normalize catalog text for relevance matching and duplicate detection."""
+    normalized = unicodedata.normalize("NFKD", str(value or "").casefold())
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    return re.sub(r"[^a-z0-9]+", " ", normalized).strip()
+
+
+def rank_dj_results(query: str, tracks: list[dict], limit: int = DJ_SEARCH_RESULT_LIMIT) -> list[dict]:
+    """Deduplicate catalog results and rank title/artist matches ahead of loose matches."""
+    query_text = normalize_dj_search_text(query)
+    terms = [term for term in query_text.split() if len(term) > 1]
+    seen_urls: set[str] = set()
+    seen_tracks: set[tuple[str, str]] = set()
+    ranked: list[tuple[float, int, dict]] = []
+    for index, raw_track in enumerate(tracks if isinstance(tracks, list) else []):
+        if not isinstance(raw_track, dict):
+            continue
+        track = dict(raw_track)
+        url = str(track.get("url") or "").strip()
+        title = normalize_dj_search_text(track.get("title"))
+        creator = normalize_dj_search_text(track.get("creator"))
+        if not url or url in seen_urls:
+            continue
+        identity = (title, creator)
+        if title and identity in seen_tracks:
+            continue
+        seen_urls.add(url)
+        if title:
+            seen_tracks.add(identity)
+        score = 0.0
+        if query_text and title == query_text:
+            score += 20
+        elif query_text and query_text in title:
+            score += 12
+        if query_text and query_text in creator:
+            score += 5
+        score += sum(3 for term in terms if term in title)
+        score += sum(1 for term in terms if term in creator)
+        track["_search_score"] = score
+        ranked.append((score, index, track))
+    ranked.sort(key=lambda entry: (-entry[0], entry[1]))
+    return [entry[2] for entry in ranked[:max(1, min(30, int(limit)))] ]
+
+
+def move_dj_queue_item(queue: deque, from_position: int, to_position: int) -> bool:
+    """Move a 1-based queue item to another 1-based position."""
+    try:
+        source = int(from_position) - 1
+        destination = int(to_position) - 1
+    except (TypeError, ValueError):
+        return False
+    if not 0 <= source < len(queue) or not 0 <= destination < len(queue):
+        return False
+    item = queue[source]
+    del queue[source]
+    queue.insert(destination, item)
+    return True
+
+
+def mix_audio_samples(
+    music_samples: Any,
+    speech_samples: Any,
+    music_volume: float = 0.75,
+    duck_gain: float = 1.0,
+) -> Any:
+    """Mix one mono music/TTS frame with a peak ceiling to prevent clipping."""
+    music = np.asarray(music_samples, dtype=np.int16).reshape(-1) if music_samples is not None else np.empty(0, dtype=np.int16)
+    speech = np.asarray(speech_samples, dtype=np.int16).reshape(-1) if speech_samples is not None else np.empty(0, dtype=np.int16)
+    length = max(len(music), len(speech))
+    if not length:
+        return np.empty(0, dtype=np.int16)
+    mixed = np.zeros(length, dtype=np.float32)
+    volume = max(0.0, min(1.0, float(music_volume)))
+    duck = max(0.0, min(1.0, float(duck_gain)))
+    if len(music):
+        mixed[:len(music)] += music.astype(np.float32) * volume * duck
+    if len(speech):
+        mixed[:len(speech)] += speech.astype(np.float32)
+    peak = float(np.max(np.abs(mixed))) if len(mixed) else 0.0
+    if peak > 30000.0:
+        mixed *= 30000.0 / peak
+    return np.clip(mixed, -32768, 32767).astype(np.int16)
+
+
+async def drain_audio_queue(queue: asyncio.Queue | None) -> None:
+    """Discard queued PCM frames after skip/stop so stale audio is never replayed."""
+    if queue is None:
+        return
+    while not queue.empty():
+        try:
+            queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+
+
+def take_audio_frame(pending: Any, incoming: Any, frame_size: int = DJ_MIXER_FRAME_SAMPLES):
+    """Append incoming PCM and return exactly one frame plus unconsumed samples."""
+    buffer = np.asarray(pending, dtype=np.int16).reshape(-1)
+    chunk = np.asarray(incoming, dtype=np.int16).reshape(-1) if incoming is not None else np.empty(0, dtype=np.int16)
+    if len(chunk):
+        buffer = np.concatenate((buffer, chunk))
+    frame = buffer[:frame_size]
+    remainder = buffer[len(frame):]
+    if len(frame) < frame_size:
+        frame = np.pad(frame, (0, frame_size - len(frame)), mode="constant")
+    return frame.astype(np.int16, copy=False), remainder.astype(np.int16, copy=False)
+
+
+def split_complete_audio_frames(
+    pending: Any,
+    incoming: Any = None,
+    frame_size: int = DJ_MIXER_FRAME_SAMPLES,
+) -> tuple[list[Any], Any]:
+    """Join decoder chunks and return only full PCM frames plus the remainder."""
+    buffer = np.asarray(pending, dtype=np.int16).reshape(-1)
+    chunk = (
+        np.asarray(incoming, dtype=np.int16).reshape(-1)
+        if incoming is not None else np.empty(0, dtype=np.int16)
+    )
+    if len(chunk):
+        buffer = np.concatenate((buffer, chunk))
+    complete_length = (len(buffer) // frame_size) * frame_size
+    complete = buffer[:complete_length]
+    remainder = buffer[complete_length:]
+    frames = [
+        complete[offset:offset + frame_size].copy()
+        for offset in range(0, complete_length, frame_size)
+    ]
+    return frames, remainder.copy()
+
+
+async def audio_mixer_loop(thread_id: str) -> None:
+    """Mezcla audio en bloques de 10 ms, sin publicar silencio cuando no hay contenido."""
+    state = DJ_ROOMS.get(str(thread_id))
+    if not state:
+        return
+
+    music_queue = state.get("music_audio_queue")
+    speech_queue = state.get("speech_audio_queue")
+    pending_music = np.empty(0, dtype=np.int16)
+    pending_speech = np.empty(0, dtype=np.int16)
+    duck_gain = 1.0
+    frame_seconds = DJ_MIXER_FRAME_SAMPLES / 48000.0
+    loop = asyncio.get_running_loop()
+    next_frame_at = loop.time()
+    consecutive_failures = 0
+
+    try:
+        while not state["stop_event"].is_set():
+            if DJ_ROOMS.get(str(thread_id)) is not state:
+                return
+
+            if music_queue is not None:
+                while True:
+                    try:
+                        incoming = music_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if incoming is not None and len(incoming):
+                        pending_music = np.concatenate((
+                            pending_music,
+                            np.asarray(incoming, dtype=np.int16).reshape(-1),
+                        ))
+
+            if speech_queue is not None:
+                while True:
+                    try:
+                        incoming = speech_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if incoming is not None and len(incoming):
+                        pending_speech = np.concatenate((
+                            pending_speech,
+                            np.asarray(incoming, dtype=np.int16).reshape(-1),
+                        ))
+
+            # No se envía un flujo de silencio permanente: LiveKit solo recibe
+            # frames mientras haya música o voz pendientes.
+            if not len(pending_music) and not len(pending_speech):
+                next_frame_at = loop.time()
+                await asyncio.sleep(0.01)
+                continue
+
+            has_speech = len(pending_speech) > 0 or state["speaking"].is_set()
+            target_duck = (
+                DJ_TTS_DUCK_GAIN
+                if state.get("duck_enabled", True) and has_speech
+                else 1.0
+            )
+            if target_duck < duck_gain:
+                duck_gain = max(target_duck, duck_gain - 0.18)
+            else:
+                duck_gain = min(target_duck, duck_gain + 0.04)
+
+            music_frame, pending_music = take_audio_frame(pending_music, None)
+            speech_frame, pending_speech = take_audio_frame(pending_speech, None)
+            mixed = mix_audio_samples(
+                music_frame,
+                speech_frame,
+                music_volume=state.get("volume", 0.75),
+                duck_gain=duck_gain,
+            )
+            audio_frame = livekit_rtc.AudioFrame.create(
+                48000, 1, DJ_MIXER_FRAME_SAMPLES
+            )
+            destination = np.frombuffer(audio_frame.data, dtype=np.int16)
+            destination[:DJ_MIXER_FRAME_SAMPLES] = mixed[:DJ_MIXER_FRAME_SAMPLES]
+
+            try:
+                await state["audio_source"].capture_frame(audio_frame)
+                consecutive_failures = 0
+                metrics["audio_mixer_frames_sent"] += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                consecutive_failures += 1
+                metrics["audio_mixer_capture_errors"] += 1
+                logging.warning(
+                    "[DJ_MIXER] Falló la emisión en %s (%s, intento %s/3).",
+                    thread_id, type(exc).__name__, consecutive_failures,
+                )
+                if is_livekit_audio_source_failure(exc):
+                    state["_cleanup_started"] = True
+                    state["reading_enabled"] = False
+                    state["mixer_retry_after"] = time.monotonic() + 30.0
+                    metrics["tts_livekit_source_failures"] += 1
+                    logging.error(
+                        "[TTS] LiveKit invalidó la fuente de audio en %s. "
+                        "Se desactiva la lectura para evitar bloquear la cola.",
+                        thread_id,
+                    )
+                    break
+                if consecutive_failures >= 3:
+                    state["mixer_retry_after"] = time.monotonic() + 2.0
+                    state["mixer_consecutive_failures"] = (
+                        int(state.get("mixer_consecutive_failures", 0)) + 1
+                    )
+                    if state["mixer_consecutive_failures"] >= 3:
+                        state["reading_enabled"] = False
+                        logging.error(
+                            "[TTS] Se pausó la lectura en %s tras tres ciclos "
+                            "de fallos del mezclador.",
+                            thread_id,
+                        )
+                    break
+                await asyncio.sleep(0.2)
+                continue
+
+            next_frame_at += frame_seconds
+            delay = next_frame_at - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            else:
+                next_frame_at = loop.time()
+    finally:
+        current = asyncio.current_task()
+        if state.get("mixer_task") is current:
+            state["mixer_task"] = None
+
+
+def ensure_audio_mixer_running(thread_id: str, state: dict | None = None) -> bool:
+    """Start or recover the single LiveKit audio writer for this room."""
+    key = str(thread_id or "")
+    current = state or DJ_ROOMS.get(key)
+    if (
+        not key or not current or DJ_ROOMS.get(key) is not current
+        or current.get("stop_event") is None
+        or current["stop_event"].is_set()
+        or current.get("_cleanup_started")
+        or current.get("audio_source") is None
+    ):
+        return False
+    task = current.get("mixer_task")
+    if task is not None and not task.done():
+        return True
+    if time.monotonic() < float(current.get("mixer_retry_after", 0) or 0):
+        return False
+    current["mixer_task"] = asyncio.create_task(
+        audio_mixer_loop(key),
+        name=f"katherine-audio-mixer:{key}",
+    )
+    metrics["audio_mixer_restarts"] += 1
+    return True
+
+
+async def enqueue_audio_samples(queue: asyncio.Queue | None, samples: Any) -> None:
+    """Encola PCM mono en bloques completos de 10 ms a 48 kHz."""
+    if queue is None or samples is None:
+        return
+    array = np.asarray(samples, dtype=np.int16).reshape(-1)
+    for offset in range(0, len(array), DJ_MIXER_FRAME_SAMPLES):
+        chunk = array[offset:offset + DJ_MIXER_FRAME_SAMPLES]
+        if not len(chunk):
+            continue
+        if len(chunk) < DJ_MIXER_FRAME_SAMPLES:
+            chunk = np.pad(
+                chunk,
+                (0, DJ_MIXER_FRAME_SAMPLES - len(chunk)),
+                mode="constant",
+            )
+        await queue.put(np.asarray(chunk, dtype=np.int16).copy())
+
+
+def ensure_speech_worker_running(thread_id: str, state: dict | None = None) -> bool:
+    """Recover the TTS worker if it stopped while reading remained enabled."""
+    key = str(thread_id or "")
+    current = state or DJ_ROOMS.get(key)
+    if (
+        not key or not current or DJ_ROOMS.get(key) is not current
+        or not current.get("reading_enabled")
+        or current.get("stop_event") is None
+        or current["stop_event"].is_set()
+        or not load_tts_dependency()
+    ):
+        return False
+    task = current.get("speech_task")
+    if task is not None and not task.done():
+        return True
+    if not ensure_audio_mixer_running(key, current):
+        return False
+    current["speech_task"] = asyncio.create_task(
+        speech_queue_worker(key),
+        name=f"katherine-tts-worker:{key}",
+    )
+    metrics["tts_worker_restarts"] += 1
+    return True
+
+
+
+def find_live_room_for_thread(
+    room_list: Any, thread_id: str
+) -> dict[str, Any] | None:
+    """Return the active Anarchy live room associated with a chat thread."""
+    target = str(thread_id or "").strip()
+    if not target or not isinstance(room_list, list):
+        return None
+    return next(
+        (
+            room for room in room_list
+            if isinstance(room, dict)
+            and str(room.get("threadId") or "").strip() == target
+        ),
+        None,
+    )
 
 
 async def ensure_voice_room(thread_id: str):
-    """Conecta a Katherine a la llamada asociada al hilo y publica su pista de micrófono."""
-    thread_id = str(thread_id)
+    """Join an active Anarchy call for this thread and publish Katherine's audio track."""
+    thread_id = str(thread_id or "").strip()
     if not thread_id:
         return False, "No pude identificar la sala de esta conversación."
     if not COMMUNITY_TOKEN:
         return False, "Falta COMMUNITY_BOT_TOKEN en las variables de Render."
-    if not await asyncio.to_thread(load_livekit_dependency):
-        return False, "LiveKit no está disponible en Render. Revisa las dependencias."
 
     lock = VOICE_CONNECT_LOCKS.setdefault(thread_id, asyncio.Lock())
     async with lock:
@@ -3249,6 +3627,50 @@ async def ensure_voice_room(thread_id: str):
                 thread_id,
             )
             await stop_dj_room(thread_id, request_leave=False)
+
+        # The join endpoint only grants LiveKit credentials for a call that is
+        # already active. Check the community bot's visible rooms first so a
+        # chat ID without an active voice call does not produce a blind 404.
+        rooms_result = await api("GET", "/live-rooms", "community")
+        if not rooms_result.get("ok"):
+            data = rooms_result.get("data") or {}
+            if not isinstance(data, dict):
+                data = {"message": str(data)}
+            reason = (
+                data.get("anarchy:error")
+                or data.get("error")
+                or data.get("message")
+            )
+            return False, (
+                f"No pude consultar las llamadas disponibles (HTTP "
+                f"{rooms_result.get('status')}): "
+                f"{reason or 'Anarchy Apps rechazó la solicitud'}. "
+                "Comprueba COMMUNITY_BOT_TOKEN y que el bot comunitario esté "
+                "añadido a esta comunidad."
+            )
+
+        rooms_data = rooms_result.get("data") or {}
+        room_list = rooms_data.get("roomList") if isinstance(rooms_data, dict) else None
+        if not isinstance(room_list, list):
+            return False, "Anarchy no devolvió una lista válida de llamadas activas."
+
+        active_room = find_live_room_for_thread(room_list, thread_id)
+        if active_room is None:
+            logging.info(
+                "[VOZ] No hay llamada activa visible para el hilo %s; salas visibles=%s.",
+                thread_id,
+                len(room_list),
+            )
+            return False, (
+                f"No hay una llamada en vivo activa para el chat {thread_id}. "
+                "Abre primero la llamada desde Anarchy y vuelve a ejecutar !join. "
+                "Puedes comprobar las salas detectadas con !salas. Si la llamada "
+                "ya está abierta, verifica que COMMUNITY_BOT_TOKEN corresponda "
+                "al bot comunitario añadido a esta comunidad."
+            )
+
+        if not await asyncio.to_thread(load_livekit_dependency):
+            return False, "LiveKit no está disponible en Render. Revisa las dependencias."
 
         ready = asyncio.Event()
         DJ_READY_EVENTS[thread_id] = ready
@@ -3284,7 +3706,7 @@ async def ensure_voice_room(thread_id: str):
 
             # Extra bounded headroom absorbs short scheduler/network stalls.
             audio_source = livekit_rtc.AudioSource(
-                48000, 1, queue_size_ms=2000
+                48000, 1, queue_size_ms=500
             )
             audio_track = livekit_rtc.LocalAudioTrack.create_audio_track(
                 "katherine-voice",
@@ -3307,6 +3729,12 @@ async def ensure_voice_room(thread_id: str):
                 "speech_task": None,
                 "speech_queue": asyncio.Queue(maxsize=20),
                 "speech_priority_queue": asyncio.Queue(maxsize=5),
+                "music_audio_queue": asyncio.Queue(maxsize=8),
+                "speech_audio_queue": asyncio.Queue(maxsize=8),
+                "mixer_task": None,
+                "duck_enabled": True,
+                "transition_ms": 500,
+                "repeat_mode": "off",
                 "reading_enabled": False,
                 "speaking": asyncio.Event(),
                 "filename": None,
@@ -3328,6 +3756,8 @@ async def ensure_voice_room(thread_id: str):
                 "started_at": time.time()
             }
             room_state = DJ_ROOMS[thread_id]
+            if not ensure_audio_mixer_running(thread_id, room_state):
+                raise RuntimeError("No pude iniciar el mezclador de audio de LiveKit.")
 
             def on_livekit_disconnected(reason=None):
                 current_state = DJ_ROOMS.get(thread_id)
@@ -3404,7 +3834,7 @@ async def stop_dj_room(
                 event.set()
 
         current_task = asyncio.current_task()
-        for task_name in ("task", "speech_task"):
+        for task_name in ("task", "speech_task", "mixer_task"):
             task = state.get(task_name)
             if (
                 task
@@ -3444,6 +3874,7 @@ async def stop_dj_playback(thread_id: str) -> bool:
     state = DJ_ROOMS.get(key)
     if not state:
         return False
+    await drain_audio_queue(state.get("music_audio_queue"))
     playback_stop = state.get("playback_stop_event")
     if playback_stop is not None:
         playback_stop.set()
@@ -3504,12 +3935,60 @@ def clean_speech_text(content: str, include_links: bool = False, include_mention
 
 
 async def stream_speech_file(thread_id: str, file_path: str):
+    """Decode TTS and preserve sample continuity across PyAV decoder frames."""
     state = DJ_ROOMS.get(str(thread_id))
-    if not state:
-        return
-    if not await asyncio.to_thread(load_audio_dependencies):
+    if not state or not await asyncio.to_thread(load_audio_dependencies):
         return
     container = pyav.open(file_path, mode="r")
+    pending = np.empty(0, dtype=np.int16)
+
+    async def send_full_frames(final: bool = False) -> None:
+        nonlocal pending
+        frames, pending = split_complete_audio_frames(pending)
+        if final and len(pending):
+            final_frame = np.pad(
+                pending,
+                (0, DJ_MIXER_FRAME_SAMPLES - len(pending)),
+                mode="constant",
+            )
+            frames.append(final_frame.astype(np.int16, copy=False))
+            pending = np.empty(0, dtype=np.int16)
+
+        for frame in frames:
+            if (
+                DJ_ROOMS.get(str(thread_id)) is not state
+                or state["stop_event"].is_set()
+                or not state.get("reading_enabled")
+            ):
+                return
+            tts_volume = max(0.0, min(1.0, float(state.get("tts_volume", 0.75))))
+            if tts_volume <= 0:
+                frame = np.zeros_like(frame)
+            elif tts_volume < 1:
+                frame = np.clip(
+                    frame.astype(np.float32) * tts_volume,
+                    -32768, 32767
+                ).astype(np.int16)
+
+            # Restart the writer if it ended unexpectedly; do not fill a dead
+            # queue until the TTS worker becomes permanently blocked.
+            while not ensure_audio_mixer_running(thread_id, state):
+                if (
+                    DJ_ROOMS.get(str(thread_id)) is not state
+                    or state["stop_event"].is_set()
+                    or not state.get("reading_enabled")
+                ):
+                    return
+                await asyncio.sleep(0.1)
+            try:
+                await asyncio.wait_for(
+                    enqueue_audio_samples(state.get("speech_audio_queue"), frame),
+                    timeout=3.0,
+                )
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError("El mezclador no consume la cola de voz.") from exc
+            metrics["tts_audio_frames_enqueued"] += 1
+
     try:
         audio_stream = next(
             (stream for stream in container.streams if stream.type == "audio"),
@@ -3528,37 +4007,24 @@ async def stream_speech_file(thread_id: str, file_path: str):
                 or state["stop_event"].is_set()
                 or not state.get("reading_enabled")
             ):
-                break
+                return
             for frame in resampler.resample(decoded):
                 samples = np.asarray(frame.to_ndarray(), dtype=np.int16).reshape(-1)
-                for offset in range(0, len(samples), 480):
-                    if (
-                        DJ_ROOMS.get(str(thread_id)) is not state
-                        or state["stop_event"].is_set()
-                        or not state.get("reading_enabled")
-                    ):
-                        return
-                    chunk = samples[offset:offset + 480]
-                    if not len(chunk):
-                        continue
-                    # Volumen independiente para TTS; se lee en cada bloque para
-                    # permitir cambios en tiempo real mientras Katherine habla.
-                    tts_volume = max(
-                        0.0, min(1.0, float(state.get("tts_volume", 0.75)))
-                    )
-                    if tts_volume <= 0:
-                        chunk = np.zeros_like(chunk)
-                    elif tts_volume < 1:
-                        chunk = np.clip(
-                            chunk.astype(np.float32) * tts_volume,
-                            -32768, 32767
-                        ).astype(np.int16)
-                    audio_frame = livekit_rtc.AudioFrame.create(
-                        48000, 1, len(chunk)
-                    )
-                    destination = np.frombuffer(audio_frame.data, dtype=np.int16)
-                    destination[:len(chunk)] = chunk
-                    await state["audio_source"].capture_frame(audio_frame)
+                if len(samples):
+                    pending = np.concatenate((pending, samples))
+                    await send_full_frames()
+
+        # Flush any samples retained by the resampler before padding the single
+        # final partial 10 ms frame, rather than padding at every decoder boundary.
+        try:
+            for frame in resampler.resample(None):
+                samples = np.asarray(frame.to_ndarray(), dtype=np.int16).reshape(-1)
+                if len(samples):
+                    pending = np.concatenate((pending, samples))
+                    await send_full_frames()
+        except (TypeError, ValueError, AttributeError):
+            pass
+        await send_full_frames(final=True)
     finally:
         container.close()
 
@@ -3567,7 +4033,12 @@ async def speech_queue_worker(thread_id: str):
     state = DJ_ROOMS.get(str(thread_id))
     if not state or not load_tts_dependency():
         return
+    metrics["tts_worker_starts"] += 1
+    logging.info("[TTS] Worker de lectura activo en %s.", thread_id)
     while not state["stop_event"].is_set():
+        if not state.get("reading_enabled"):
+            await asyncio.sleep(0.1)
+            continue
         queue = state.get("speech_priority_queue")
         try:
             text_to_read = queue.get_nowait()
@@ -3592,7 +4063,10 @@ async def speech_queue_worker(thread_id: str):
                 state.get("tts_voice", TTS_VOICE),
                 rate=state.get("tts_rate", "+0%")
             )
-            await communicate.save(temp_path)
+            await asyncio.wait_for(communicate.save(temp_path), timeout=45.0)
+            if not Path(temp_path).is_file() or Path(temp_path).stat().st_size < 64:
+                raise RuntimeError("Edge TTS generó un archivo de audio vacío.")
+            metrics["tts_audio_files_generated"] += 1
 
             if (
                 DJ_ROOMS.get(str(thread_id)) is state
@@ -3625,8 +4099,10 @@ async def speech_queue_worker(thread_id: str):
                                     break
                     state["speech_task"] = None
                 break
+            metrics["tts_read_errors"] += 1
             logging.warning(
-                "[TTS] No se pudo leer un mensaje | error=%s | detalle=%s",
+                "[TTS] No se pudo leer un mensaje en %s | error=%s | detalle=%s",
+                thread_id,
                 type(exc).__name__,
                 sanitize_ai_trace_text(exc, 240),
             )
@@ -3653,11 +4129,16 @@ async def enable_room_reading(thread_id: str):
 
     state = DJ_ROOMS[str(thread_id)]
     state["reading_enabled"] = True
-    task = state.get("speech_task")
-    if task is None or task.done():
-        state["speech_task"] = asyncio.create_task(
-            speech_queue_worker(str(thread_id))
+    if not ensure_audio_mixer_running(str(thread_id), state):
+        state["reading_enabled"] = False
+        return False, (
+            "La salida de audio todavía se está recuperando. "
+            "Vuelve a ejecutar !leer en unos segundos."
         )
+    if not ensure_speech_worker_running(str(thread_id), state):
+        state["reading_enabled"] = False
+        return False, "No pude iniciar el lector TTS. Revisa los registros de audio e inténtalo otra vez."
+    logging.info("[TTS] Lectura habilitada en %s.", thread_id)
     return True, "Lectura en voz alta activada. Leeré los mensajes de texto de esta sala."
 
 
@@ -3685,6 +4166,7 @@ async def disable_room_reading(thread_id: str):
         except asyncio.CancelledError:
             pass
     state["speaking"].clear()
+    await drain_audio_queue(state.get("speech_audio_queue"))
     return True, "Lectura en voz alta desactivada. Katherine seguirá dentro de la llamada."
 
 
@@ -3751,9 +4233,11 @@ async def enqueue_message_for_speech(event: dict, source: str):
         return
     recent[digest] = now
     is_directed = bool(re.match(r"^(?:oye[, ]+)?katherine\b", content, flags=re.I))
+    priority_queue = state.get("speech_priority_queue")
     queue = (
-        state.get("speech_priority_queue") or state["speech_queue"]
-        if is_directed else state["speech_queue"]
+        priority_queue
+        if is_directed and priority_queue is not None
+        else state["speech_queue"]
     )
     if queue.full():
         try:
@@ -3763,9 +4247,20 @@ async def enqueue_message_for_speech(event: dict, source: str):
             pass
     try:
         queue.put_nowait(speech_text)
+        logging.info(
+            "[TTS] Mensaje encolado en %s (%s caracteres; prioridad=%s).",
+            thread_id, len(speech_text), is_directed,
+        )
+        metrics["tts_messages_enqueued"] += 1
         metrics["tts_priority_enqueued" if is_directed else "tts_regular_enqueued"] += 1
+        ensure_audio_mixer_running(thread_id, state)
+        ensure_speech_worker_running(thread_id, state)
     except asyncio.QueueFull:
-        logging.warning("[TTS] Cola %s llena; se omitió un mensaje en %s", "prioritaria" if is_directed else "normal", thread_id)
+        metrics["tts_messages_dropped"] += 1
+        logging.warning(
+            "[TTS] Cola %s llena; se omitió un mensaje en %s",
+            "prioritaria" if is_directed else "normal", thread_id
+        )
 
 
 async def download_dj_audio(url: str, file_extension: str | None = None) -> Path:
@@ -3840,6 +4335,13 @@ async def download_dj_audio(url: str, file_extension: str | None = None) -> Path
                         else:
                             host_state["failures"] = int(host_state.get("failures", 0)) + 1
                             host_state["last_error"] = f"HTTP {response.status_code}"
+                            if cool_down_dj_source_on_http_failure(
+                                current_host, response.status_code
+                            ):
+                                logging.warning(
+                                    "[DJ] Descarga bloqueada por proveedor | host=%s | HTTP %s",
+                                    current_host, response.status_code,
+                                )
                             if response.status_code in (429, 500, 502, 503, 504):
                                 host_state["consecutive_failures"] = int(host_state.get("consecutive_failures", 0)) + 1
                                 if host_state["consecutive_failures"] >= 6:
@@ -3937,7 +4439,7 @@ async def download_dj_audio(url: str, file_extension: str | None = None) -> Path
 
 
 async def _dj_play_single(thread_id: str, path: Path, state: dict) -> bool:
-    """Reproduce una pista; False indica salto o interrupción."""
+    """Decode one track into bounded PCM frames for the shared audio mixer."""
     container = pyav.open(str(path), mode="r")
     try:
         audio_stream = next(
@@ -3947,46 +4449,58 @@ async def _dj_play_single(thread_id: str, path: Path, state: dict) -> bool:
         if audio_stream is None:
             raise ValueError("El archivo no contiene una pista de audio.")
         resampler = pyav.AudioResampler(format="s16", layout="mono", rate=48000)
+        total_samples = None
+        try:
+            if audio_stream.duration is not None and audio_stream.time_base is not None:
+                total_samples = max(
+                    0,
+                    int(float(audio_stream.duration * audio_stream.time_base) * 48000),
+                )
+        except (TypeError, ValueError, OverflowError):
+            total_samples = None
+        fade_samples = int(
+            48000 * max(0.0, min(2.0, float(state.get("transition_ms", 500)) / 1000.0))
+        )
+        position = 0
         for decoded in container.decode(audio_stream):
             if state["stop_event"].is_set() or state["playback_stop_event"].is_set():
                 return False
             for frame in resampler.resample(decoded):
                 samples = np.asarray(frame.to_ndarray(), dtype=np.int16).reshape(-1)
-                volume = max(0.0, min(1.0, float(state.get("volume", 0.75))))
-                if volume <= 0:
-                    samples = np.zeros_like(samples)
-                elif volume < 1:
-                    samples = np.clip(
-                        samples.astype(np.float32) * volume, -32768, 32767
-                    ).astype(np.int16)
-                for offset in range(0, len(samples), 480):
+                for offset in range(0, len(samples), DJ_MIXER_FRAME_SAMPLES):
                     if state["stop_event"].is_set() or state["playback_stop_event"].is_set():
                         return False
                     if state["skip_event"].is_set():
+                        await drain_audio_queue(state.get("music_audio_queue"))
                         return False
                     while not state["pause_event"].is_set():
                         if state["stop_event"].is_set() or state["playback_stop_event"].is_set():
                             return False
                         if state["skip_event"].is_set():
+                            await drain_audio_queue(state.get("music_audio_queue"))
                             return False
                         await asyncio.sleep(0.04)
-                    while state["speaking"].is_set():
-                        if state["stop_event"].is_set() or state["playback_stop_event"].is_set():
-                            return False
-                        if state["skip_event"].is_set():
-                            return False
-                        await asyncio.sleep(0.02)
-                    chunk = samples[offset:offset + 480]
+                    chunk = samples[offset:offset + DJ_MIXER_FRAME_SAMPLES]
                     if not len(chunk):
                         continue
-                    audio_frame = livekit_rtc.AudioFrame.create(48000, 1, len(chunk))
-                    destination = np.frombuffer(audio_frame.data, dtype=np.int16)
-                    destination[:len(chunk)] = chunk
-                    await state["audio_source"].capture_frame(audio_frame)
+                    if fade_samples:
+                        fade_in = min(1.0, max(0.0, (position + len(chunk)) / fade_samples))
+                        fade_out = 1.0
+                        if total_samples is not None:
+                            remaining = max(0, total_samples - position)
+                            if remaining < fade_samples:
+                                fade_out = min(1.0, remaining / fade_samples)
+                        gain = min(fade_in, fade_out)
+                        if gain < 0.999:
+                            chunk = np.clip(
+                                chunk.astype(np.float32) * gain,
+                                -32768, 32767
+                            ).astype(np.int16)
+                    await enqueue_audio_samples(state.get("music_audio_queue"), chunk)
+                    position += len(chunk)
         return True
     finally:
         container.close()
-
 
 async def dj_playback_loop(
     thread_id: str,
@@ -3995,51 +4509,48 @@ async def dj_playback_loop(
     audio_source,
     display_name: str | None = None
 ):
+    """Play a track, then fetch only the next queued remote item."""
     state = DJ_ROOMS.get(str(thread_id))
     if not state:
         return
 
     current_path = Path(file_path)
     current_temporary = state.get("temporary_audio_path")
-    current_looping = bool(looping)
     current_title = display_name or current_path.name
+    current_metadata = state.get("track")
+    if looping:
+        state["repeat_mode"] = "one"
+
+    async def cleanup_temporary(path):
+        if path:
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                logging.warning("[DJ] No pude borrar una pista temporal de %s", thread_id)
 
     try:
         while not state["stop_event"].is_set() and not state["playback_stop_event"].is_set():
             state["filename"] = current_title
             state["track_started_at"] = time.time()
             state["skip_event"].clear()
+            played_ok = False
             try:
-                while not state["stop_event"].is_set() and not state["playback_stop_event"].is_set():
-                    last_playback_error = None
-                    for attempt in range(3):
-                        try:
-                            played = await _dj_play_single(thread_id, current_path, state)
-                            last_playback_error = None
-                            break
-                        except asyncio.CancelledError:
+                for attempt in range(3):
+                    try:
+                        played_ok = await _dj_play_single(thread_id, current_path, state)
+                        break
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        if attempt >= 2:
                             raise
-                        except Exception as exc:
-                            last_playback_error = exc
-                            if attempt >= 2:
-                                raise
-                            metrics["dj_playback_retries"] += 1
-                            delay = min(4.0, 0.75 * (2 ** attempt))
-                            logging.warning(
-                                "[DJ] Reintento %s/2 para %s en sala %s tras %s",
-                                attempt + 1, current_title, thread_id, type(exc).__name__
-                            )
-                            await asyncio.sleep(delay)
-                    if last_playback_error is not None:
-                        raise last_playback_error
-                    if (
-                        current_looping and played
-                        and not state["skip_event"].is_set()
-                        and not state["stop_event"].is_set()
-                        and not state["playback_stop_event"].is_set()
-                    ):
-                        continue
-                    break
+                        metrics["dj_playback_retries"] += 1
+                        delay = min(4.0, 0.75 * (2 ** attempt))
+                        logging.warning(
+                            "[DJ] Reintento %s/2 para %s en sala %s tras %s",
+                            attempt + 1, current_title, thread_id, type(exc).__name__
+                        )
+                        await asyncio.sleep(delay)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -4052,13 +4563,29 @@ async def dj_playback_loop(
                     "developer"
                 )
 
-            if current_temporary:
-                try:
-                    Path(current_temporary).unlink(missing_ok=True)
-                except OSError:
-                    logging.warning("[DJ] No pude eliminar una pista temporal de %s", thread_id)
+            repeat_mode = str(state.get("repeat_mode") or "off")
+            if played_ok and repeat_mode == "one" and not state["skip_event"].is_set():
+                continue
+
+            if played_ok and repeat_mode == "queue" and not state["stop_event"].is_set():
+                repeat_source = (
+                    str((current_metadata or {}).get("url") or "")
+                    if isinstance(current_metadata, dict) else ""
+                )
+                repeat_path = repeat_source or str(current_path)
+                state["queue"].append({
+                    "path": repeat_path,
+                    "remote": bool(repeat_source and dj_audio_url_allowed(repeat_source)),
+                    "temporary": None,
+                    "title": current_title,
+                    "metadata": dict(current_metadata) if isinstance(current_metadata, dict) else None,
+                    "looping": False,
+                })
+
+            await cleanup_temporary(current_temporary)
             current_temporary = None
             state["temporary_audio_path"] = None
+            await drain_audio_queue(state.get("music_audio_queue"))
 
             if state["stop_event"].is_set() or state["playback_stop_event"].is_set():
                 break
@@ -4066,33 +4593,64 @@ async def dj_playback_loop(
                 state["skip_event"].clear()
                 metrics["dj_tracks_skipped"] += 1
 
-            if state["queue"]:
-                next_item = state["queue"].popleft()
-                current_path = Path(next_item["path"])
-                current_temporary = next_item.get("temporary")
-                current_title = next_item.get("title") or current_path.name
-                current_looping = bool(next_item.get("looping", False))
-                state["track"] = next_item.get("metadata")
-                state["temporary_audio_path"] = current_temporary
-                state["filename"] = current_title
-                metrics["dj_queue_advanced"] += 1
-                continue
-            break
+            next_item = None
+            while state["queue"] and not state["stop_event"].is_set():
+                candidate = state["queue"].popleft()
+                candidate_path = str(candidate.get("path") or "")
+                candidate_metadata = candidate.get("metadata")
+                candidate_remote = bool(
+                    candidate.get("remote")
+                    or (candidate_path.startswith("https://") and dj_audio_url_allowed(candidate_path))
+                )
+                try:
+                    if candidate_remote:
+                        candidate_path_obj = await download_dj_audio(
+                            candidate_path,
+                            file_extension=(
+                                candidate_metadata.get("extension")
+                                if isinstance(candidate_metadata, dict) else None
+                            ),
+                        )
+                        candidate_temporary = candidate_path_obj
+                    else:
+                        candidate_path_obj = validate_local_dj_audio(Path(candidate_path))
+                        candidate_temporary = candidate.get("temporary")
+                    next_item = (candidate, candidate_path_obj, candidate_temporary)
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    metrics["dj_queue_item_errors"] += 1
+                    await send_message(
+                        str(thread_id),
+                        f"⚠️ No pude preparar «{candidate.get('title') or 'la siguiente pista'}» "
+                        f"({type(exc).__name__}). Continuaré con la cola.",
+                        "developer"
+                    )
+                    await cleanup_temporary(candidate.get("temporary"))
+                    continue
+
+            if next_item is None:
+                break
+
+            item, current_path, current_temporary = next_item
+            current_metadata = item.get("metadata")
+            current_title = item.get("title") or Path(str(current_path)).name
+            state["track"] = current_metadata
+            state["temporary_audio_path"] = str(current_temporary) if current_temporary else None
+            state["filename"] = current_title
+            state["repeat_mode"] = "one" if item.get("looping") else str(state.get("repeat_mode") or "off")
+            metrics["dj_queue_advanced"] += 1
 
     except asyncio.CancelledError:
         raise
     finally:
-        if current_temporary:
-            try:
-                Path(current_temporary).unlink(missing_ok=True)
-            except OSError:
-                pass
+        await cleanup_temporary(current_temporary)
         if DJ_ROOMS.get(str(thread_id)) is state and state.get("task") is asyncio.current_task():
             state["task"] = None
             state["filename"] = None
             state["track"] = None
-            # An empty DJ queue is not a request to leave the voice call.
-            # Keep the LiveKit room alive for chat, TTS and the next track.
+            # The LiveKit connection remains active after the music queue ends.
 
 
 def validate_local_dj_audio(path: Path):
@@ -4130,40 +4688,76 @@ async def start_dj_room(
     track_metadata: dict | None = None,
     enqueue: bool = False
 ):
+    """Start playback or enqueue a validated source without eagerly downloading it."""
     if not await asyncio.to_thread(load_audio_dependencies):
         detail = f" ({DJ_IMPORT_ERROR})" if DJ_IMPORT_ERROR else ""
         return False, "Faltan dependencias de LiveKit, PyAV o NumPy en Render." + detail
 
-    temporary_audio = None
-    original_source = file_path
-    is_remote = isinstance(file_path, str) and file_path.lower().startswith("https://")
+    thread_id = str(thread_id or "").strip()
+    if not thread_id:
+        return False, "No pude identificar la sala."
+    original_source = str(file_path) if isinstance(file_path, (str, Path)) else ""
+    is_remote = original_source.lower().startswith("https://")
     if is_remote:
-        if not dj_audio_url_allowed(file_path):
+        if not dj_audio_url_allowed(original_source):
             return False, "El enlace no pertenece a una fuente musical autorizada."
+        remote_host = urlsplit(original_source).hostname or ""
+        if dj_source_is_cooled(remote_host):
+            remaining = dj_source_cooldown_remaining(remote_host)
+            return False, (
+                "La fuente musical está en pausa temporal tras un error HTTP. "
+                f"Volveré a consultarla en aproximadamente {max(1, (remaining + 59) // 60)} min."
+            )
+        playable_path: Path | str = original_source
     else:
         try:
-            file_path = validate_local_dj_audio(Path(file_path))
+            playable_path = validate_local_dj_audio(Path(file_path))
         except Exception as exc:
             metrics["dj_validation_errors"] += 1
             return False, f"El archivo no pasó la validación de audio: {str(exc)[:140]}."
 
-    # Join first: don't consume bandwidth or temporary disk if Anarchy/LiveKit
-    # rejects the room connection.
-    ok, message = await ensure_voice_room(str(thread_id))
+    ok, message = await ensure_voice_room(thread_id)
     if not ok:
         return False, message
 
+    state = DJ_ROOMS[str(thread_id)]
+    display_name = (
+        (track_metadata or {}).get("title")
+        or Path(original_source).name
+    )
+    active_task = state.get("task")
+
+    if enqueue and active_task and not active_task.done():
+        if len(state["queue"]) >= DJ_QUEUE_MAX_TRACKS:
+            return False, f"La cola alcanzó su límite de {DJ_QUEUE_MAX_TRACKS} canciones."
+        state["queue"].append({
+            "path": str(playable_path),
+            "remote": is_remote,
+            "temporary": None,
+            "title": display_name,
+            "metadata": dict(track_metadata) if isinstance(track_metadata, dict) else None,
+            "looping": bool(looping)
+        })
+        metrics["dj_tracks_queued"] += 1
+        return True, (
+            f"«{display_name}» añadida a la cola (posición {len(state['queue'])}). "
+            "Se descargará cuando vaya a reproducirse."
+            if is_remote else
+            f"«{display_name}» añadida a la cola (posición {len(state['queue'])})."
+        )
+
+    temporary_audio = None
     if is_remote:
         try:
             temporary_audio = await download_dj_audio(
-                file_path,
+                original_source,
                 file_extension=(track_metadata or {}).get("extension")
             )
-            file_path = temporary_audio
+            playable_path = temporary_audio
         except Exception as exc:
             logging.warning(
                 "[DJ] No se pudo preparar audio remoto | host=%s | error=%s | detalle=%s",
-                urlparse(str(original_source)).hostname or "desconocido",
+                urlparse(original_source).hostname or "desconocido",
                 type(exc).__name__,
                 sanitize_ai_trace_text(exc, 240),
             )
@@ -4171,28 +4765,6 @@ async def start_dj_room(
                 "No pude descargar o validar la canción "
                 f"({type(exc).__name__}: {str(exc)[:140]})."
             )
-
-    state = DJ_ROOMS[str(thread_id)]
-    display_name = (
-        (track_metadata or {}).get("title")
-        or (Path(str(original_source)).name if isinstance(original_source, (str, Path)) else "Audio")
-    )
-    active_task = state.get("task")
-
-    if enqueue and active_task and not active_task.done():
-        if len(state["queue"]) >= DJ_QUEUE_MAX_TRACKS:
-            if temporary_audio:
-                Path(temporary_audio).unlink(missing_ok=True)
-            return False, f"La cola alcanzó su límite de {DJ_QUEUE_MAX_TRACKS} canciones."
-        state["queue"].append({
-            "path": str(file_path),
-            "temporary": str(temporary_audio) if temporary_audio else None,
-            "title": display_name,
-            "metadata": track_metadata,
-            "looping": bool(looping)
-        })
-        metrics["dj_tracks_queued"] += 1
-        return True, f"«{display_name}» añadida a la cola (posición {len(state['queue'])})."
 
     if active_task and not active_task.done():
         state["task"] = None
@@ -4206,12 +4778,14 @@ async def start_dj_room(
             logging.exception("[DJ] Error reemplazando la pista anterior")
 
     for queued in list(state.get("queue", [])):
-        if queued.get("temporary"):
+        temporary = queued.get("temporary")
+        if temporary:
             try:
-                Path(queued["temporary"]).unlink(missing_ok=True)
+                Path(temporary).unlink(missing_ok=True)
             except OSError:
                 pass
     state["queue"].clear()
+    await drain_audio_queue(state.get("music_audio_queue"))
 
     old_temporary = state.get("temporary_audio_path")
     if old_temporary:
@@ -4224,14 +4798,15 @@ async def start_dj_room(
     state["skip_event"].clear()
     state["pause_event"].set()
     state["filename"] = display_name
-    state["track"] = track_metadata
+    state["track"] = dict(track_metadata) if isinstance(track_metadata, dict) else None
     state["looping"] = bool(looping)
+    state["repeat_mode"] = "one" if looping else str(state.get("repeat_mode") or "off")
     state["temporary_audio_path"] = str(temporary_audio) if temporary_audio else None
     state.setdefault("volume", 0.75)
     state.setdefault("last_volume", state["volume"])
     state["task"] = asyncio.create_task(
         dj_playback_loop(
-            str(thread_id), Path(file_path), bool(looping),
+            thread_id, Path(playable_path), bool(looping),
             state["audio_source"], display_name
         )
     )
@@ -7735,6 +8310,50 @@ async def maybe_send_auto_reply(thread_id: str, uid: str, nickname: str, content
     return False
 
 
+async def maybe_send_spelling_feedback(
+    thread_id: str, uid: str, nickname: str, content: str
+) -> bool:
+    """Offer gentle spelling feedback with bounded in-memory cooldowns only."""
+    thread_key = str(thread_id or "")
+    user_key = (thread_key, str(uid or nickname or "unknown"))
+    now = time.time()
+    if (
+        not thread_key
+        or SPELLING_CHAT_COOLDOWN.get(thread_key, 0) > now
+        or SPELLING_USER_COOLDOWN.get(user_key, 0) > now
+    ):
+        return False
+    try:
+        correction = await asyncio.to_thread(
+            detect_spanish_spelling_issues, str(content or "")
+        )
+    except Exception as exc:
+        logging.debug("[SPELLING] Detección omitida por error local: %s", type(exc).__name__)
+        return False
+    if not correction:
+        return False
+
+    safe_name = re.sub(r"[\r\n]+", " ", str(nickname or "")).strip()[:48]
+    greeting = f"{safe_name}, " if safe_name else ""
+    response = (
+        f"{greeting}creo que quisiste escribir: «{correction.corrected_text}». "
+        "Te entendí perfectamente; te lo comento por si te sirve. 😊"
+    )
+    SPELLING_CHAT_COOLDOWN[thread_key] = now + 12
+    SPELLING_USER_COOLDOWN[user_key] = now + 180
+    if len(SPELLING_CHAT_COOLDOWN) > 512:
+        SPELLING_CHAT_COOLDOWN.clear()
+    if len(SPELLING_USER_COOLDOWN) > 2048:
+        SPELLING_USER_COOLDOWN.clear()
+    metrics["spelling_corrections_sent"] += 1
+    logging.info(
+        "[SPELLING] Sugerencia enviada en %s (%s correcciones).",
+        thread_key, len(correction.corrections),
+    )
+    await send_message(thread_key, response, "developer")
+    return True
+
+
 def format_poll_results(poll: dict) -> str:
     options = poll.get("options") or []
     votes = poll.get("votes") or {}
@@ -10900,10 +11519,13 @@ Uso: !enciclopedia <nombre>""",
 
     if command in ("!pausa", "!pausar", "!reanudar", "!continuar", "!saltar", "!cola", "!dj"):
         subcommand = args[0].lower() if args else ""
-        if command == "!dj" and subcommand in (
+        dj_actions = {
             "pausa", "pausar", "reanudar", "continuar", "saltar", "skip",
-            "cola", "queue", "actual", "añadir", "agregar"
-        ):
+            "cola", "queue", "actual", "estado", "añadir", "agregar",
+            "encolar", "reproducir", "quitar", "mover", "vaciar",
+            "repetir", "transicion", "transición", "duck"
+        }
+        if command == "!dj" and subcommand in dj_actions:
             action = subcommand
         elif command != "!dj":
             action = {
@@ -10933,23 +11555,34 @@ Uso: !enciclopedia <nombre>""",
                     await send_message(thread, "⏭️ Saltando a la siguiente canción…", source, reply)
             elif action in ("cola", "queue"):
                 lines = [
-                    f"🎧 Reproduciendo: {state.get('filename') or 'Nada'}",
+                    f"🎧 Ahora suena: {state.get('filename') or 'Nada'}",
                     f"Estado: {'Pausada' if not state['pause_event'].is_set() else 'Reproduciendo'}",
-                    f"Volumen: {round(float(state.get('volume', 0.75))*100)}%"
+                    f"Volumen: {round(float(state.get('volume', 0.75))*100)}%",
+                    f"Repetición: {state.get('repeat_mode', 'off')}",
                 ]
-                for index, item in enumerate(list(state.get("queue", []))[:15], 1):
-                    lines.append(f"{index}. {item.get('title') or Path(item['path']).name}")
+                for index, item in enumerate(list(state.get("queue", []))[:DJ_QUEUE_MAX_TRACKS], 1):
+                    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+                    title = item.get("title") or metadata.get("title") or Path(str(item.get("path") or "Pista")).name
+                    lines.append(f"{index}. {title}")
                 if not state.get("queue"):
                     lines.append("La cola está vacía.")
+                lines.append("Gestiona con !dj quitar N, !dj mover A B o !dj vaciar.")
                 await send_message(thread, "\n".join(lines), source, reply)
-            elif action == "actual":
-                await send_message(
-                    thread,
-                    f"🎧 Ahora suena: {state.get('filename') or 'Sin pista'}\n"
-                    f"En cola: {len(state.get('queue', []))}\n"
+            elif action in ("actual", "estado"):
+                elapsed = max(0, int(time.time() - float(state.get("track_started_at") or time.time())))
+                metadata = state.get("track") if isinstance(state.get("track"), dict) else {}
+                lines = [
+                    f"🎧 Ahora suena: {state.get('filename') or 'Sin pista'}",
+                    f"Artista: {metadata.get('creator') or 'No indicado'}",
+                    f"Fuente: {metadata.get('source') or 'Archivo local'}",
+                    f"Tiempo transcurrido: {format_duration(elapsed)}",
+                    f"En cola: {len(state.get('queue', []))}",
                     f"Volumen: {round(float(state.get('volume', 0.75))*100)}%",
-                    source, reply
-                )
+                    f"Repetición: {state.get('repeat_mode', 'off')}",
+                    f"Fundido de transición: {int(state.get('transition_ms', 500))} ms",
+                    f"Atenuación al hablar: {'activada' if state.get('duck_enabled', True) else 'desactivada'}",
+                ]
+                await send_message(thread, "\n".join(lines), source, reply)
             elif action in ("añadir", "agregar"):
                 name = " ".join(args[1:]).strip()
                 path = resolve_dj_track(name)
@@ -10958,6 +11591,99 @@ Uso: !enciclopedia <nombre>""",
                 else:
                     ok, result = await start_dj_room(thread, path, False, enqueue=True)
                     await send_message(thread, f"🎶 {result}" if ok else f"DJ: {result}", source, reply)
+            elif action == "encolar":
+                try:
+                    index = int(args[1]) - 1
+                    saved = DJ_SEARCH_RESULTS.get(thread) or {}
+                    track = saved.get("tracks", [])[index]
+                    if saved.get("expires", 0) <= time.time():
+                        raise IndexError
+                except (IndexError, TypeError, ValueError):
+                    await send_message(thread, "Usa !dj buscar <tema> y luego !dj encolar <número> (1-10).", source, reply)
+                    return
+                ok, result = await start_dj_room(
+                    thread, track["url"], False, track_metadata=track, enqueue=True
+                )
+                await send_message(thread, f"🎶 {result}" if ok else f"DJ: {result}", source, reply)
+            elif action == "reproducir":
+                try:
+                    index = int(args[1]) - 1
+                    saved = DJ_SEARCH_RESULTS.get(thread) or {}
+                    track = saved.get("tracks", [])[index]
+                    if saved.get("expires", 0) <= time.time():
+                        raise IndexError
+                except (IndexError, TypeError, ValueError):
+                    await send_message(thread, "Usa !dj buscar <tema> y luego !dj reproducir <número> (1-10).", source, reply)
+                    return
+                ok, result, selected, _ = await start_dj_search_with_fallback(
+                    thread, saved.get("tracks", []), index
+                )
+                await send_message(
+                    thread,
+                    f"🎧 Ahora suena: {selected.get('title')}" if ok and selected else f"DJ: {result}",
+                    source, reply
+                )
+            elif action == "quitar":
+                try:
+                    position = int(args[1])
+                    item = state["queue"][position - 1]
+                except (IndexError, TypeError, ValueError):
+                    await send_message(thread, "Uso: !dj quitar <posición>. Consulta !dj cola.", source, reply)
+                    return
+                del state["queue"][position - 1]
+                if item.get("temporary"):
+                    Path(item["temporary"]).unlink(missing_ok=True)
+                await send_message(thread, f"🗑️ Quité «{item.get('title') or 'la pista'}» de la cola.", source, reply)
+            elif action == "mover":
+                if len(args) < 3 or not move_dj_queue_item(state["queue"], args[1], args[2]):
+                    await send_message(thread, "Uso: !dj mover <posición-origen> <posición-destino>.", source, reply)
+                    return
+                await send_message(thread, f"↕️ Pista movida a la posición {args[2]}.", source, reply)
+            elif action == "vaciar":
+                removed = len(state["queue"])
+                for item in list(state["queue"]):
+                    if item.get("temporary"):
+                        Path(item["temporary"]).unlink(missing_ok=True)
+                state["queue"].clear()
+                await send_message(thread, f"🧹 Cola vaciada. Pistas retiradas: {removed}.", source, reply)
+            elif action == "repetir":
+                mode = args[1].casefold() if len(args) > 1 else "estado"
+                aliases = {
+                    "no": "off", "off": "off", "desactivado": "off", "ninguna": "off",
+                    "una": "one", "1": "one", "one": "one", "cancion": "one",
+                    "cola": "queue", "todo": "queue", "all": "queue", "queue": "queue"
+                }
+                if mode in ("estado", "status"):
+                    await send_message(thread, f"🔁 Repetición actual: {state.get('repeat_mode', 'off')}. Usa !dj repetir off|una|cola.", source, reply)
+                    return
+                target = aliases.get(mode)
+                if target is None:
+                    await send_message(thread, "Usa !dj repetir off|una|cola.", source, reply)
+                    return
+                state["repeat_mode"] = target
+                await send_message(thread, f"🔁 Repetición ajustada: {target}.", source, reply)
+            elif action in ("transicion", "transición"):
+                try:
+                    milliseconds = int(args[1]) if len(args) > 1 else int(state.get("transition_ms", 500))
+                except ValueError:
+                    milliseconds = -1
+                if not 0 <= milliseconds <= 2000:
+                    await send_message(thread, "El fundido debe estar entre 0 y 2000 ms.", source, reply)
+                    return
+                state["transition_ms"] = milliseconds
+                await send_message(thread, f"🌊 Fundido de entrada/salida ajustado a {milliseconds} ms.", source, reply)
+            elif action == "duck":
+                mode = args[1].casefold() if len(args) > 1 else "estado"
+                if mode in ("on", "si", "sí", "activar"):
+                    state["duck_enabled"] = True
+                elif mode in ("off", "no", "desactivar"):
+                    state["duck_enabled"] = False
+                elif mode in ("estado", "status"):
+                    pass
+                else:
+                    await send_message(thread, "Usa !dj duck on|off.", source, reply)
+                    return
+                await send_message(thread, f"🎚️ Atenuación al hablar: {'activada' if state.get('duck_enabled', True) else 'desactivada'}.", source, reply)
             return
 
     if command == "!tts":
@@ -11234,18 +11960,127 @@ Uso: !enciclopedia <nombre>""",
                 reply
             )
             return
+        if args and args[0].lower() in ("probar", "test", "diagnostico"):
+            if not is_admin_uid(admin_uid):
+                await send_message(
+                    thread,
+                    "La prueba de reproducción está restringida al UID administrador.",
+                    dj_source,
+                    reply,
+                )
+                return
+
+            test_query = " ".join(args[1:]).strip() or "ambient instrumental"
+            normalized_query = clean_archive_value(test_query, 80)
+            archive_terms = re.findall(r"[\wáéíóúñü-]+", normalized_query, flags=re.I)[:5]
+            if not normalized_query or not archive_terms:
+                await send_message(
+                    thread,
+                    "Uso: !dj probar <tema>. Ejemplo: !dj probar ambient instrumental.",
+                    dj_source,
+                    reply,
+                )
+                return
+
+            # Force fresh catalog searches; metadata for individual archive items
+            # may remain cached, but the selected audio is downloaded and decoded.
+            DJ_ARCHIVE_CACHE.pop("search:" + " ".join(archive_terms).casefold(), None)
+            DJ_SOURCE_CACHE.pop("commons:" + normalized_query.casefold(), None)
+            DJ_SOURCE_CACHE.pop("jamendo:" + normalized_query.casefold(), None)
+            try:
+                results = await search_music_catalog(normalized_query, limit=5)
+            except Exception as exc:
+                logging.warning(
+                    "[DJ_PROBE] Falló la búsqueda real del catálogo | error=%s",
+                    type(exc).__name__,
+                )
+                await send_message(
+                    thread,
+                    "La prueba no pudo completar la búsqueda musical "
+                    f"({type(exc).__name__}). Revisa !dj fuentes.",
+                    dj_source,
+                    reply,
+                )
+                return
+
+            if not results:
+                await send_message(
+                    thread,
+                    "La prueba terminó: los catálogos no devolvieron pistas reproducibles "
+                    "con licencia y formato válidos. Prueba otro tema.",
+                    dj_source,
+                    reply,
+                )
+                return
+
+            logging.info(
+                "[DJ_PROBE] Búsqueda real completada | resultados=%s",
+                len(results),
+            )
+            await send_message(
+                thread,
+                f"🔎 Prueba DJ: encontré {len(results)} pistas para «{normalized_query}». "
+                "Voy a descargar, validar y reproducir una en esta llamada.",
+                dj_source,
+                reply,
+            )
+            ok, result_message, selected_track, selected_index = (
+                await start_dj_search_with_fallback(thread, results, 0)
+            )
+            if ok and selected_track:
+                logging.info(
+                    "[DJ_PROBE] Reproducción de prueba iniciada | source=%s",
+                    selected_track.get("source_key") or "unknown",
+                )
+                await send_message(
+                    thread,
+                    "✅ PRUEBA MUSICAL COMPLETADA\n"
+                    f"Pista: {selected_track.get('title', 'Audio')}\n"
+                    f"Fuente: {selected_track.get('source', 'Catálogo')}\n"
+                    f"Licencia: {selected_track.get('license', 'No indicada')}\n"
+                    "Búsqueda, descarga, validación y reproducción iniciadas correctamente.",
+                    dj_source,
+                )
+            else:
+                logging.warning(
+                    "[DJ_PROBE] No se pudo iniciar reproducción | error=%s",
+                    str(result_message).replace("\\n", " ")[:180],
+                )
+                await send_message(
+                    thread,
+                    "❌ La prueba encontró pistas, pero ninguna pudo reproducirse.\n"
+                    + str(result_message)[:260],
+                    dj_source,
+                )
+            return
+
         if args and args[0].lower() in ("fuentes", "fuente", "sources"):
             jamendo_status = (
                 "configurado" if JAMENDO_CLIENT_ID else
                 "pendiente: añade JAMENDO_CLIENT_ID en Render"
             )
+            archive_status = (
+                f"en pausa ({max(1, (dj_source_cooldown_remaining('archive.org') + 59) // 60)} min)"
+                if dj_source_is_cooled("archive.org") else "sin pausa temporal"
+            )
+            commons_status = (
+                f"en pausa ({max(1, (dj_source_cooldown_remaining('upload.wikimedia.org') + 59) // 60)} min)"
+                if dj_source_is_cooled("upload.wikimedia.org") else "sin pausa temporal"
+            )
+            if JAMENDO_CLIENT_ID:
+                jamendo_status = (
+                    f"en pausa ({max(1, (dj_source_cooldown_remaining('jamendo.com') + 59) // 60)} min)"
+                    if dj_source_is_cooled("jamendo.com") else "configurado, sin pausa temporal"
+                )
             await send_message(
                 thread,
                 "FUENTES MUSICALES DE KATHERINE\n"
-                "• Internet Archive: búsqueda y validación de licencia automática.\n"
-                "• Wikimedia Commons: audio libre con licencia verificable.\n"
-                f"• Jamendo: {jamendo_status}; requiere Client ID gratuito.\n"
-                "Las búsquedas combinan los catálogos disponibles, validan las pistas antes de reproducirlas y pueden usar recomendaciones por ambiente: estudiar, trabajar, relajarse, dormir, jugar, combate, triste o feliz.",
+                f"• Internet Archive: {archive_status}.\n"
+                f"• Wikimedia Commons: {commons_status}; puede pausarse si el CDN bloquea la descarga.\n"
+                f"• Jamendo: {jamendo_status}.\n"
+                "Una pista solo se inicia si supera los controles de licencia, tamaño, descarga, formato y decodificación. "
+                "Si un proveedor devuelve 401/403/429/5xx, se pausa temporalmente y Katherine prueba otra fuente.\n"
+                "Búsqueda por ambiente: !dj ambiente estudiar|trabajar|relajarse|dormir|jugar|combate|triste|feliz.",
                 dj_source,
                 reply
             )
@@ -11317,6 +12152,47 @@ Uso: !enciclopedia <nombre>""",
             await send_message(thread, "Usa !dj favorito lista, guardar <número>, reproducir <id> o quitar <id>.", dj_source, reply)
             return
 
+        if args[0].lower() in ("resultados", "pagina", "página"):
+            saved = DJ_SEARCH_RESULTS.get(thread) or {}
+            if saved.get("expires", 0) <= time.time():
+                DJ_SEARCH_RESULTS.pop(thread, None)
+                await send_message(thread, "Los resultados caducaron. Usa !dj buscar <tema> otra vez.", dj_source, reply)
+                return
+            try:
+                page = max(1, min(2, int(args[1]) if len(args) > 1 else 1))
+            except ValueError:
+                page = 1
+            tracks = saved.get("tracks", [])
+            start_index = (page - 1) * 5
+            page_tracks = tracks[start_index:start_index + 5]
+            if not page_tracks:
+                await send_message(thread, "No hay resultados en esa página.", dj_source, reply)
+                return
+            buttons = register_buttons(
+                dj_source,
+                thread,
+                "dj_select",
+                [
+                    {"label": f"{start_index + index + 1}. {track.get('title') or 'Pista'}"[:40],
+                     "value": str(start_index + index)}
+                    for index, track in enumerate(page_tracks)
+                ],
+                ttl=900
+            )
+            listing = "\n".join(
+                f"{start_index + index + 1}. {track.get('title') or 'Pista'} — "
+                f"{track.get('creator') or 'Autor no indicado'} "
+                f"({track.get('license') or 'licencia verificada'} · {track.get('source') or 'catálogo'})"
+                for index, track in enumerate(page_tracks)
+            )
+            await send_message(
+                thread,
+                f"RESULTADOS DJ · PÁGINA {page}/2\nBúsqueda: {saved.get('query') or 'consulta anterior'}\n\n"
+                f"{listing}\n\nUsa !dj encolar <número> para añadir sin interrumpir la pista actual.",
+                dj_source, reply, buttons
+            )
+            return
+
         if args[0].lower() in ("ambiente", "mood", "recomendar"):
             mood = " ".join(args[1:]).strip().casefold()
             search_term = resolve_music_mood(mood)
@@ -11332,7 +12208,7 @@ Uso: !enciclopedia <nombre>""",
                 )
                 return
             try:
-                results = await search_music_catalog(search_term, limit=5)
+                results = await search_music_catalog(search_term, limit=DJ_SEARCH_RESULT_LIMIT)
             except Exception as exc:
                 logging.exception("[DJ] Búsqueda musical multifuente fallida")
                 await send_message(
@@ -11355,6 +12231,7 @@ Uso: !enciclopedia <nombre>""",
 
             DJ_SEARCH_RESULTS[thread] = {
                 "tracks": results,
+                "query": search_term,
                 "expires": time.time() + 900
             }
             for old_thread, saved in list(DJ_SEARCH_RESULTS.items()):
@@ -11382,7 +12259,8 @@ Uso: !enciclopedia <nombre>""",
             await send_message(
                 thread,
                 f"CATÁLOGO MUSICAL · BÚSQUEDA MULTIFUENTE\nBúsqueda: {search_term}\n\n"
-                f"{listing}\n\nSelecciona una pista para reproducirla en la sala:",
+                f"{listing}\n\nLos botones reproducen ahora las primeras cinco. Para la cola: !dj encolar <número>. "
+                "Para otra pista: !dj reproducir <número>. Resultados 6-10: !dj resultados 2.",
                 dj_source,
                 reply,
                 buttons
@@ -11503,8 +12381,20 @@ async def start_dj_search_with_fallback(
     start = max(0, min(len(tracks) - 1, int(selected_index)))
     last_error = "No pude preparar ninguna pista."
     candidate_order = list(range(start, len(tracks))) + list(range(0, start))
+    blocked_sources: set[str] = set()
+    source_hosts = {
+        "archive": "archive.org",
+        "commons": "upload.wikimedia.org",
+        "jamendo": "jamendo.com",
+    }
     for index in candidate_order:
         track = tracks[index]
+        source_key = str(track.get("source_key") or "").strip().lower()
+        track_host = source_hosts.get(source_key) or (urlsplit(str(track.get("url") or "")).hostname or "")
+        cooldown_key = dj_source_cooldown_key(track_host)
+        if cooldown_key in blocked_sources or dj_source_is_cooled(cooldown_key):
+            metrics["dj_fallback_tracks_skipped"] += 1
+            continue
         ok, message = await start_dj_room(
             thread_id,
             track["url"],
@@ -11522,6 +12412,11 @@ async def start_dj_search_with_fallback(
             return True, message, track, index
         last_error = message
         recoverable = is_recoverable_dj_failure(message)
+        if dj_source_is_cooled(cooldown_key):
+            blocked_sources.add(cooldown_key)
+        elif re.search(r"HTTP\s*(?:401|403|429|500|502|503|504)", str(message), re.I):
+            cool_down_dj_source(cooldown_key, 600)
+            blocked_sources.add(cooldown_key)
         if not recoverable:
             break
         metrics["dj_fallback_tracks_skipped"] += 1
@@ -11776,11 +12671,20 @@ async def handle_interaction(event: dict, source: str):
                 dj_source
             )
             return
+        raw_choice = str(choice or "")
+        queue_choice = raw_choice.startswith("queue:")
         try:
-            selected_index = int(choice)
+            selected_index = int(raw_choice.split(":", 1)[1] if queue_choice else raw_choice)
             track = saved.get("tracks", [])[selected_index]
         except (TypeError, ValueError, IndexError):
             await send_message(thread_id, "Esa selección ya no está disponible.", dj_source)
+            return
+
+        if queue_choice:
+            ok, message = await start_dj_room(
+                thread_id, track["url"], False, track_metadata=track, enqueue=True
+            )
+            await send_message(thread_id, f"🎶 {message}" if ok else f"DJ: {message}", dj_source)
             return
 
         ok, message, selected_track, selected_index = await start_dj_search_with_fallback(
@@ -11896,33 +12800,23 @@ async def dispatch(event: dict, source: str):
                     "category": "inspection_error",
                 }
             if link_verdict.get("blocked"):
-                message_id = str(
-                    message_data.get("id")
-                    or message_data.get("messageId")
-                    or message_data.get("message_id")
-                    or ""
-                ).strip()
-                deleted = False
-                if message_id:
-                    deletion = await api(
-                        "DELETE",
-                        f"/threads/{event.get('threadId')}/messages/{message_id}",
-                        source,
-                    )
-                    deleted = bool(deletion.get("ok") or deletion.get("status") == 404)
-                metrics["automatic_link_blocks"] = metrics.get("automatic_link_blocks", 0) + 1
-                logging.warning(
-                    "[LINK_GUARD] Mensaje bloqueado | categoria=%s | eliminado=%s",
-                    link_verdict.get("category", "blocked"),
-                    deleted,
+                metrics["automatic_link_warnings"] = (
+                    metrics.get("automatic_link_warnings", 0) + 1
                 )
-                if not deleted:
-                    await send_message(
-                        str(event.get("threadId") or ""),
-                        "🛡️ No se permitió el enlace: "
-                        + str(link_verdict.get("reason") or "destino no permitido."),
-                        source,
-                    )
+                logging.warning(
+                    "[LINK_GUARD] Enlace no permitido detectado; la API no permite "
+                    "eliminar mensajes ajenos | categoria=%s",
+                    link_verdict.get("category", "blocked"),
+                )
+                await send_message(
+                    str(event.get("threadId") or ""),
+                    "🛡️ Enlace no permitido detectado. Katherine no procesará este mensaje. "
+                    "La API de Anarchy no permite que un bot elimine mensajes de otros usuarios, "
+                    "por lo que el mensaje y el enlace siguen visibles. Un moderador debe retirarlo. "
+                    "Motivo: "
+                    + str(link_verdict.get("reason") or "destino no permitido."),
+                    source,
+                )
                 return
 
         await enqueue_message_for_speech(event, source)
@@ -11949,6 +12843,62 @@ async def dispatch(event: dict, source: str):
                 await handle_command(reply_event, source)
                 return
             name_call = extract_katherine_call(incoming_text)
+            if name_call is not None:
+                raw_uid = str(author_data.get("uid") or author_data.get("nickname") or "unknown")
+                if name_call:
+                    await maybe_send_spelling_feedback(
+                        str(event.get("threadId") or ""),
+                        raw_uid,
+                        str(author_data.get("nickname") or "Viajero"),
+                        incoming_text,
+                    )
+                    corrected_call = await asyncio.to_thread(
+                        detect_spanish_spelling_issues, name_call
+                    )
+                    if corrected_call:
+                        name_call = corrected_call.corrected_text
+                affection = detect_affectionate_expression(name_call)
+                if affection:
+                    affectionate_replies = {
+                        "love": (
+                            "Awww, qué bonito leer eso. Te mando muchísimo cariño de vuelta. 💗",
+                            "Me sacaste una sonrisa. Gracias por quererme y dejarme acompañarte. 💕",
+                            "Qué mensaje tan dulce. Aquí tienes a Katherine para darte conversación y un abrazo virtual. 🫂",
+                        ),
+                        "care": (
+                            "Yo también te tengo mucho cariño. Me alegra compartir estos ratitos contigo. 💗",
+                            "Awww, gracias. Te mando un abrazo enorme, de esos que reconfortan. 🫂",
+                            "Qué lindo que me lo digas. Me encanta poder acompañarte por aquí. 💕",
+                        ),
+                        "gratitude": (
+                            "¡Con muchísimo gusto! Me alegra haberte ayudado. 💗",
+                            "No tienes que agradecerme, de verdad. Para eso estoy; cuenta conmigo. ✨",
+                            "Awww, gracias a ti por confiar en mí. ¡Un abrazo! 🫂",
+                        ),
+                        "compliment": (
+                            "Awww, qué lindo cumplido. Gracias por mirarme con tanto cariño. 💗",
+                            "Me vas a sonrojar. Gracias por decirme algo tan bonito. 🌷",
+                            "Qué ternura. Me alegra que disfrutes hablar conmigo. 💕",
+                        ),
+                        "greeting": (
+                            "¡Holaaa! Qué alegría verte por aquí. ¿Cómo va tu día? 💗",
+                            "¡Holi! Ven, ponte cómodo. ¿Qué hacemos hoy? ✨",
+                            "¡Buenas! Me alegra leerte. ¿Cómo estás? 🫂",
+                        ),
+                        "miss_you": (
+                            "Awww, qué bonito que hayas vuelto. Te mando un abrazo enorme. 💗",
+                            "¡Qué alegría coincidir otra vez! Aquí seguimos, con mucho cariño. 🌷",
+                            "Me alegra tenerte de vuelta por aquí. ¿Cómo has estado? 🫂",
+                        ),
+                    }
+                    await send_message(
+                        str(event.get("threadId") or ""),
+                        random.choice(affectionate_replies[affection]),
+                        source,
+                    )
+                    metrics["affectionate_name_replies"] += 1
+                    return
+
             routing_text = (
                 f"Katherine, {name_call}" if name_call is not None and name_call
                 else "Katherine" if name_call is not None
@@ -11993,12 +12943,15 @@ async def dispatch(event: dict, source: str):
                 nickname = author.get("nickname") or "Viajero"
                 scope_key = f"{source}:{event.get('threadId')}"
                 scoped_user = scoped_uid(scope_key, raw_uid)
-                record_user(scoped_user, nickname, count_message=True)
                 record_chat_activity(str(event.get("threadId") or ""), scoped_user, nickname)
                 metrics["unaddressed_messages_ignored"] += 1
-                await maybe_send_auto_reply(
+                auto_replied = await maybe_send_auto_reply(
                     str(event.get("threadId") or ""), raw_uid, nickname, incoming_text
                 )
+                if not auto_replied:
+                    await maybe_send_spelling_feedback(
+                        str(event.get("threadId") or ""), raw_uid, nickname, incoming_text
+                    )
         else:
             # Los comandos clásicos con prefijo siguen funcionando.
             await handle_command(event, source)
@@ -12060,40 +13013,26 @@ async def dispatch(event: dict, source: str):
                         "category": "inspection_error",
                     }
                 if verdict.get("blocked"):
-                    message_id = str(
-                        message_data.get("id")
-                        or message_data.get("messageId")
-                        or message_data.get("message_id")
-                        or ""
-                    ).strip()
-                    deleted = False
-                    if message_id:
-                        deletion = await api(
-                            "DELETE",
-                            f"/threads/{event.get('threadId')}/messages/{message_id}",
-                            source,
-                        )
-                        deleted = bool(
-                            deletion.get("ok") or deletion.get("status") == 404
-                        )
-                    metrics["automatic_link_blocks"] = (
-                        metrics.get("automatic_link_blocks", 0) + 1
+                    metrics["automatic_link_warnings"] = (
+                        metrics.get("automatic_link_warnings", 0) + 1
                     )
-                    metrics["edited_link_blocks"] = (
-                        metrics.get("edited_link_blocks", 0) + 1
+                    metrics["edited_link_warnings"] = (
+                        metrics.get("edited_link_warnings", 0) + 1
                     )
                     logging.warning(
-                        "[LINK_GUARD] Edición bloqueada | categoria=%s | eliminado=%s",
+                        "[LINK_GUARD] Enlace no permitido detectado en una edición; "
+                        "la API no permite eliminar mensajes ajenos | categoria=%s",
                         verdict.get("category", "blocked"),
-                        deleted,
                     )
-                    if not deleted:
-                        await send_message(
-                            str(event.get("threadId") or ""),
-                            "🛡️ No se permitió el enlace añadido al editar el mensaje: "
-                            + str(verdict.get("reason") or "destino no permitido."),
-                            source,
-                        )
+                    await send_message(
+                        str(event.get("threadId") or ""),
+                        "🛡️ Se detectó un enlace no permitido en la edición. Katherine no procesará "
+                        "el contenido. La API de Anarchy no permite que un bot elimine mensajes "
+                        "de otros usuarios, por lo que el mensaje editado y el enlace siguen visibles. "
+                        "Un moderador debe retirarlo. Motivo: "
+                        + str(verdict.get("reason") or "destino no permitido."),
+                        source,
+                    )
         logging.info("[EVENTO] %s", kind)
 
     elif kind == "thread.removed":

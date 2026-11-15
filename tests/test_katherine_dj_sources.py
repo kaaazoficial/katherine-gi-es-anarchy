@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 
+import numpy as np
+
 import main as katherine
 
 
@@ -214,3 +216,463 @@ def test_dj_search_fallback_skips_invalid_track_and_starts_next(monkeypatch):
     assert "alternativa" in message
     assert calls == [tracks[0]["url"], tracks[1]["url"]]
 
+
+
+
+def test_archive_search_rejects_files_over_actual_download_limit(monkeypatch):
+    class FakeResponse:
+        is_success = True
+
+        @staticmethod
+        def json():
+            return {
+                "metadata": {
+                    "title": "Oversized audio",
+                    "licenseurl": "https://creativecommons.org/licenses/by/4.0/",
+                },
+                "files": [
+                    {"name": "large.mp3", "size": str(katherine.DJ_REMOTE_AUDIO_MAX_BYTES + 1)}
+                ],
+            }
+
+    async def fake_request(*args, **kwargs):
+        return FakeResponse()
+
+    katherine.DJ_ARCHIVE_CACHE.pop("oversized-audio", None)
+    monkeypatch.setattr(katherine, "external_request", fake_request)
+    assert asyncio.run(katherine.archive_item_details("oversized-audio")) is None
+
+
+def test_dj_source_cooldown_normalizes_provider_cdn_hosts(monkeypatch):
+    katherine.DJ_SOURCE_COOLDOWNS.clear()
+    monkeypatch.setattr(katherine.time, "monotonic", lambda: 100.0)
+    katherine.cool_down_dj_source("prod-1.storage.jamendo.com", 600)
+    assert katherine.dj_source_is_cooled("api.jamendo.com")
+    assert katherine.dj_source_is_cooled("prod-1.storage.jamendo.com")
+    katherine.cool_down_dj_source("ia601500.us.archive.org", 600)
+    assert katherine.dj_source_is_cooled("archive.org")
+    katherine.cool_down_dj_source("upload.wikimedia.org", 600)
+    assert katherine.dj_source_is_cooled("upload.wikimedia.org")
+    katherine.DJ_SOURCE_COOLDOWNS.clear()
+
+
+def test_http_access_failures_trigger_provider_cooldown(monkeypatch):
+    katherine.DJ_SOURCE_COOLDOWNS.clear()
+    monkeypatch.setattr(katherine.time, "monotonic", lambda: 200.0)
+    assert katherine.cool_down_dj_source_on_http_failure("upload.wikimedia.org", 403)
+    assert katherine.dj_source_is_cooled("upload.wikimedia.org")
+    assert not katherine.cool_down_dj_source_on_http_failure("upload.wikimedia.org", 404)
+    katherine.DJ_SOURCE_COOLDOWNS.clear()
+
+
+def test_music_fallback_skips_remaining_tracks_from_blocked_provider(monkeypatch):
+    calls = []
+
+    async def fake_start(thread_id, url, looping, track_metadata=None, enqueue=False):
+        calls.append(url)
+        if track_metadata.get("source_key") == "commons":
+            return False, "No pude descargar o validar la canción (RuntimeError: HTTP 403)."
+        return True, "Reproducción iniciada."
+
+    monkeypatch.setattr(katherine, "start_dj_room", fake_start)
+    katherine.DJ_SOURCE_COOLDOWNS.clear()
+    tracks = [
+        {"url": "https://upload.wikimedia.org/one.ogg", "title": "Bloqueada 1", "source_key": "commons"},
+        {"url": "https://upload.wikimedia.org/two.ogg", "title": "Bloqueada 2", "source_key": "commons"},
+        {"url": "https://archive.org/download/item/good.mp3", "title": "Alternativa", "source_key": "archive"},
+    ]
+    ok, _, selected, index = asyncio.run(
+        katherine.start_dj_search_with_fallback("room-403", tracks, 0)
+    )
+    assert ok is True
+    assert selected["title"] == "Alternativa"
+    assert index == 2
+    assert calls == [
+        "https://upload.wikimedia.org/one.ogg",
+        "https://archive.org/download/item/good.mp3",
+    ]
+    katherine.DJ_SOURCE_COOLDOWNS.clear()
+
+
+
+def test_dj_probe_command_is_admin_only_and_does_not_search_for_public_users(monkeypatch):
+    sent = []
+    searched = []
+
+    async def fake_send(thread_id, content, source="developer", reply_id=None, buttons=None):
+        sent.append(str(content))
+        return {"ok": True}
+
+    async def fake_search(*args, **kwargs):
+        searched.append((args, kwargs))
+        return [{"url": "https://archive.org/download/item/song.mp3"}]
+
+    monkeypatch.setattr(katherine, "COMMUNITY_TOKEN", "test-community-token")
+    monkeypatch.setattr(katherine, "is_admin_uid", lambda uid: uid == "admin-uid")
+    monkeypatch.setattr(katherine, "record_user", lambda *args, **kwargs: None)
+    monkeypatch.setattr(katherine, "record_chat_activity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(katherine, "send_message", fake_send)
+    monkeypatch.setattr(katherine, "search_music_catalog", fake_search)
+
+    event = {
+        "threadId": "dj-probe-public-room",
+        "message": {
+            "messageId": "probe-message-1",
+            "content": "!dj probar ambient",
+            "author": {"uid": "public-uid", "nickname": "Usuario"},
+        },
+    }
+    asyncio.run(katherine._handle_command_impl(event, "developer"))
+
+    assert searched == []
+    assert sent and "restringida" in sent[-1]
+
+
+def test_admin_dj_probe_runs_real_catalog_and_playback_flow(monkeypatch):
+    sent = []
+    searches = []
+    playback = []
+
+    async def fake_send(thread_id, content, source="developer", reply_id=None, buttons=None):
+        sent.append(str(content))
+        return {"ok": True}
+
+    async def fake_search(query, limit=5):
+        searches.append((query, limit))
+        return [{
+            "url": "https://archive.org/download/item/song.mp3",
+            "title": "Ambient Test",
+            "creator": "Test Artist",
+            "license": "CC0",
+            "source": "Internet Archive",
+            "source_key": "archive",
+        }]
+
+    async def fake_play(thread_id, tracks, selected_index=0):
+        playback.append((thread_id, tracks, selected_index))
+        return True, "Reproducción iniciada", tracks[0], 0
+
+    monkeypatch.setattr(katherine, "COMMUNITY_TOKEN", "test-community-token")
+    monkeypatch.setattr(katherine, "is_admin_uid", lambda uid: uid == "admin-uid")
+    monkeypatch.setattr(katherine, "record_user", lambda *args, **kwargs: None)
+    monkeypatch.setattr(katherine, "record_chat_activity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(katherine, "send_message", fake_send)
+    monkeypatch.setattr(katherine, "search_music_catalog", fake_search)
+    monkeypatch.setattr(katherine, "start_dj_search_with_fallback", fake_play)
+    katherine.DJ_ARCHIVE_CACHE.clear()
+    katherine.DJ_SOURCE_CACHE.clear()
+
+    event = {
+        "threadId": "dj-probe-admin-room",
+        "message": {
+            "messageId": "probe-message-2",
+            "content": "!dj probar ambient",
+            "author": {"uid": "admin-uid", "nickname": "Admin"},
+        },
+    }
+    asyncio.run(katherine._handle_command_impl(event, "developer"))
+
+    assert searches == [("ambient", 5)]
+    assert len(playback) == 1
+    assert playback[0][0] == "dj-probe-admin-room"
+    assert any("PRUEBA MUSICAL COMPLETADA" in item for item in sent)
+
+
+
+def test_dj_search_ranking_deduplicates_and_prefers_exact_title():
+    tracks = [
+        {"url": "https://archive.org/a.mp3", "title": "Ambient piano", "creator": "Other"},
+        {"url": "https://archive.org/b.mp3", "title": "Piano", "creator": "Ambient Artist"},
+        {"url": "https://archive.org/c.mp3", "title": "Ambient piano", "creator": "Other"},
+        {"url": "https://archive.org/d.mp3", "title": "Ambient piano night", "creator": "Composer"},
+    ]
+    ranked = katherine.rank_dj_results("ambient piano", tracks, limit=10)
+    assert ranked[0]["url"] == "https://archive.org/a.mp3"
+    assert len(ranked) == 3
+    assert all("_search_score" in track for track in ranked)
+
+
+def test_dj_queue_move_uses_one_based_positions():
+    queue = __import__("collections").deque([
+        {"title": "A"}, {"title": "B"}, {"title": "C"}
+    ])
+    assert katherine.move_dj_queue_item(queue, 3, 1)
+    assert [item["title"] for item in queue] == ["C", "A", "B"]
+    assert not katherine.move_dj_queue_item(queue, 0, 2)
+    assert not katherine.move_dj_queue_item(queue, 1, 4)
+
+
+def test_dj_mixer_ducks_music_and_limits_peak(monkeypatch):
+    monkeypatch.setattr(katherine, "np", np)
+    music = np.full(480, 20000, dtype=np.int16)
+    speech = np.full(480, 20000, dtype=np.int16)
+    mixed = katherine.mix_audio_samples(music, speech, music_volume=1.0, duck_gain=0.25)
+    assert mixed.dtype == np.int16
+    assert int(mixed[0]) == 25000
+    clipped = katherine.mix_audio_samples(music, speech, music_volume=1.0, duck_gain=1.0)
+    assert int(np.max(np.abs(clipped.astype(np.int32)))) <= 30000
+
+
+def test_dj_remote_queue_item_is_enqueued_without_downloading(monkeypatch):
+    async def fake_ensure(thread_id):
+        return True, "connected"
+
+    async def fail_download(*args, **kwargs):
+        raise AssertionError("Queued tracks must not download before playback")
+
+    monkeypatch.setattr(katherine, "load_audio_dependencies", lambda: True)
+    monkeypatch.setattr(katherine, "ensure_voice_room", fake_ensure)
+    monkeypatch.setattr(katherine, "download_dj_audio", fail_download)
+
+    async def scenario():
+        state = {
+            "task": asyncio.create_task(asyncio.sleep(60)),
+            "queue": __import__("collections").deque(),
+            "volume": 0.75,
+            "audio_source": object(),
+            "pause_event": asyncio.Event(),
+            "skip_event": asyncio.Event(),
+            "stop_event": asyncio.Event(),
+            "playback_stop_event": asyncio.Event(),
+        }
+        state["pause_event"].set()
+        katherine.DJ_ROOMS["deferred-test"] = state
+        try:
+            ok, message = await katherine.start_dj_room(
+                "deferred-test",
+                "https://archive.org/download/item/song.mp3",
+                False,
+                track_metadata={"title": "Queued song", "extension": ".mp3"},
+                enqueue=True,
+            )
+            assert ok
+            assert len(state["queue"]) == 1
+            assert state["queue"][0]["remote"] is True
+            assert state["queue"][0]["path"].startswith("https://")
+            assert "descargará" in message
+        finally:
+            task = state.get("task")
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            katherine.DJ_ROOMS.pop("deferred-test", None)
+
+    asyncio.run(scenario())
+
+
+
+def test_take_audio_frame_preserves_samples_and_pads_short_frames(monkeypatch):
+    monkeypatch.setattr(katherine, "np", np)
+    first = np.arange(700, dtype=np.int16)
+    frame1, remainder = katherine.take_audio_frame(
+        np.empty(0, dtype=np.int16), first, frame_size=480
+    )
+    assert len(frame1) == 480
+    assert np.array_equal(frame1, first[:480])
+    assert np.array_equal(remainder, first[480:])
+
+    frame2, remainder2 = katherine.take_audio_frame(
+        remainder, np.empty(0, dtype=np.int16), frame_size=480
+    )
+    assert len(frame2) == 480
+    assert np.array_equal(frame2[:220], first[480:])
+    assert np.all(frame2[220:] == 0)
+    assert len(remainder2) == 0
+
+
+def test_take_audio_frame_keeps_extra_input_for_next_tick(monkeypatch):
+    monkeypatch.setattr(katherine, "np", np)
+    pending = np.arange(100, dtype=np.int16)
+    incoming = np.arange(900, dtype=np.int16) + 100
+    frame, remainder = katherine.take_audio_frame(pending, incoming, frame_size=480)
+    expected = np.concatenate((pending, incoming))
+    assert np.array_equal(frame, expected[:480])
+    assert np.array_equal(remainder, expected[480:])
+
+
+
+def test_split_complete_audio_frames_keeps_decoder_boundaries_contiguous(monkeypatch):
+    monkeypatch.setattr(katherine, "np", np)
+    first = np.arange(300, dtype=np.int16)
+    second = np.arange(300, dtype=np.int16) + 300
+
+    frames, pending = katherine.split_complete_audio_frames(
+        np.empty(0, dtype=np.int16), first
+    )
+    assert frames == []
+    assert len(pending) == 300
+
+    frames, pending = katherine.split_complete_audio_frames(pending, second)
+    assert len(frames) == 1
+    assert len(frames[0]) == 480
+    assert np.array_equal(frames[0], np.arange(480, dtype=np.int16))
+    assert len(pending) == 120
+    assert np.array_equal(pending, np.arange(480, 600, dtype=np.int16))
+
+    third = np.arange(840, dtype=np.int16) + 600
+    frames, pending = katherine.split_complete_audio_frames(pending, third)
+    assert len(frames) == 2
+    assert all(len(frame) == 480 for frame in frames)
+    joined = np.concatenate(frames + [pending])
+    assert np.array_equal(joined, np.arange(480, 1440, dtype=np.int16))
+
+
+def test_audio_mixer_does_not_publish_silence_and_sends_queued_speech(monkeypatch):
+    import types
+
+    monkeypatch.setattr(katherine, "np", np)
+    thread_id = "tts-mixer-idle-test"
+    captured = []
+
+    class FakeAudioSource:
+        async def capture_frame(self, frame):
+            captured.append(bytes(frame.data))
+
+    class FakeAudioFrame:
+        @staticmethod
+        def create(sample_rate, channels, samples):
+            assert sample_rate == 48000
+            assert channels == 1
+            assert samples == 480
+            return types.SimpleNamespace(data=bytearray(samples * 2))
+
+    monkeypatch.setattr(
+        katherine,
+        "livekit_rtc",
+        types.SimpleNamespace(AudioFrame=FakeAudioFrame),
+    )
+
+    async def scenario():
+        state = {
+            "stop_event": asyncio.Event(),
+            "music_audio_queue": asyncio.Queue(maxsize=8),
+            "speech_audio_queue": asyncio.Queue(maxsize=8),
+            "speaking": asyncio.Event(),
+            "audio_source": FakeAudioSource(),
+            "volume": 0.75,
+            "duck_enabled": True,
+            "mixer_task": None,
+        }
+        katherine.DJ_ROOMS[thread_id] = state
+        try:
+            task = asyncio.create_task(katherine.audio_mixer_loop(thread_id))
+            state["mixer_task"] = task
+            await asyncio.sleep(0.035)
+            assert captured == []
+
+            await state["speech_audio_queue"].put(
+                np.full(480, 1234, dtype=np.int16)
+            )
+            for _ in range(20):
+                if captured:
+                    break
+                await asyncio.sleep(0.01)
+            assert captured
+            spoken = np.frombuffer(captured[0], dtype=np.int16)
+            assert len(spoken) == 480
+            assert np.all(spoken == 1234)
+        finally:
+            state["stop_event"].set()
+            task = state.get("mixer_task")
+            if task and not task.done():
+                await task
+            katherine.DJ_ROOMS.pop(thread_id, None)
+
+    asyncio.run(scenario())
+
+
+def test_enqueue_message_for_speech_puts_plain_user_text_in_the_queue(monkeypatch):
+    thread_id = "tts-enqueue-test"
+    monkeypatch.setattr(katherine, "ensure_audio_mixer_running", lambda *args: True)
+    monkeypatch.setattr(katherine, "ensure_speech_worker_running", lambda *args: True)
+
+    async def scenario():
+        state = {
+            "reading_enabled": True,
+            "speech_queue": asyncio.Queue(maxsize=20),
+            "speech_priority_queue": asyncio.Queue(maxsize=5),
+            "speech_recent": {},
+            "tts_read_links": False,
+            "tts_read_mentions": False,
+        }
+        katherine.DJ_ROOMS[thread_id] = state
+        try:
+            event = {
+                "threadId": thread_id,
+                "message": {
+                    "content": "Hola, buenas tardes a todos.",
+                    "author": {"uid": "member-123", "nickname": "Viajero"},
+                    "mentions": [],
+                },
+            }
+            await katherine.enqueue_message_for_speech(event, "developer")
+            assert state["speech_queue"].qsize() == 1
+            assert state["speech_queue"].get_nowait() == "Hola, buenas tardes a todos."
+            assert state["speech_priority_queue"].empty()
+
+            directed_event = {
+                "threadId": thread_id,
+                "message": {
+                    "content": "Katherine, ¿puedes ayudarme?",
+                    "author": {"uid": "member-124", "nickname": "Viajero"},
+                    "mentions": [],
+                },
+            }
+            await katherine.enqueue_message_for_speech(directed_event, "developer")
+            assert state["speech_priority_queue"].qsize() == 1
+            assert state["speech_priority_queue"].get_nowait() == "Katherine, ¿puedes ayudarme?"
+        finally:
+            katherine.DJ_ROOMS.pop(thread_id, None)
+
+    asyncio.run(scenario())
+
+
+def test_enable_room_reading_starts_mixer_and_tts_worker(monkeypatch):
+    thread_id = "tts-enable-test"
+
+    async def fake_ensure_voice_room(value):
+        assert value == thread_id
+        katherine.DJ_ROOMS[thread_id] = {
+            "stop_event": asyncio.Event(),
+            "audio_source": object(),
+            "reading_enabled": False,
+            "speech_task": None,
+            "mixer_task": None,
+        }
+        return True, "connected"
+
+    async def wait_until_stopped(value):
+        await katherine.DJ_ROOMS[value]["stop_event"].wait()
+
+    monkeypatch.setattr(katherine, "load_tts_dependency", lambda: True)
+    monkeypatch.setattr(katherine, "load_audio_dependencies", lambda: True)
+    monkeypatch.setattr(katherine, "ensure_voice_room", fake_ensure_voice_room)
+    monkeypatch.setattr(katherine, "audio_mixer_loop", wait_until_stopped)
+    monkeypatch.setattr(katherine, "speech_queue_worker", wait_until_stopped)
+
+    async def scenario():
+        try:
+            ok, message = await katherine.enable_room_reading(thread_id)
+            assert ok, message
+            state = katherine.DJ_ROOMS[thread_id]
+            assert state["reading_enabled"] is True
+            assert state["mixer_task"] is not None
+            assert not state["mixer_task"].done()
+            assert state["speech_task"] is not None
+            assert not state["speech_task"].done()
+        finally:
+            state = katherine.DJ_ROOMS.get(thread_id)
+            if state:
+                state["stop_event"].set()
+                tasks = [
+                    task for task in (state.get("mixer_task"), state.get("speech_task"))
+                    if task is not None
+                ]
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+            katherine.DJ_ROOMS.pop(thread_id, None)
+
+    asyncio.run(scenario())

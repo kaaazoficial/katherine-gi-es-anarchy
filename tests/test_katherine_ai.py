@@ -1581,3 +1581,37 @@ def test_katherine_identity_is_the_genshin_impact_es_community_bot():
     assert "Anarchy Apps es únicamente la plataforma" in BASE_INSTRUCTIONS
     assert "No eres un bot oficial de Anarchy Apps" in BASE_INSTRUCTIONS
     assert "bot de entretenimiento de Anarchy Apps" not in BASE_INSTRUCTIONS
+
+
+def test_base_instructions_prioritize_natural_and_useful_answers():
+    assert "Contesta primero lo que te preguntaron" in BASE_INSTRUCTIONS
+    assert "Distingue hechos, estimaciones y opiniones" in BASE_INSTRUCTIONS
+    assert "No arrastres Genshin Impact a preguntas de otros temas" in BASE_INSTRUCTIONS
+    assert "Nunca afirmes que una acción" in BASE_INSTRUCTIONS
+
+
+def test_conversation_instructions_encourage_contextual_and_non_generic_replies():
+    from katherine_ai import build_ai_instructions
+    prompt = build_ai_instructions(set(), "conversation")
+    assert "responde directamente y con naturalidad" in prompt.casefold()
+    assert "evita respuestas genéricas" in prompt.casefold()
+
+
+def test_genshin_instructions_separate_confirmed_info_from_community_theories():
+    from katherine_ai import build_ai_instructions
+    prompt = build_ai_instructions(set(), "genshin")
+    assert "información confirmada, teoría y especulación" in prompt
+    assert "No inventes escalados" in prompt
+
+
+def test_action_instructions_never_claim_success_before_result():
+    from katherine_ai import build_ai_instructions
+    prompt = build_ai_instructions({"ayuda"}, "action")
+    assert "no confirmes éxito antes del resultado" in prompt
+
+
+
+def test_base_instructions_are_warm_and_tactful_about_spelling():
+    assert "responde con calidez genuina" in BASE_INSTRUCTIONS
+    assert "Nunca avergüences" in BASE_INSTRUCTIONS
+    assert "No corrijas jerga, abreviaturas, nombres propios" in BASE_INSTRUCTIONS
