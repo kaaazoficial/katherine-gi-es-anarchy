@@ -138,6 +138,9 @@ def test_unaddressed_chat_only_updates_bounded_activity_and_does_not_activate_ka
         calls["auto_replies"].append(args)
 
     monkeypatch.setattr(katherine, "maybe_send_auto_reply", capture_auto_reply)
+    async def no_spelling(*_args, **_kwargs):
+        return False
+    monkeypatch.setattr(katherine, "maybe_send_spelling_feedback", no_spelling)
 
     async def no_speech(event, source):
         return None
@@ -146,6 +149,10 @@ def test_unaddressed_chat_only_updates_bounded_activity_and_does_not_activate_ka
         calls["commands"].append(event["message"]["content"])
 
     monkeypatch.setattr(katherine, "enqueue_message_for_speech", no_speech)
+    async def no_spelling(*_args, **_kwargs):
+        return False
+    monkeypatch.setattr(katherine, "maybe_send_spelling_feedback", no_spelling)
+    monkeypatch.setattr(katherine, "detect_spanish_spelling_issues", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(katherine, "handle_command", capture_command)
     monkeypatch.setattr(katherine, "record_user", lambda uid, nickname, count_message=False: calls["users"].append((uid, nickname, count_message)))
     monkeypatch.setattr(katherine, "record_chat_activity", lambda thread, uid, nickname: calls["activity"].append((thread, uid, nickname)))
