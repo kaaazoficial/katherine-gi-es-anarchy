@@ -10,6 +10,7 @@ edge-tts>=7.0.0
 # Typed environment configuration, safe fuzzy matching and metrics primitives.
 pydantic-settings>=2.16.2,<3.0.0
 rapidfuzz>=3.14.6,<4.0.0
+pyspellchecker>=0.9.1,<1.0.0
 prometheus-client>=0.26.0,<1.0.0
 
 # Bounded HTML extraction, HTML5 parsing, image validation and hardened XML.
