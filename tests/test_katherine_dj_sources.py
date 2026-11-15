@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 
+import numpy as np
+
 import main as katherine
 
 
@@ -400,8 +402,8 @@ def test_dj_queue_move_uses_one_based_positions():
     assert not katherine.move_dj_queue_item(queue, 1, 4)
 
 
-def test_dj_mixer_ducks_music_and_limits_peak():
-    np = katherine.np
+def test_dj_mixer_ducks_music_and_limits_peak(monkeypatch):
+    monkeypatch.setattr(katherine, "np", np)
     music = np.full(480, 20000, dtype=np.int16)
     speech = np.full(480, 20000, dtype=np.int16)
     mixed = katherine.mix_audio_samples(music, speech, music_volume=1.0, duck_gain=0.25)
@@ -462,7 +464,8 @@ def test_dj_remote_queue_item_is_enqueued_without_downloading(monkeypatch):
 
 
 
-def test_take_audio_frame_preserves_samples_and_pads_short_frames():
+def test_take_audio_frame_preserves_samples_and_pads_short_frames(monkeypatch):
+    monkeypatch.setattr(katherine, "np", np)
     first = np.arange(700, dtype=np.int16)
     frame1, remainder = katherine.take_audio_frame(
         np.empty(0, dtype=np.int16), first, frame_size=480
@@ -480,7 +483,8 @@ def test_take_audio_frame_preserves_samples_and_pads_short_frames():
     assert len(remainder2) == 0
 
 
-def test_take_audio_frame_keeps_extra_input_for_next_tick():
+def test_take_audio_frame_keeps_extra_input_for_next_tick(monkeypatch):
+    monkeypatch.setattr(katherine, "np", np)
     pending = np.arange(100, dtype=np.int16)
     incoming = np.arange(900, dtype=np.int16) + 100
     frame, remainder = katherine.take_audio_frame(pending, incoming, frame_size=480)
@@ -491,7 +495,7 @@ def test_take_audio_frame_keeps_extra_input_for_next_tick():
 
 
 def test_split_complete_audio_frames_keeps_decoder_boundaries_contiguous():
-    np = katherine.np
+    monkeypatch.setattr(katherine, "np", np)
     first = np.arange(300, dtype=np.int16)
     second = np.arange(300, dtype=np.int16) + 300
 
@@ -519,7 +523,7 @@ def test_split_complete_audio_frames_keeps_decoder_boundaries_contiguous():
 def test_audio_mixer_does_not_publish_silence_and_sends_queued_speech(monkeypatch):
     import types
 
-    np = katherine.np
+    monkeypatch.setattr(katherine, "np", np)
     thread_id = "tts-mixer-idle-test"
     captured = []
 
