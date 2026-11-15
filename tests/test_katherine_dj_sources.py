@@ -8,6 +8,139 @@ import numpy as np
 import main as katherine
 
 
+
+
+def test_dj_button_accepts_community_callback_for_developer_message():
+    action = {
+        "type": "dj_select",
+        "source": "developer",
+        "thread": "room-1",
+        "expires": 9999999999,
+    }
+    assert katherine.is_button_source_allowed(action, "community")
+    assert katherine.is_button_source_allowed(action, "developer")
+
+    action["type"] = "choose_option"
+    assert not katherine.is_button_source_allowed(action, "community")
+    assert not katherine.is_button_source_allowed(action, "other")
+
+
+def test_dj_numeric_selection_uses_one_based_result_numbers(monkeypatch):
+    thread = "numeric-selection-test"
+    track = {"url": "https://audio.example/song.mp3", "title": "Song"}
+    katherine.DJ_SEARCH_RESULTS[thread] = {
+        "search_id": "search-test",
+        "tracks": [track],
+        "query": "song",
+        "expires": katherine.time.time() + 60,
+    }
+    calls = []
+
+    async def fake_start(thread_id, tracks, index):
+        calls.append((thread_id, tracks, index))
+        return True, "Reproducción iniciada.", tracks[index], index
+
+    monkeypatch.setattr(katherine, "start_dj_search_with_fallback", fake_start)
+    try:
+        ok, message, selected = asyncio.run(
+            katherine.select_dj_search_result(thread, "1")
+        )
+        assert ok is True
+        assert message == "Reproducción iniciada."
+        assert selected == track
+        assert calls == [(thread, [track], 0)]
+
+        ok, message, selected = asyncio.run(
+            katherine.select_dj_search_result(thread, "0")
+        )
+        assert not ok
+        assert selected is None
+        assert "número" in message
+    finally:
+        katherine.DJ_SEARCH_RESULTS.pop(thread, None)
+
+
+def test_dj_numeric_queue_selection_does_not_interrupt_current_track(monkeypatch):
+    thread = "numeric-queue-test"
+    track = {"url": "https://audio.example/song.mp3", "title": "Song"}
+    katherine.DJ_SEARCH_RESULTS[thread] = {
+        "search_id": "search-test",
+        "tracks": [track],
+        "query": "song",
+        "expires": katherine.time.time() + 60,
+    }
+    calls = []
+
+    async def fake_start(thread_id, url, looping, track_metadata=None, enqueue=False):
+        calls.append((thread_id, url, looping, track_metadata, enqueue))
+        return True, "Añadida a la cola."
+
+    monkeypatch.setattr(katherine, "start_dj_room", fake_start)
+    try:
+        ok, message, selected = asyncio.run(
+            katherine.select_dj_search_result(thread, "1", enqueue=True)
+        )
+        assert ok is True
+        assert message == "Añadida a la cola."
+        assert selected == track
+        assert calls == [(thread, track["url"], False, track, True)]
+    finally:
+        katherine.DJ_SEARCH_RESULTS.pop(thread, None)
+
+
+def test_dj_search_batches_identical_concurrent_queries(monkeypatch):
+    monkeypatch.setattr(katherine, "FREESOUND_API_KEY", "")
+    monkeypatch.setattr(katherine, "UNCOMMON_EAR_API_KEY", "")
+    monkeypatch.setattr(katherine, "JAMENDO_CLIENT_ID", "")
+    monkeypatch.setattr(katherine, "dj_source_is_cooled", lambda host: False)
+    calls = []
+
+    async def fake_search(query, limit):
+        calls.append((query, limit))
+        await asyncio.sleep(0.01)
+        return [{
+            "url": "https://audio.example/song.mp3",
+            "identifier": "song-1",
+            "title": "Song",
+            "creator": "Artist",
+            "license": "CC0",
+            "source": "Test",
+        }]
+
+    for name in (
+        "search_archive_audio",
+        "search_wikimedia_audio",
+        "search_ccmixter_audio",
+        "search_audius_audio",
+        "search_openverse_audio",
+        "search_loc_national_jukebox_audio",
+    ):
+        monkeypatch.setattr(katherine, name, fake_search)
+
+    async def scenario():
+        first, second = await asyncio.gather(
+            katherine.search_music_catalog("same query", limit=5),
+            katherine.search_music_catalog("same query", limit=5),
+        )
+        return first, second
+
+    first, second = asyncio.run(scenario())
+    assert first == second
+    assert len(calls) == 6
+    assert all(query == "same query" and limit == 10 for query, limit in calls)
+
+
+def test_audio_decoder_batch_preserves_frame_order():
+    first = ("frame", np.array([1, 2], dtype=np.int16), 2)
+    second = ("frame", np.array([3, 4], dtype=np.int16), 2)
+    iterator = iter((first, second))
+    batch = katherine._next_audio_decode_batch(iterator, batch_size=6)
+    assert batch[:2] == [first, second]
+    assert batch[-1] is katherine._AUDIO_DECODE_EOF
+    assert len(batch) == 3
+
+
+
 def test_dj_audio_hosts_are_exact_and_https_only():
     assert katherine.dj_audio_url_allowed(
         "https://archive.org/download/item/song.mp3"
