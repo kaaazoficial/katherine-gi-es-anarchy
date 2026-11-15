@@ -971,6 +971,11 @@ DJ_SEARCH_RESULTS: dict[str, dict] = {}
 DJ_FAVORITES: dict[tuple[str, str], list[dict]] = {}
 DJ_FAVORITES_TTL = 86400
 
+
+class DJAudioOutputUnavailable(RuntimeError):
+    """The LiveKit music output cannot consume PCM; do not decode the same track again."""
+
+
 DJ_ARCHIVE_CACHE: dict[str, dict] = {}
 DJ_SOURCE_CACHE: dict[str, dict] = {}
 DJ_SOURCE_COOLDOWNS: dict[str, float] = {}
@@ -4426,6 +4431,7 @@ async def audio_mixer_loop(thread_id: str) -> None:
     pending_music = np.empty(0, dtype=np.int16)
     max_pending_samples = DJ_MIXER_MAX_PENDING_FRAMES * DJ_MIXER_FRAME_SAMPLES
     output_samples = DJ_MIXER_OUTPUT_SAMPLES
+    mix_buffer = np.empty(output_samples, dtype=np.float32)
     frame_seconds = output_samples / 48000.0
     loop = asyncio.get_running_loop()
     next_frame_at = loop.time()
@@ -4450,20 +4456,22 @@ async def audio_mixer_loop(thread_id: str) -> None:
             # for the next 20 ms LiveKit frame. Previously this stopped at one
             # output frame while waiting for the larger prebuffer, deadlocking
             # the producer against the bounded queue.
-            incoming_chunks = []
+                    incoming_chunks = []
+            pending_sample_count = len(pending_music)
             while (
                 music_queue is not None
-                and len(pending_music) + sum(len(chunk) for chunk in incoming_chunks) < target_buffer_samples
-                and len(pending_music) + sum(len(chunk) for chunk in incoming_chunks) < max_pending_samples
+                and pending_sample_count < target_buffer_samples
+                and pending_sample_count < max_pending_samples
             ):
                 try:
                     incoming = music_queue.get_nowait()
                 except asyncio.QueueEmpty:
                     break
                 if incoming is not None and len(incoming):
-                    incoming_chunks.append(
-                        np.asarray(incoming, dtype=np.int16).reshape(-1)
-                    )
+                    chunk = np.asarray(incoming, dtype=np.int16).reshape(-1)
+                    if len(chunk):
+                        incoming_chunks.append(chunk)
+                        pending_sample_count += len(chunk)
             if incoming_chunks:
                 if len(pending_music):
                     incoming_chunks.insert(0, pending_music)
@@ -4514,17 +4522,18 @@ async def audio_mixer_loop(thread_id: str) -> None:
                 pending_music, None, frame_size=output_samples
             )
             state["music_pending_samples"] = len(pending_music)
-            mixed = np.clip(
-                music_frame.astype(np.float32)
-                * max(0.0, min(1.0, float(state.get("volume", 0.75))))
-                * current_gain,
-                -32768, 32767,
-            ).astype(np.int16)
+            output_gain = max(
+                0.0, min(1.0, float(state.get("volume", 0.75)))
+            ) * current_gain
+            np.multiply(
+                music_frame, output_gain, out=mix_buffer, casting="unsafe"
+            )
+            np.clip(mix_buffer, -32768.0, 32767.0, out=mix_buffer)
             audio_frame = livekit_rtc.AudioFrame.create(
                 48000, 1, output_samples
             )
             destination = np.frombuffer(audio_frame.data, dtype=np.int16)
-            destination[:output_samples] = mixed[:output_samples]
+            np.copyto(destination[:output_samples], mix_buffer, casting="unsafe")
 
             capture_started = loop.time()
             try:
@@ -4638,9 +4647,9 @@ async def enqueue_music_audio_samples(
     key = str(thread_id or "")
     queue = state.get("music_audio_queue")
     if not key or queue is None:
-        raise RuntimeError("La cola musical de audio no está disponible.")
+        raise DJAudioOutputUnavailable("La cola musical de audio no está disponible.")
     if np is None or livekit_rtc is None:
-        raise RuntimeError(
+        raise DJAudioOutputUnavailable(
             "Las dependencias NumPy y LiveKit deben estar cargadas antes de enviar música."
         )
 
@@ -4673,13 +4682,13 @@ async def enqueue_music_audio_samples(
             if state.get("skip_event") is not None and state["skip_event"].is_set():
                 return False
             if state.get("_cleanup_started"):
-                raise RuntimeError(
+                raise DJAudioOutputUnavailable(
                     "LiveKit invalidó la fuente de audio; es necesario reconectar la sala."
                 )
 
             remaining = deadline - loop.time()
             if remaining <= 0:
-                raise RuntimeError(
+                raise DJAudioOutputUnavailable(
                     "El mezclador no consume la cola musical; se canceló la espera."
                 )
             if not ensure_audio_mixer_running(key, state):
@@ -5879,6 +5888,10 @@ async def dj_playback_loop(
                         break
                     except asyncio.CancelledError:
                         raise
+                    except DJAudioOutputUnavailable:
+                        # enqueue_music_audio_samples already attempted bounded mixer recovery.
+                        # Re-decoding this track cannot repair a failed LiveKit output source.
+                        raise
                     except Exception as exc:
                         if attempt >= 2:
                             raise
@@ -5891,6 +5904,19 @@ async def dj_playback_loop(
                         await asyncio.sleep(delay)
             except asyncio.CancelledError:
                 raise
+            except DJAudioOutputUnavailable as exc:
+                metrics["dj_playback_errors"] += 1
+                state["playback_stop_event"].set()
+                logging.warning(
+                    "[DJ] Salida de audio no disponible en %s; se evita repetir la decodificación de %s (%s).",
+                    thread_id, current_title, type(exc).__name__,
+                )
+                await send_message(
+                    str(thread_id),
+                    "⚠️ La salida de audio se interrumpió. Detuve la reproducción para evitar "
+                    "volver a decodificar la misma canción; vuelve a ejecutar !join y después !dj.",
+                    "developer"
+                )
             except Exception as exc:
                 metrics["dj_playback_errors"] += 1
                 logging.exception("[DJ] Falló la pista %s en sala %s", current_title, thread_id)
