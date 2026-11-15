@@ -1057,3 +1057,17 @@ def test_dj_decoder_pads_only_the_final_partial_pcm_frame(monkeypatch):
     assert np.array_equal(enqueued[0][:600], decoded_samples)
     assert np.count_nonzero(enqueued[0][600:]) == 0
     assert state["music_decoder_finished"] is True
+
+def test_music_mixer_does_not_start_before_optional_audio_dependencies(monkeypatch):
+    thread_id = "dj-dependency-startup-guard"
+    state = {
+        "stop_event": asyncio.Event(),
+        "audio_source": object(),
+        "mixer_task": None,
+    }
+    monkeypatch.setattr(katherine, "DJ_ROOMS", {thread_id: state})
+    monkeypatch.setattr(katherine, "np", None)
+    monkeypatch.setattr(katherine, "livekit_rtc", None)
+
+    assert katherine.ensure_audio_mixer_running(thread_id, state) is False
+    assert state["mixer_task"] is None
