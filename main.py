@@ -969,6 +969,8 @@ FREESOUND_API = "https://freesound.org/apiv2"
 FREESOUND_API_KEY = os.getenv("FREESOUND_API_KEY", "").strip()
 UNCOMMON_EAR_API = "https://api.uncommonear.com/v1/search"
 UNCOMMON_EAR_API_KEY = os.getenv("UNCOMMON_EAR_API_KEY", "").strip()
+LOC_JUKEBOX_API = "https://www.loc.gov/collections/national-jukebox/"
+LOC_JUKEBOX_RIGHTS_URL = "https://www.loc.gov/collections/national-jukebox/about-this-collection/rights-and-access/"
 IA_ALLOWED_LICENSES = {
     "creativecommons.org/publicdomain/zero/1.0": "CC0 · Dominio público",
     "creativecommons.org/publicdomain/mark/1.0": "Public Domain Mark",
@@ -2941,6 +2943,7 @@ def dj_audio_host_allowed(host: str) -> bool:
         or normalized.endswith(".archive.org")
         or normalized == "upload.wikimedia.org"
         or normalized == "media.uncommonear.com"
+        or normalized == "tile.loc.gov"
         or normalized == "jamendo.com"
         or normalized.endswith(".jamendo.com")
         or normalized == "ccmixter.org"
@@ -2988,6 +2991,8 @@ def dj_source_cooldown_key(host: str) -> str:
         return "openverse.org"
     if key == "uncommonear.com" or key.endswith(".uncommonear.com"):
         return "uncommonear.com"
+    if key == "loc.gov" or key.endswith(".loc.gov"):
+        return "loc.gov"
     return key
 
 
@@ -3008,7 +3013,8 @@ def cool_down_dj_source(host: str, seconds: int = 600) -> None:
     key = dj_source_cooldown_key(host)
     if key in {
         "upload.wikimedia.org", "archive.org", "jamendo.com",
-        "ccmixter.org", "audius.co", "freesound.org", "openverse.org", "uncommonear.com",
+        "ccmixter.org", "audius.co", "freesound.org", "openverse.org",
+        "uncommonear.com", "loc.gov",
     }:
         DJ_SOURCE_COOLDOWNS[key] = time.monotonic() + max(30, min(1800, int(seconds)))
         metrics["dj_source_cooldowns"] += 1
@@ -3622,6 +3628,263 @@ async def search_freesound_audio(query: str, limit: int = 5) -> list[dict]:
     return tracks[:limit]
 
 
+async def search_loc_national_jukebox_audio(query: str, limit: int = 5) -> list[dict]:
+    """Search verified pre-1923, downloadable National Jukebox recordings."""
+    query = clean_archive_value(query, 140)
+    if not query:
+        return []
+    cache_key = "loc_national_jukebox:" + query.casefold()
+    cached = DJ_SOURCE_CACHE.get(cache_key)
+    if cached and cached.get("expires", 0) > time.time():
+        return cached.get("tracks", [])[:limit]
+
+    response = await external_request(
+        "GET",
+        LOC_JUKEBOX_API,
+        params={
+            "fo": "json",
+            "at": "results",
+            "q": query,
+            "dates": "1900/1922",
+            "fa": (
+                "partof_repository:recorded sound section, library of congress"
+                "|location:united states"
+            ),
+            "c": min(30, max(8, limit * 2)),
+        },
+        headers={"Accept": "application/json"},
+        timeout=20,
+        safe_public=True,
+        max_response_bytes=2_000_000,
+    )
+    if not response.is_success:
+        if response.status_code in (403, 429, 500, 502, 503, 504):
+            cool_down_dj_source("www.loc.gov", 600)
+        raise RuntimeError(f"Library of Congress respondió HTTP {response.status_code}.")
+    try:
+        summaries = response.json().get("results") or []
+    except Exception as exc:
+        raise RuntimeError("No pude interpretar el catálogo National Jukebox.") from exc
+    if not isinstance(summaries, list):
+        raise RuntimeError("National Jukebox devolvió un catálogo con formato inesperado.")
+
+    candidates = []
+    for summary in summaries:
+        if not isinstance(summary, dict):
+            continue
+        raw_id = str(summary.get("id") or summary.get("url") or "").strip()
+        try:
+            parsed_id = urlsplit(raw_id)
+        except ValueError:
+            continue
+        if parsed_id.hostname not in ("www.loc.gov", "loc.gov"):
+            continue
+        match = re.fullmatch(r"/item/(jukebox-[A-Za-z0-9_-]+)/?", parsed_id.path)
+        if not match:
+            continue
+        item_slug = match.group(1)
+        summary_date = " ".join(
+            str(summary.get(key) or "")
+            for key in ("date", "dates", "created_published", "title")
+        )
+        summary_year_match = re.search(r"\b(19\d{2}|20\d{2})\b", summary_date)
+        if summary_year_match:
+            summary_year = int(summary_year_match.group(1))
+            if not 1900 <= summary_year <= 1922:
+                continue
+        candidates.append((summary, item_slug))
+        if len(candidates) >= min(12, max(6, limit)):
+            break
+
+    async def fetch_item(summary: dict, item_slug: str):
+        item_url = f"https://www.loc.gov/item/{item_slug}/"
+        try:
+            detail_response = await external_request(
+                "GET",
+                item_url,
+                params={"fo": "json"},
+                headers={"Accept": "application/json"},
+                timeout=18,
+                safe_public=True,
+                max_response_bytes=2_000_000,
+            )
+            if not detail_response.is_success:
+                return None
+            detail = detail_response.json()
+        except Exception:
+            return None
+        if not isinstance(detail, dict):
+            return None
+
+        item = detail.get("item") if isinstance(detail.get("item"), dict) else {}
+        if item.get("access_restricted") is True:
+            return None
+        date_values = (
+            summary.get("date"),
+            summary.get("dates"),
+            item.get("recording_date"),
+            item.get("date"),
+            item.get("date_issued"),
+            item.get("created_published"),
+        )
+        date_text = " ".join(str(value or "") for value in date_values)
+        year_match = re.search(r"\b(19\d{2}|20\d{2})\b", date_text)
+        if not year_match:
+            return None
+        year = int(year_match.group(1))
+        if not 1900 <= year <= 1922:
+            return None
+
+        def flatten_text(value):
+            if isinstance(value, str):
+                return [value]
+            if isinstance(value, (list, tuple)):
+                output = []
+                for entry in value:
+                    output.extend(flatten_text(entry))
+                return output
+            if isinstance(value, dict):
+                output = []
+                for key, entry in value.items():
+                    if isinstance(key, str):
+                        output.append(key)
+                    elif isinstance(entry, str):
+                        output.append(entry)
+                return output
+            return []
+
+        genres = flatten_text(item.get("genre") or item.get("genres") or summary.get("genre"))
+        audio_types = flatten_text(item.get("audio_type") or summary.get("audio_type"))
+        genre_text = " ".join(genres).casefold()
+        audio_type_text = " ".join(audio_types).casefold()
+        if not genre_text:
+            return None
+        spoken_word_markers = (
+            "spoken word", "speech", "monologue", "dialogue", "interview",
+            "lecture", "address", "oral history",
+        )
+        if any(marker in genre_text or marker in audio_type_text for marker in spoken_word_markers):
+            return None
+        if "non-musical" in audio_type_text or "non musical" in audio_type_text:
+            return None
+
+        resource_objects = detail.get("resources") or []
+        if isinstance(detail.get("resource"), dict):
+            resource_objects = list(resource_objects) + [detail["resource"]]
+        if not isinstance(resource_objects, list):
+            return None
+
+        audio_files = []
+        for resource in resource_objects:
+            if not isinstance(resource, dict):
+                continue
+            file_groups = resource.get("files") or []
+            if isinstance(file_groups, list):
+                for group in file_groups:
+                    if isinstance(group, dict):
+                        audio_files.append((group, resource))
+                    elif isinstance(group, list):
+                        for file_info in group:
+                            if isinstance(file_info, dict):
+                                audio_files.append((file_info, resource))
+            if any(key in resource for key in ("download", "filename", "audio")):
+                audio_files.append((resource, resource))
+
+        selected = None
+        for file_info, resource in audio_files:
+            if file_info.get("rights_restricted") is not False:
+                continue
+            if file_info.get("canDownload") is False:
+                continue
+            if resource.get("download_restricted") is True:
+                continue
+            mime = str(file_info.get("mimetype") or file_info.get("mime_type") or "").lower()
+            if mime and not mime.startswith("audio/"):
+                continue
+            audio_url = ""
+            for url_key in ("download", "filename", "url", "audio"):
+                candidate_url = str(file_info.get(url_key) or "").strip()
+                if dj_audio_url_allowed(candidate_url):
+                    audio_url = candidate_url
+                    break
+            if not audio_url:
+                continue
+            extension = Path(urlsplit(audio_url).path).suffix.lower()
+            if extension != ".mp3":
+                continue
+            try:
+                duration = float(file_info.get("duration") or resource.get("duration") or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if duration < 30:
+                continue
+            selected = (audio_url, extension, duration)
+            break
+        if not selected:
+            return None
+
+        title = clean_archive_value(
+            item.get("title") or summary.get("title") or "Grabación histórica", 160
+        )
+        contributors = (
+            item.get("contributor_names")
+            or item.get("contributors")
+            or item.get("creator")
+            or summary.get("contributor")
+            or summary.get("contributor_names")
+        )
+        creator_values = flatten_text(contributors)
+        creator = clean_archive_value(
+            ", ".join(creator_values[:4]) or "Artista no identificado", 180
+        )
+        item_url = f"https://www.loc.gov/item/{item_slug}/"
+        audio_url, extension, duration = selected
+        credit_line = (
+            f"Library of Congress, National Jukebox — {title}; "
+            f"{creator}; grabación publicada en {year}."
+        )
+        return {
+            "identifier": item_slug,
+            "title": title,
+            "creator": creator,
+            "license": "Dominio público en EE. UU. · Publicada antes de 1923",
+            "license_url": LOC_JUKEBOX_RIGHTS_URL,
+            "item_url": item_url,
+            "url": audio_url,
+            "extension": extension,
+            "duration": duration,
+            "credit_line": credit_line,
+            "source": "Library of Congress",
+            "source_key": "loc_national_jukebox",
+            "source_provider": "National Jukebox",
+        }
+
+    detail_results = await asyncio.gather(
+        *(fetch_item(summary, slug) for summary, slug in candidates),
+        return_exceptions=True,
+    )
+    tracks = []
+    seen_urls = set()
+    for result in detail_results:
+        if isinstance(result, Exception) or not isinstance(result, dict):
+            continue
+        audio_url = str(result.get("url") or "")
+        if audio_url and audio_url not in seen_urls:
+            seen_urls.add(audio_url)
+            tracks.append(result)
+        if len(tracks) >= limit:
+            break
+
+    DJ_SOURCE_CACHE[cache_key] = {
+        "tracks": tracks,
+        "expires": time.time() + 3600,
+    }
+    if len(DJ_SOURCE_CACHE) > 300:
+        oldest = min(DJ_SOURCE_CACHE, key=lambda key: DJ_SOURCE_CACHE[key].get("expires", 0))
+        DJ_SOURCE_CACHE.pop(oldest, None)
+    return tracks[:limit]
+
+
 async def search_uncommon_ear_audio(query: str, limit: int = 5) -> list[dict]:
     """Search Uncommon Ear for verified, commercially reusable music previews."""
     if not UNCOMMON_EAR_API_KEY:
@@ -3864,6 +4127,7 @@ async def search_music_catalog(query: str, limit: int = 5) -> list[dict]:
         ("ccmixter", search_ccmixter_audio, "ccmixter.org"),
         ("audius", search_audius_audio, "api.audius.co"),
         ("openverse", search_openverse_audio, "api.openverse.org"),
+        ("loc_national_jukebox", search_loc_national_jukebox_audio, "www.loc.gov"),
     ]
     if FREESOUND_API_KEY:
         providers.append(("freesound", search_freesound_audio, "freesound.org"))
@@ -12990,6 +13254,11 @@ Uso: !enciclopedia <nombre>""",
                 )
             )
             openverse_status = "en pausa temporal" if dj_source_is_cooled("api.openverse.org") else "disponible, sin clave adicional"
+            loc_status = (
+                f"en pausa ({max(1, (dj_source_cooldown_remaining('www.loc.gov') + 59) // 60)} min)"
+                if dj_source_is_cooled("www.loc.gov")
+                else "disponible, sin API key adicional"
+            )
             uncommon_ear_status = (
                 "no configurado: añade UNCOMMON_EAR_API_KEY en Render"
                 if not UNCOMMON_EAR_API_KEY else
@@ -13006,6 +13275,7 @@ Uso: !enciclopedia <nombre>""",
                 f"• Jamendo: {jamendo_status}.\n"
                 f"• Freesound: {freesound_status}.\n"
                 f"• Openverse: {openverse_status} (catálogo adicional de música abierta).\n"
+                f"• Library of Congress: {loc_status} (National Jukebox, grabaciones históricas).\n"
                 f"• Uncommon Ear: {uncommon_ear_status} (pistas con licencia comercial verificada).\n"
                 "Una pista solo se inicia si supera los controles de licencia, tamaño, descarga, formato y decodificación. "
                 "Si un proveedor devuelve 401/403/429/5xx, se pausa temporalmente y Katherine prueba otra fuente.\n"
@@ -13321,6 +13591,7 @@ async def start_dj_search_with_fallback(
         "ccmixter": "ccmixter.org",
         "audius": "api.audius.co",
         "freesound": "freesound.org",
+        "loc_national_jukebox": "tile.loc.gov",
     }
     for index in candidate_order:
         track = tracks[index]
