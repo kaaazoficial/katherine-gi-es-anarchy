@@ -72,3 +72,20 @@ def test_metrics_export_includes_bounded_provider_model_token_totals():
     assert " 120.0" in rendered
     assert " 45.0" in rendered
     assert "user=" not in rendered and "thread=" not in rendered
+
+
+
+def test_metrics_export_includes_dj_audio_cache_and_recovery_signals():
+    payload, _ = render_prometheus_metrics({
+        "dj_download_cache_hits": 5,
+        "dj_download_cache_misses": 2,
+        "dj_download_cache_evictions": 1,
+        "dj_audio_output_unavailable": 3,
+        "dj_redecode_avoided": 3,
+    })
+    text = payload.decode("utf-8")
+    assert "katherine_dj_download_cache_hits_total 5.0" in text
+    assert "katherine_dj_download_cache_misses_total 2.0" in text
+    assert "katherine_dj_download_cache_evictions_total 1.0" in text
+    assert "katherine_dj_audio_output_unavailable_total 3.0" in text
+    assert "katherine_dj_redecode_avoided_total 3.0" in text
