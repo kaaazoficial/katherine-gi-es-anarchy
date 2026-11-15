@@ -2102,8 +2102,6 @@ def test_dj_download_cache_coalesces_and_reuses_recent_audio(monkeypatch, tmp_pa
 
 
 def test_dj_audio_cache_expiry_never_deletes_a_track_in_active_playback(monkeypatch, tmp_path):
-    from pathlib import Path
-
     cached_path = tmp_path / "active-track.mp3"
     cached_path.write_bytes(b"audio")
     cache_key = "active-track-test"
