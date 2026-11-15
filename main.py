@@ -3244,15 +3244,30 @@ async def search_music_catalog(query: str, limit: int = 5) -> list[dict]:
     return mixed[:limit]
 
 
+def find_live_room_for_thread(
+    room_list: Any, thread_id: str
+) -> dict[str, Any] | None:
+    """Return the active Anarchy live room associated with a chat thread."""
+    target = str(thread_id or "").strip()
+    if not target or not isinstance(room_list, list):
+        return None
+    return next(
+        (
+            room for room in room_list
+            if isinstance(room, dict)
+            and str(room.get("threadId") or "").strip() == target
+        ),
+        None,
+    )
+
+
 async def ensure_voice_room(thread_id: str):
-    """Conecta a Katherine a la llamada asociada al hilo y publica su pista de micrófono."""
-    thread_id = str(thread_id)
+    """Join an active Anarchy call for this thread and publish Katherine's audio track."""
+    thread_id = str(thread_id or "").strip()
     if not thread_id:
         return False, "No pude identificar la sala de esta conversación."
     if not COMMUNITY_TOKEN:
         return False, "Falta COMMUNITY_BOT_TOKEN en las variables de Render."
-    if not await asyncio.to_thread(load_livekit_dependency):
-        return False, "LiveKit no está disponible en Render. Revisa las dependencias."
 
     lock = VOICE_CONNECT_LOCKS.setdefault(thread_id, asyncio.Lock())
     async with lock:
@@ -3274,6 +3289,50 @@ async def ensure_voice_room(thread_id: str):
                 thread_id,
             )
             await stop_dj_room(thread_id, request_leave=False)
+
+        # The join endpoint only grants LiveKit credentials for a call that is
+        # already active. Check the community bot's visible rooms first so a
+        # chat ID without an active voice call does not produce a blind 404.
+        rooms_result = await api("GET", "/live-rooms", "community")
+        if not rooms_result.get("ok"):
+            data = rooms_result.get("data") or {}
+            if not isinstance(data, dict):
+                data = {"message": str(data)}
+            reason = (
+                data.get("anarchy:error")
+                or data.get("error")
+                or data.get("message")
+            )
+            return False, (
+                f"No pude consultar las llamadas disponibles (HTTP "
+                f"{rooms_result.get('status')}): "
+                f"{reason or 'Anarchy Apps rechazó la solicitud'}. "
+                "Comprueba COMMUNITY_BOT_TOKEN y que el bot comunitario esté "
+                "añadido a esta comunidad."
+            )
+
+        rooms_data = rooms_result.get("data") or {}
+        room_list = rooms_data.get("roomList") if isinstance(rooms_data, dict) else None
+        if not isinstance(room_list, list):
+            return False, "Anarchy no devolvió una lista válida de llamadas activas."
+
+        active_room = find_live_room_for_thread(room_list, thread_id)
+        if active_room is None:
+            logging.info(
+                "[VOZ] No hay llamada activa visible para el hilo %s; salas visibles=%s.",
+                thread_id,
+                len(room_list),
+            )
+            return False, (
+                f"No hay una llamada en vivo activa para el chat {thread_id}. "
+                "Abre primero la llamada desde Anarchy y vuelve a ejecutar !join. "
+                "Puedes comprobar las salas detectadas con !salas. Si la llamada "
+                "ya está abierta, verifica que COMMUNITY_BOT_TOKEN corresponda "
+                "al bot comunitario añadido a esta comunidad."
+            )
+
+        if not await asyncio.to_thread(load_livekit_dependency):
+            return False, "LiveKit no está disponible en Render. Revisa las dependencias."
 
         ready = asyncio.Event()
         DJ_READY_EVENTS[thread_id] = ready
