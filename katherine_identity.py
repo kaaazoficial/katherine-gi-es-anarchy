@@ -64,7 +64,7 @@ _WARM_VOCATIVE_RE = re.compile(
     r"(?:linda|bonita|hermosa|preciosa|guapa|adorable|tierna|encantadora|"
     r"genial|increible|especial|maravillosa|unica)|"
     r"me\s+encanta\s+hablar\s+contigo|te\s+extra[nñ]e|"
-    r"que\s+(?:linda|bonita|hermosa|preciosa|genial|tierna)\s+(?:eres|te\s+ves)|"
+    r"qu[eé]\s+(?:linda|bonita|hermosa|preciosa|genial|tierna)\s+(?:eres|te\s+ves)|"
     r"eres\s+(?:la\s+mejor|un\s+amor|un\s+sol)|me\s+haces\s+feliz)\b",
     flags=re.IGNORECASE,
 )
