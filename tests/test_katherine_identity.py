@@ -65,7 +65,7 @@ def test_detects_affectionate_expressions_without_explicit_negation(message, exp
 @pytest.mark.parametrize(
     ("message", "expected"),
     [
-        ("te adoro", "love"),
+        ("Katherine, te adoro", "love"),
         ("Katherine, te aprecio", "care"),
         ("Katherine, mil gracias por escucharme", "gratitude"),
         ("Katherine, eres muy linda", "compliment"),
