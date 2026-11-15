@@ -27,6 +27,10 @@ _GREETING_RE = re.compile(
     r"disculpa|perdona|escucha|gracias)\s*[,!:;]?\s+",
     flags=re.IGNORECASE,
 )
+_CALL_PREFIX_RE = re.compile(
+    r"^[¡!¿?]*\s*(?:oye|ey|hey|escucha|disculpa|perdona)\s*[,!:;]?\s+",
+    flags=re.IGNORECASE,
+)
 _NAME_TOKEN_RE = re.compile(
     r"(?<![\w])@?([^\W\d_][\w'-]{1,23})(?![\w])",
     flags=re.UNICODE,
@@ -113,7 +117,7 @@ def _remove_vocative(text: str, start: int, end: int) -> str:
     after = text[end:].lstrip()
 
     # Remove an address prefix that only served to call Katherine.
-    greeting = _GREETING_RE.match(before + " ")
+    greeting = _CALL_PREFIX_RE.match(before + " ")
     if greeting:
         before = before[greeting.end():].strip()
 
