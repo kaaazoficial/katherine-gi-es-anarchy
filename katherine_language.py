@@ -158,6 +158,46 @@ def detect_spanish_spelling_issues(
     checker = spell_checker or _get_spellchecker()
     replacements: list[tuple[int, int, str, str]] = []
 
+    # Context resolves a few common accent pairs without guessing from a word
+    # in isolation (e.g. "como estas?" -> "cómo estás?").
+    contextual_patterns = [
+        (r"\bcomo\s+estas\b", "cómo estás", True),
+        (r"\bcomo\s+te\s+llamas\b", "cómo te llamas", True),
+        (r"\bque\s+haces\b", "qué haces", True),
+        (r"\bque\s+tal\b", "qué tal", True),
+        (r"\bque\s+opinas\b", "qué opinas", True),
+        (r"\bque\s+quieres\b", "qué quieres", True),
+        (r"\bque\s+necesitas\b", "qué necesitas", True),
+        (r"\bdonde\s+estas\b", "dónde estás", True),
+        (r"\bdonde\s+vives\b", "dónde vives", True),
+        (r"\bquien\s+eres\b", "quién eres", True),
+        (r"\bquien\s+es\b", "quién es", True),
+        (r"\bcuando\s+vienes\b", "cuándo vienes", True),
+        (r"\besta\s+(?:muy\s+|tan\s+)?(?:bien|mal|genial|excelente|lindo|linda)\b",
+         None, False),
+    ]
+    question_context = "?" in visible or "¿" in visible
+    for pattern, phrase_replacement, needs_question in contextual_patterns:
+        if needs_question and not question_context:
+            continue
+        for match in re.finditer(pattern, visible, flags=re.IGNORECASE):
+            start, end = match.span()
+            if _overlaps(start, end, ranges):
+                continue
+            if phrase_replacement is None:
+                original_phrase = match.group(0)
+                phrase_replacement = re.sub(
+                    r"^esta\b", "está", original_phrase, flags=re.IGNORECASE
+                )
+            corrected_phrase = _preserve_case(match.group(0), phrase_replacement)
+            replacements.append((
+                start, end, corrected_phrase, match.group(0)
+            ))
+            if len(replacements) >= 2:
+                break
+        if len(replacements) >= 2:
+            break
+
     for match in tokens:
         start, end = match.span(1)
         if _overlaps(start, end, ranges):
