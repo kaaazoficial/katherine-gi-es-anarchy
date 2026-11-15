@@ -3640,10 +3640,11 @@ async def search_uncommon_ear_audio(query: str, limit: int = 5) -> list[dict]:
         params={
             "q": query,
             "kind": "music",
-            "commercial": "true",
-            "share_alike": "false",
+            "commercial": True,
+            "share_alike": False,
             "limit": min(50, max(10, limit * 3)),
             "sort": "best",
+            "fields": "id,title,artist,kind,duration_s,license,terms.commercial,terms.credit,terms.share_alike,attribution,credit_line,preview_url,page_url",
         },
         headers={
             "Accept": "application/json",
@@ -3670,7 +3671,7 @@ async def search_uncommon_ear_audio(query: str, limit: int = 5) -> list[dict]:
     }
     tracks = []
     for item in records:
-        if not isinstance(item, dict) or str(item.get("kind") or "music").lower() != "music":
+        if not isinstance(item, dict) or str(item.get("kind") or "").lower() != "music":
             continue
         license_info = item.get("license") if isinstance(item.get("license"), dict) else {}
         terms = item.get("terms") if isinstance(item.get("terms"), dict) else {}
