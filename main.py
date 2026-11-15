@@ -90,6 +90,7 @@ from katherine_help import (
     build_commands_help_text as _build_commands_help_text,
     filter_commands_help_text,
 )
+from katherine_text import format_katherine_text
 
 try:
     import psutil
@@ -2107,7 +2108,9 @@ async def send_message(
             if normalized_capture and not is_progress and len(capture) < 8:
                 capture.append(normalized_capture)
         return {"ok": True, "silent": True, "data": {"content": content}}
-    parts = split_message_content(content, 2000)
+    # Keep raw text for AI context; style only user-facing delivery.
+    display_content = format_katherine_text(content)
+    parts = split_message_content(display_content, 2000)
     if not parts:
         return None
 
