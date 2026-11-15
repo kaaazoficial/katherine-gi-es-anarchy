@@ -517,7 +517,7 @@ def test_split_complete_audio_frames_keeps_decoder_boundaries_contiguous(monkeyp
     assert len(frames) == 2
     assert all(len(frame) == 480 for frame in frames)
     joined = np.concatenate(frames + [pending])
-    assert np.array_equal(joined, np.arange(600, 1440, dtype=np.int16))
+    assert np.array_equal(joined, np.arange(480, 1440, dtype=np.int16))
 
 
 def test_audio_mixer_does_not_publish_silence_and_sends_queued_speech(monkeypatch):
