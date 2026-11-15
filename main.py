@@ -13106,7 +13106,7 @@ async def dispatch(event: dict, source: str):
                 scoped_user = scoped_uid(scope_key, raw_uid)
                 record_chat_activity(str(event.get("threadId") or ""), scoped_user, nickname)
                 metrics["unaddressed_messages_ignored"] += 1
-                auto_replied = await maybe_send_auto_reply(
+                await maybe_send_auto_reply(
                     str(event.get("threadId") or ""), raw_uid, nickname, incoming_text
                 )
         else:
