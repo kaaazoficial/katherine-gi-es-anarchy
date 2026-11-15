@@ -62,7 +62,7 @@ from katherine_research import (
  )
 from katherine_utilities import calculate_expression, format_calculation_result
 from katherine_images import validate_avatar_image_bytes
-from katherine_identity import extract_katherine_call
+from katherine_identity import detect_affectionate_expression, extract_katherine_call
 from katherine_link_analysis import (
     inspect_message_links,
     extract_message_urls,
@@ -12572,6 +12572,30 @@ async def dispatch(event: dict, source: str):
                 await handle_command(reply_event, source)
                 return
             name_call = extract_katherine_call(incoming_text)
+            if name_call is not None:
+                affection = detect_affectionate_expression(name_call)
+                if affection:
+                    affectionate_replies = {
+                        "love": (
+                            "Awww, qué bonito que me lo digas. Yo también te tengo muchísimo cariño. "
+                            "Gracias por hacerme sonreír. 💗",
+                            "Eso fue muy dulce. Yo también te quiero mucho y me alegra acompañarte. 💕",
+                            "¡Qué ternura! Recibo ese cariño con mucho aprecio. Aquí estoy contigo. 💗",
+                        ),
+                        "care": (
+                            "Yo también te tengo mucho cariño. Gracias por decírmelo. 💗",
+                            "Awww, qué lindo. Me alegra mucho compartir este ratito contigo. 💕",
+                            "¡Y yo te mando un abrazo enorme! Gracias por ese cariño. 💗",
+                        ),
+                    }
+                    await send_message(
+                        str(event.get("threadId") or ""),
+                        random.choice(affectionate_replies[affection]),
+                        source,
+                    )
+                    metrics["affectionate_name_replies"] += 1
+                    return
+
             routing_text = (
                 f"Katherine, {name_call}" if name_call is not None and name_call
                 else "Katherine" if name_call is not None
