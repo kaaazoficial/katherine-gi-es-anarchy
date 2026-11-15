@@ -3345,61 +3345,76 @@ async def drain_audio_queue(queue: asyncio.Queue | None) -> None:
             break
 
 
+def take_audio_frame(pending: Any, incoming: Any, frame_size: int = DJ_MIXER_FRAME_SAMPLES):
+    """Append incoming PCM and return exactly one frame plus unconsumed samples."""
+    buffer = np.asarray(pending, dtype=np.int16).reshape(-1)
+    chunk = np.asarray(incoming, dtype=np.int16).reshape(-1) if incoming is not None else np.empty(0, dtype=np.int16)
+    if len(chunk):
+        buffer = np.concatenate((buffer, chunk))
+    frame = buffer[:frame_size]
+    remainder = buffer[len(frame):]
+    if len(frame) < frame_size:
+        frame = np.pad(frame, (0, frame_size - len(frame)), mode="constant")
+    return frame.astype(np.int16, copy=False), remainder.astype(np.int16, copy=False)
+
+
 async def audio_mixer_loop(thread_id: str) -> None:
-    """Single LiveKit writer: mixes music and TTS and ducks music while Katherine speaks."""
+    """Clocked 10 ms mono mixer; never drops samples from variable-sized inputs."""
     state = DJ_ROOMS.get(str(thread_id))
     if not state:
         return
     music_queue = state.get("music_audio_queue")
     speech_queue = state.get("speech_audio_queue")
+    pending_music = np.empty(0, dtype=np.int16)
+    pending_speech = np.empty(0, dtype=np.int16)
     duck_gain = 1.0
-    while not state["stop_event"].is_set():
-        music_samples = None
-        speech_samples = None
-        if music_queue is not None:
-            try:
-                music_samples = music_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-        if speech_queue is not None:
-            try:
-                speech_samples = speech_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-        if music_samples is None and speech_samples is None:
-            await asyncio.sleep(0.005)
-            continue
+    frame_seconds = DJ_MIXER_FRAME_SAMPLES / 48000.0
+    loop = asyncio.get_running_loop()
+    next_frame_at = loop.time()
 
+    while not state["stop_event"].is_set():
+        # Accumulate full decoded chunks instead of truncating everything after
+        # the first 480 samples. This was cutting most TTS frames on some codecs.
+        if music_queue is not None:
+            while True:
+                try:
+                    incoming = music_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if incoming is not None and len(incoming):
+                    pending_music = np.concatenate((pending_music, np.asarray(incoming, dtype=np.int16).reshape(-1)))
+        if speech_queue is not None:
+            while True:
+                try:
+                    incoming = speech_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if incoming is not None and len(incoming):
+                    pending_speech = np.concatenate((pending_speech, np.asarray(incoming, dtype=np.int16).reshape(-1)))
+
+        has_speech = len(pending_speech) > 0 or state["speaking"].is_set()
         duck_enabled = bool(state.get("duck_enabled", True))
-        speech_active = speech_samples is not None or state["speaking"].is_set()
-        target_duck = DJ_TTS_DUCK_GAIN if duck_enabled and speech_active else 1.0
+        target_duck = DJ_TTS_DUCK_GAIN if duck_enabled and has_speech else 1.0
         if target_duck < duck_gain:
             duck_gain = max(target_duck, duck_gain - 0.18)
         else:
             duck_gain = min(target_duck, duck_gain + 0.04)
 
+        music_frame, pending_music = take_audio_frame(pending_music, None)
+        speech_frame, pending_speech = take_audio_frame(pending_speech, None)
+
         mixed = mix_audio_samples(
-            music_samples,
-            speech_samples,
+            music_frame,
+            speech_frame,
             music_volume=state.get("volume", 0.75),
             duck_gain=duck_gain,
         )
-        if not len(mixed):
-            continue
-        # LiveKit voice frames use a consistent 10 ms cadence at 48 kHz.
-        if len(mixed) < DJ_MIXER_FRAME_SAMPLES:
-            mixed = np.pad(
-                mixed,
-                (0, DJ_MIXER_FRAME_SAMPLES - len(mixed)),
-                mode="constant",
-            )
-        elif len(mixed) > DJ_MIXER_FRAME_SAMPLES:
-            mixed = mixed[:DJ_MIXER_FRAME_SAMPLES]
         audio_frame = livekit_rtc.AudioFrame.create(
             48000, 1, DJ_MIXER_FRAME_SAMPLES
         )
         destination = np.frombuffer(audio_frame.data, dtype=np.int16)
-        destination[:DJ_MIXER_FRAME_SAMPLES] = mixed
+        destination[:DJ_MIXER_FRAME_SAMPLES] = mixed[:DJ_MIXER_FRAME_SAMPLES]
+
         try:
             await state["audio_source"].capture_frame(audio_frame)
         except asyncio.CancelledError:
@@ -3409,6 +3424,13 @@ async def audio_mixer_loop(thread_id: str) -> None:
                 logging.exception("[DJ_MIXER] Falló la salida de audio en %s", thread_id)
             break
 
+        next_frame_at += frame_seconds
+        delay = next_frame_at - loop.time()
+        if delay > 0:
+            await asyncio.sleep(delay)
+        else:
+            # Do not burst stale frames after scheduler stalls; reset the clock.
+            next_frame_at = loop.time()
 
 async def enqueue_audio_samples(queue: asyncio.Queue | None, samples: Any) -> None:
     """Send a bounded mono PCM chunk to the shared audio mixer."""
@@ -3543,7 +3565,7 @@ async def ensure_voice_room(thread_id: str):
 
             # Extra bounded headroom absorbs short scheduler/network stalls.
             audio_source = livekit_rtc.AudioSource(
-                48000, 1, queue_size_ms=2000
+                48000, 1, queue_size_ms=500
             )
             audio_track = livekit_rtc.LocalAudioTrack.create_audio_track(
                 "katherine-voice",
