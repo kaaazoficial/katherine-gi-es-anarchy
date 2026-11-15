@@ -36,6 +36,12 @@ def test_dj_audio_hosts_are_exact_and_https_only():
     assert katherine.dj_audio_url_allowed(
         "https://cdn.freesound.org/previews/12/12345_67890-hq.mp3"
     )
+    assert katherine.dj_audio_url_allowed(
+        "https://tile.loc.gov/streaming-services/iiif/test/default.mp3"
+    )
+    assert not katherine.dj_audio_url_allowed(
+        "https://evil.loc.gov/streaming-services/test.mp3"
+    )
     assert not katherine.dj_audio_url_allowed(
         "https://user:pass@archive.org/download/item/song.mp3"
     )
@@ -1228,6 +1234,7 @@ def test_music_catalog_keeps_results_when_new_sources_fail(monkeypatch):
     monkeypatch.setattr(katherine, "search_wikimedia_audio", fail)
     monkeypatch.setattr(katherine, "search_ccmixter_audio", fail)
     monkeypatch.setattr(katherine, "search_audius_audio", fail)
+    monkeypatch.setattr(katherine, "search_loc_national_jukebox_audio", fail)
     monkeypatch.setattr(katherine, "JAMENDO_CLIENT_ID", "")
 
     tracks = asyncio.run(katherine.search_music_catalog("safe track", limit=5))
@@ -1428,6 +1435,124 @@ def test_recoverable_dj_failure_includes_track_valueerror_and_runtimeerror_marke
     assert not is_recoverable_dj_failure("No pude conectarme a la llamada (RuntimeError).")
 
 
+
+
+
+
+
+def test_loc_national_jukebox_uses_only_pre_1923_downloadable_music(monkeypatch):
+    class FakeResponse:
+        is_success = True
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    calls = []
+
+    async def fake_request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        if url == katherine.LOC_JUKEBOX_API:
+            return FakeResponse({
+                "results": [
+                    {
+                        "id": "http://www.loc.gov/item/jukebox-1910/",
+                        "title": "Old Waltz",
+                        "date": "1910-04-12",
+                        "genre": ["Popular Music"],
+                    },
+                    {
+                        "id": "http://www.loc.gov/item/jukebox-restricted/",
+                        "title": "Restricted Waltz",
+                        "date": "1912",
+                        "genre": ["Popular Music"],
+                    },
+                    {
+                        "id": "http://www.loc.gov/item/jukebox-1924/",
+                        "title": "Protected Recording",
+                        "date": "1924",
+                        "genre": ["Popular Music"],
+                    },
+                ]
+            })
+
+        if "jukebox-1910" in url:
+            return FakeResponse({
+                "item": {
+                    "title": "Old Waltz",
+                    "recording_date": "1910-04-12",
+                    "genre": ["Popular Music"],
+                    "audio_type": "Musical",
+                    "contributor_names": ["The Example Orchestra"],
+                    "access_restricted": False,
+                },
+                "resources": [{
+                    "files": [[{
+                        "download": "https://tile.loc.gov/streaming-services/iiif/old-waltz/default.mp3",
+                        "filename": "https://tile.loc.gov/storage-services/service/old-waltz.mp3",
+                        "mimetype": "audio/mpeg",
+                        "rights_restricted": False,
+                        "canDownload": True,
+                        "duration": 125,
+                    }]]
+                }],
+            })
+        if "jukebox-restricted" in url:
+            return FakeResponse({
+                "item": {
+                    "title": "Restricted Waltz",
+                    "recording_date": "1912",
+                    "genre": ["Popular Music"],
+                    "audio_type": "Musical",
+                },
+                "resources": [{
+                    "files": [[{
+                        "download": "https://tile.loc.gov/streaming-services/iiif/restricted/default.mp3",
+                        "mimetype": "audio/mpeg",
+                        "rights_restricted": True,
+                        "canDownload": False,
+                        "duration": 180,
+                    }]]
+                }],
+            })
+        raise AssertionError(f"Unexpected Library of Congress request: {url}")
+
+    monkeypatch.setattr(katherine, "external_request", fake_request)
+    katherine.DJ_SOURCE_CACHE.pop("loc_national_jukebox:old waltz", None)
+
+    tracks = asyncio.run(
+        katherine.search_loc_national_jukebox_audio("old waltz", limit=5)
+    )
+
+    assert len(tracks) == 1
+    track = tracks[0]
+    assert track["source"] == "Library of Congress"
+    assert track["source_key"] == "loc_national_jukebox"
+    assert track["title"] == "Old Waltz"
+    assert track["creator"] == "The Example Orchestra"
+    assert track["license"].startswith("Dominio público en EE. UU.")
+    assert track["url"].endswith("/default.mp3")
+    assert "Library of Congress" in track["credit_line"]
+
+    search_call = calls[0]
+    assert search_call[1] == katherine.LOC_JUKEBOX_API
+    assert search_call[2]["params"]["dates"] == "1900/1922"
+    assert "partof_repository:recorded sound section" in search_call[2]["params"]["fa"]
+    assert search_call[2]["safe_public"] is True
+    detail_calls = [call for call in calls if call[1] != katherine.LOC_JUKEBOX_API]
+    assert len(detail_calls) == 2
+    assert all(call[2]["safe_public"] is True for call in detail_calls)
+
+
+def test_loc_national_jukebox_returns_empty_for_blank_query(monkeypatch):
+    async def unexpected_request(*args, **kwargs):
+        raise AssertionError("Blank National Jukebox queries must not call the API")
+
+    monkeypatch.setattr(katherine, "external_request", unexpected_request)
+    assert asyncio.run(katherine.search_loc_national_jukebox_audio("   ")) == []
 
 
 
