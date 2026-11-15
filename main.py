@@ -13815,6 +13815,18 @@ async def select_dj_search_result(
     return ok, message, selected
 
 
+def is_button_source_allowed(action: dict, source: str) -> bool:
+    """Allow only the deliberate DJ developer-message/community-interaction bridge."""
+    return (
+        action.get("source") == source
+        or (
+            action.get("type") == "dj_select"
+            and action.get("source") == "developer"
+            and source == "community"
+        )
+    )
+
+
 async def handle_interaction(event: dict, source: str):
     button_id = str(event.get("buttonId") or "")
     thread_id = str(event.get("threadId") or "")
@@ -13858,13 +13870,8 @@ async def handle_interaction(event: dict, source: str):
     action = BUTTON_ACTIONS.get(button_id)
     if not action:
         return
-    dj_cross_bot_button = (
-        action.get("type") == "dj_select"
-        and action.get("source") == "developer"
-        and source == "community"
-    )
     if (
-        (action.get("source") != source and not dj_cross_bot_button)
+        not is_button_source_allowed(action, source)
         or action.get("thread") != thread_id
         or action.get("expires", 0) <= time.time()
     ):
