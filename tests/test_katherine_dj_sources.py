@@ -586,11 +586,6 @@ def test_audio_mixer_does_not_publish_silence_and_sends_queued_speech(monkeypatc
 
 def test_enqueue_message_for_speech_puts_plain_user_text_in_the_queue(monkeypatch):
     thread_id = "tts-enqueue-test"
-    queued = []
-
-    async def fake_putter(queue, text):
-        queued.append(text)
-
     monkeypatch.setattr(katherine, "ensure_audio_mixer_running", lambda *args: True)
     monkeypatch.setattr(katherine, "ensure_speech_worker_running", lambda *args: True)
 
