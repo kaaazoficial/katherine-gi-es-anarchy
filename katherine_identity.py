@@ -1,4 +1,4 @@
-"""Recognize deliberate calls to Katherine without catching casual mentions."""
+"""Recognize deliberate calls and affectionate messages addressed to Katherine."""
 from __future__ import annotations
 
 import re
@@ -24,14 +24,27 @@ NAME_ALIASES = frozenset({
 
 _GREETING_RE = re.compile(
     r"^[¡!¿?]*\s*(?:oye|ey|hey|hola|buenas(?:\s+(?:tardes|noches|dias))?|"
-    r"disculpa|perdona|escucha)\s*[,!:;]?\s+",
+    r"disculpa|perdona|escucha|gracias)\s*[,!:;]?\s+",
     flags=re.IGNORECASE,
 )
-_NAME_RE = re.compile(
-    r"^@?([^\W\d_][\w'-]{1,23})(?=$|[\s,.:;!?¡¿—-])",
+_NAME_TOKEN_RE = re.compile(
+    r"(?<![\w])@?([^\W\d_][\w'-]{1,23})(?![\w])",
     flags=re.UNICODE,
 )
-_LEADING_SEPARATORS = " \t,.:;!?—-"
+_DIRECT_REQUEST_RE = re.compile(
+    r"\b(?:que|qué|como|cómo|quien|quién|cuando|cuándo|donde|dónde|"
+    r"puedes|podrias|podrías|quieres|ayudame|ayúdame|ayudas|"
+    r"dime|explica|explicame|explícame|revisa|mira|escucha|consulta|"
+    r"busca|recomiendame|recomiéndame|cuentame|cuéntame|"
+    r"haz|resuelve|enseña|ensename|enséñame|"
+    r"opinas|crees|sabes|puedes|me ayudas)\b",
+    flags=re.IGNORECASE,
+)
+_AFFECTION_RE = re.compile(r"\bte\s+(?:amo|quiero)\b", flags=re.IGNORECASE)
+_NEGATED_AFFECTION_RE = re.compile(
+    r"\b(?:no|nunca|jamas|jamás|ya\s+no)\s+te\s+(?:amo|quiero)\b",
+    flags=re.IGNORECASE,
+)
 
 
 def _normalize_name(value: str) -> str:
@@ -48,23 +61,91 @@ def _is_katherine_name(value: str) -> bool:
     return ratio(candidate, "katherine") >= 82
 
 
-def extract_katherine_call(message: str) -> str | None:
-    """Return the body of a leading vocative, or None for ordinary mentions.
+def _is_direct_vocative(text: str, match: re.Match) -> bool:
+    """Avoid reacting to casual third-person mentions while allowing any sentence position."""
+    if match.start() == 0:
+        return True
+    if text[match.start():match.end()].startswith("@"):
+        return True
 
-    Only a name at the start of the message (optionally after a short greeting)
-    can activate the bot. Misspellings are accepted only when they are close
-    to Katherine, and short nicknames must match the explicit alias list.
+    before = text[:match.start()]
+    after = text[match.end():]
+    before_trimmed = before.rstrip()
+    after_trimmed = after.lstrip()
+
+    # Commas and similar separators are the strongest signal of a vocative.
+    if before_trimmed.endswith((",", ":", ";")) or after_trimmed.startswith((",", ":", ";")):
+        return True
+
+    # Names at the end are accepted when the sentence is a greeting, request,
+    # question, or explicit affectionate expression.
+    if not after_trimmed.strip(" .!?¡¿"):
+        return bool(
+            _GREETING_RE.match(before_trimmed + " ")
+            or _DIRECT_REQUEST_RE.search(before)
+            or _AFFECTION_RE.search(before)
+            or "?" in before
+            or "¿" in before
+            or "!" in before
+        )
+
+    # Mid-sentence invocations must look like a request/question, not a casual
+    # reference such as "Hoy hablé con Katherine en el chat".
+    return bool(
+        _DIRECT_REQUEST_RE.search(before)
+        or _DIRECT_REQUEST_RE.search(after)
+        or "?" in before
+        or "¿" in before
+        or "?" in after
+        or "¿" in after
+    )
+
+
+def _remove_vocative(text: str, start: int, end: int) -> str:
+    """Remove the name and its adjacent vocative separators without mangling the sentence."""
+    before = text[:start].rstrip()
+    after = text[end:].lstrip()
+    if before.endswith((",", ":", ";")):
+        before = before[:-1].rstrip()
+    if after.startswith((",", ":", ";")):
+        after = after[1:].lstrip()
+    if before and after:
+        result = f"{before} {after}"
+    else:
+        result = before or after
+    result = re.sub(r"\s+([,;:])", r"\1", result)
+    result = re.sub(r"([,;:])(?:\s*[,;:])+", r"\1", result)
+    result = re.sub(r"\s{2,}", " ", result)
+    return result.strip(" ,;:—")
+
+
+def extract_katherine_call(message: str) -> str | None:
+    """Return the message body when Katherine is addressed at the start, middle or end.
+
+    Exact nicknames and close spelling variants are recognized as separate name
+    tokens. Mid/end-position occurrences require vocative punctuation, a request,
+    a question or an affectionate expression to avoid casual third-person triggers.
     """
     text = str(message or "").strip()
     if not text:
         return None
 
-    greeting = _GREETING_RE.match(text)
-    if greeting:
-        text = text[greeting.end():].lstrip()
+    for match in _NAME_TOKEN_RE.finditer(text):
+        if not _is_katherine_name(match.group(1)):
+            continue
+        if not _is_direct_vocative(text, match):
+            continue
+        return _remove_vocative(text, match.start(), match.end())
+    return None
 
-    match = _NAME_RE.match(text)
-    if not match or not _is_katherine_name(match.group(1)):
+
+def detect_affectionate_expression(message: str) -> str | None:
+    """Recognize positive 'te amo'/'te quiero' messages, excluding explicit negations."""
+    text = _normalize_name(str(message or ""))
+    if _NEGATED_AFFECTION_RE.search(text):
         return None
-
-    return text[match.end():].lstrip(_LEADING_SEPARATORS).strip()
+    if re.search(r"\bte\s+amo\b", text):
+        return "love"
+    if re.search(r"\bte\s+quiero\b", text):
+        return "care"
+    return None
