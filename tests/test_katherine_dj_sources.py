@@ -1426,3 +1426,70 @@ def test_recoverable_dj_failure_includes_track_valueerror_and_runtimeerror_marke
     assert is_recoverable_dj_failure("El archivo descargado no se puede decodificar (ValueError).")
     assert is_recoverable_dj_failure("La descarga redirigió a un dominio no autorizado.")
     assert not is_recoverable_dj_failure("No pude conectarme a la llamada (RuntimeError).")
+
+
+
+def test_openverse_search_filters_licenses_and_preserves_attribution(monkeypatch):
+    class FakeResponse:
+        is_success = True
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "results": [
+                    {
+                        "id": "open-1",
+                        "title": "Ambient piano",
+                        "creator": "Example Artist",
+                        "url": "https://upload.wikimedia.org/audio/ambient.mp3",
+                        "foreign_landing_url": "https://example.org/audio/open-1",
+                        "license": "by",
+                        "license_url": "https://creativecommons.org/licenses/by/4.0/",
+                        "duration": 120000,
+                        "filesize": 1000000,
+                        "attribution": "Ambient piano by Example Artist",
+                    },
+                    {
+                        "id": "nc-1",
+                        "title": "Non commercial",
+                        "url": "https://upload.wikimedia.org/audio/nc.mp3",
+                        "foreign_landing_url": "https://example.org/audio/nc-1",
+                        "license": "by-nc",
+                        "license_url": "https://creativecommons.org/licenses/by-nc/4.0/",
+                        "duration": 120000,
+                        "filesize": 1000000,
+                    },
+                    {
+                        "id": "evil-1",
+                        "title": "Untrusted host",
+                        "url": "https://evil.example/audio.mp3",
+                        "foreign_landing_url": "https://example.org/audio/evil-1",
+                        "license": "cc0",
+                        "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                        "duration": 120000,
+                        "filesize": 1000000,
+                    },
+                ]
+            }
+
+    calls = []
+
+    async def fake_request(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeResponse()
+
+    monkeypatch.setattr(katherine, "external_request", fake_request)
+    katherine.DJ_SOURCE_CACHE.pop("openverse:ambient piano", None)
+    tracks = asyncio.run(katherine.search_openverse_audio("ambient piano"))
+
+    assert len(tracks) == 1
+    assert tracks[0]["source"] == "Openverse"
+    assert tracks[0]["license"].startswith("CC BY")
+    assert tracks[0]["credit_line"] == "Ambient piano by Example Artist"
+    assert calls[0][1]["params"]["license_type"] == "commercial"
+    assert calls[0][1]["params"]["license"] == "cc0,pdm,by,by-sa"
+
+
+def test_openverse_search_returns_empty_for_blank_query():
+    assert asyncio.run(katherine.search_openverse_audio("   ")) == []

@@ -2981,6 +2981,8 @@ def dj_source_cooldown_key(host: str) -> str:
         return "audius.co"
     if key == "freesound.org" or key.endswith(".freesound.org"):
         return "freesound.org"
+    if key == "api.openverse.org" or key.endswith(".openverse.org"):
+        return "openverse.org"
     return key
 
 
@@ -3001,7 +3003,7 @@ def cool_down_dj_source(host: str, seconds: int = 600) -> None:
     key = dj_source_cooldown_key(host)
     if key in {
         "upload.wikimedia.org", "archive.org", "jamendo.com",
-        "ccmixter.org", "audius.co", "freesound.org",
+        "ccmixter.org", "audius.co", "freesound.org", "openverse.org",
     }:
         DJ_SOURCE_COOLDOWNS[key] = time.monotonic() + max(30, min(1800, int(seconds)))
         metrics["dj_source_cooldowns"] += 1
@@ -3615,6 +3617,107 @@ async def search_freesound_audio(query: str, limit: int = 5) -> list[dict]:
     return tracks[:limit]
 
 
+async def search_openverse_audio(query: str, limit: int = 5) -> list[dict]:
+    """Search Openverse for openly licensed music without an API key."""
+    query = clean_archive_value(query, 160)
+    if not query:
+        return []
+    cache_key = "openverse:" + query.casefold()
+    cached = DJ_SOURCE_CACHE.get(cache_key)
+    if cached and cached.get("expires", 0) > time.time():
+        return cached.get("tracks", [])[:limit]
+    response = await external_request(
+        "GET", "https://api.openverse.org/v1/audio/",
+        params={
+            "q": query, "category": "music", "license_type": "commercial",
+            "license": "cc0,pdm,by,by-sa",
+            "extension": "mp3,ogg,oga,flac,wav,m4a,aac,opus",
+            "length": "medium,long", "page": 1,
+            "page_size": min(20, max(10, limit * 3)),
+            "filter_dead": "true", "mature": "false",
+        },
+        headers={"Accept": "application/json"},
+        timeout=20,
+    )
+    if not response.is_success:
+        if response.status_code in (403, 429, 500, 502, 503, 504):
+            cool_down_dj_source("api.openverse.org", 600)
+        raise RuntimeError(f"Openverse respondió HTTP {response.status_code}.")
+    try:
+        records = response.json().get("results") or []
+    except Exception as exc:
+        raise RuntimeError("No pude interpretar los resultados de Openverse.") from exc
+    if not isinstance(records, list):
+        raise RuntimeError("Openverse devolvió un catálogo con formato inesperado.")
+
+    labels = {
+        "cc0": "CC0 · Dominio público",
+        "pdm": "Public Domain Mark",
+        "by": "CC BY · Requiere atribución",
+        "by-sa": "CC BY-SA · Requiere atribución y compartir igual",
+    }
+    tracks = []
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        license_code = str(item.get("license") or "").strip().casefold()
+        if license_code not in labels:
+            continue
+        audio_url = str(item.get("url") or "").strip()
+        if not dj_audio_url_allowed(audio_url):
+            continue
+        try:
+            extension = Path(urlsplit(audio_url).path).suffix.lower()
+            duration_ms = int(item.get("duration") or 0)
+            file_size = int(item.get("filesize") or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if extension not in DJ_AUDIO_EXTENSIONS or duration_ms < 30000:
+            continue
+        if file_size > DJ_REMOTE_AUDIO_MAX_BYTES:
+            continue
+        landing_url = str(item.get("foreign_landing_url") or "").strip()
+        try:
+            landing = urlsplit(landing_url)
+            landing_port = landing.port
+        except (TypeError, ValueError):
+            continue
+        if (landing.scheme != "https" or not landing.hostname
+                or landing_port not in (None, 443)
+                or landing.username is not None or landing.password is not None):
+            continue
+        license_url = str(item.get("license_url") or "").strip()
+        if not license_url.startswith("https://creativecommons.org/"):
+            continue
+        title = clean_archive_value(item.get("title") or "Pista de Openverse", 160)
+        creator = clean_archive_value(item.get("creator") or "Autor no indicado", 120)
+        credit = clean_archive_value(item.get("attribution") or "", 500)
+        if not credit:
+            credit = f"[{title}]({landing_url}) — {creator} · [{labels[license_code]}]({license_url})"
+        tracks.append({
+            "identifier": str(item.get("id") or audio_url),
+            "title": title,
+            "creator": creator,
+            "license": labels[license_code],
+            "license_url": license_url,
+            "item_url": landing_url,
+            "url": audio_url,
+            "extension": extension,
+            "duration": duration_ms / 1000,
+            "credit_line": credit,
+            "source": "Openverse",
+            "source_key": "openverse",
+            "source_provider": clean_archive_value(item.get("provider") or item.get("source") or "Openverse", 80),
+        })
+        if len(tracks) >= limit:
+            break
+    DJ_SOURCE_CACHE[cache_key] = {"tracks": tracks, "expires": time.time() + 900}
+    if len(DJ_SOURCE_CACHE) > 300:
+        oldest = min(DJ_SOURCE_CACHE, key=lambda key: DJ_SOURCE_CACHE[key].get("expires", 0))
+        DJ_SOURCE_CACHE.pop(oldest, None)
+    return tracks[:limit]
+
+
 async def search_music_catalog(query: str, limit: int = 5) -> list[dict]:
     """Search configured catalogs concurrently, de-duplicate and rank their results."""
     providers = [
@@ -3622,6 +3725,7 @@ async def search_music_catalog(query: str, limit: int = 5) -> list[dict]:
         ("commons", search_wikimedia_audio, "upload.wikimedia.org"),
         ("ccmixter", search_ccmixter_audio, "ccmixter.org"),
         ("audius", search_audius_audio, "api.audius.co"),
+        ("openverse", search_openverse_audio, "api.openverse.org"),
     ]
     if FREESOUND_API_KEY:
         providers.append(("freesound", search_freesound_audio, "freesound.org"))
@@ -12745,13 +12849,14 @@ Uso: !enciclopedia <nombre>""",
                     if dj_source_is_cooled("freesound.org") else "configurado, sin pausa temporal"
                 )
             )
+            openverse_status = "en pausa temporal" if dj_source_is_cooled("api.openverse.org") else "disponible, sin clave adicional"
             await send_message(
                 thread,
                 "FUENTES MUSICALES DE KATHERINE\n"
                 f"• Internet Archive: {archive_status}.\n"
                 f"• Wikimedia Commons: {commons_status}; puede pausarse si el CDN bloquea la descarga.\n"
                 f"• Jamendo: {jamendo_status}.\n"
-                f"• Freesound: {freesound_status}.\n"
+                f"• Freesound: {freesound_status}.\n"                f"• Openverse: {openverse_status} (catálogo adicional de música abierta).\n"
                 "Una pista solo se inicia si supera los controles de licencia, tamaño, descarga, formato y decodificación. "
                 "Si un proveedor devuelve 401/403/429/5xx, se pausa temporalmente y Katherine prueba otra fuente.\n"
                 "Búsqueda por ambiente: !dj ambiente estudiar|trabajar|relajarse|dormir|jugar|combate|triste|feliz.",
