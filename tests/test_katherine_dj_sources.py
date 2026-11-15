@@ -493,8 +493,7 @@ def test_dj_probe_command_is_admin_only_and_does_not_search_for_public_users(mon
 
     monkeypatch.setattr(katherine, "COMMUNITY_TOKEN", "test-community-token")
     monkeypatch.setattr(katherine, "is_admin_uid", lambda uid: uid == "admin-uid")
-    monkeypatch.setattr(katherine, "record_user", lambda *args, **kwargs: None)
-    monkeypatch.setattr(katherine, "record_chat_activity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(katherine, "record_user_and_chat_activity", lambda *args, **kwargs: None)
     monkeypatch.setattr(katherine, "send_message", fake_send)
     monkeypatch.setattr(katherine, "search_music_catalog", fake_search)
 
@@ -538,8 +537,7 @@ def test_admin_dj_probe_runs_real_catalog_and_playback_flow(monkeypatch):
 
     monkeypatch.setattr(katherine, "COMMUNITY_TOKEN", "test-community-token")
     monkeypatch.setattr(katherine, "is_admin_uid", lambda uid: uid == "admin-uid")
-    monkeypatch.setattr(katherine, "record_user", lambda *args, **kwargs: None)
-    monkeypatch.setattr(katherine, "record_chat_activity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(katherine, "record_user_and_chat_activity", lambda *args, **kwargs: None)
     monkeypatch.setattr(katherine, "send_message", fake_send)
     monkeypatch.setattr(katherine, "search_music_catalog", fake_search)
     monkeypatch.setattr(katherine, "start_dj_search_with_fallback", fake_play)
