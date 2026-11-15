@@ -2946,7 +2946,6 @@ def dj_audio_host_allowed(host: str) -> bool:
         or normalized.endswith(".audius.co")
         or normalized == "freesound.org"
         or normalized.endswith(".freesound.org")
-        or normalized == "media.uncommonear.com"
     )
 
 
@@ -3569,20 +3568,37 @@ async def search_freesound_audio(query: str, limit: int = 5) -> list[dict]:
         username = clean_archive_value(item.get("username") or "Autor no indicado")
         if not identifier.isdigit():
             continue
+
+        item_url = str(item.get("url") or "").strip()
+        try:
+            parsed_item_url = urlsplit(item_url)
+            item_url_port = parsed_item_url.port
+        except (TypeError, ValueError):
+            continue
+        if (
+            parsed_item_url.scheme != "https"
+            or (parsed_item_url.hostname or "").lower().rstrip(".") != "freesound.org"
+            or item_url_port not in (None, 443)
+            or parsed_item_url.username is not None
+            or parsed_item_url.password is not None
+        ):
+            continue
+
+        title = clean_archive_value(item.get("name") or "Pista de Freesound", 160)
+        credit_line = (
+            f"[{title}]({item_url}) — {username} · [CC BY 4.0]({license_url})"
+        ) if license_name == "attribution" else ""
         tracks.append({
             "identifier": identifier,
-            "title": clean_archive_value(item.get("name") or "Pista de Freesound", 160),
+            "title": title,
             "creator": username,
             "license": license_label,
             "license_url": license_url,
-            "item_url": f"https://freesound.org/s/{quote(identifier, safe='')}/",
+            "item_url": item_url,
             "url": audio_url,
             "extension": extension,
             "duration": duration_s,
-            "credit_line": (
-                f"{clean_archive_value(item.get('name') or 'Pista', 120)} "
-                f"by {username} (Freesound, {license_label})"
-            ) if license_name == "attribution" else "",
+            "credit_line": credit_line,
             "source": "Freesound",
             "source_key": "freesound",
         })
@@ -12264,8 +12280,11 @@ Uso: !enciclopedia <nombre>""",
                     if credit:
                         answer += f"\nCréditos: {credit}"
                 else:
+                    credit = ""
                     answer = f"DJ: {result}"
-                await send_message(thread, answer, source, reply)
+                await send_message(
+                    thread, answer, source, reply, allow_safe_links=bool(credit)
+                )
             elif action == "quitar":
                 try:
                     position = int(args[1])
@@ -13363,14 +13382,26 @@ async def handle_interaction(event: dict, source: str):
         )
         if ok and selected_track:
             track = selected_track
+            item_url = str(track.get("item_url") or "").strip()
+            license_url = str(track.get("license_url") or "").strip()
+            item_label = f"{track['title']} — {track.get('creator', 'Autor no indicado')}"
+            item_credit = (
+                f"[{item_label}]({item_url})"
+                if item_url and is_safe_public_url(item_url)
+                else item_label
+            )
+            license_credit = (
+                f"[{track['license']}]({license_url})"
+                if license_url and is_safe_public_url(license_url)
+                else str(track.get("license") or "Licencia no indicada")
+            )
             credit = (
                 f"🎧 Ahora suena: {track['title']} — {track['creator']}\n"
                 f"Fuente: {track.get('source', 'catálogo musical')}\n"
-                f"Licencia: {track['license']}\n"
-                f"Créditos: {track.get('item_url', 'sin ficha pública')}\n"
-                f"Licencia: {track.get('license_url', 'ver ficha de origen')}"
+                f"Créditos: {item_credit}\n"
+                f"Licencia: {license_credit}"
             )
-            await send_message(thread_id, credit, dj_source)
+            await send_message(thread_id, credit, dj_source, allow_safe_links=True)
         else:
             await send_message(thread_id, f"DJ: {message}", dj_source)
         return
