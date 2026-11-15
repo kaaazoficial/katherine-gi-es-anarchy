@@ -3565,7 +3565,7 @@ async def ensure_voice_room(thread_id: str):
 
             # Extra bounded headroom absorbs short scheduler/network stalls.
             audio_source = livekit_rtc.AudioSource(
-                48000, 1, queue_size_ms=2000
+                48000, 1, queue_size_ms=500
             )
             audio_track = livekit_rtc.LocalAudioTrack.create_audio_track(
                 "katherine-voice",
