@@ -374,3 +374,88 @@ def test_admin_dj_probe_runs_real_catalog_and_playback_flow(monkeypatch):
     assert len(playback) == 1
     assert playback[0][0] == "dj-probe-admin-room"
     assert any("PRUEBA MUSICAL COMPLETADA" in item for item in sent)
+
+
+
+def test_dj_search_ranking_deduplicates_and_prefers_exact_title():
+    tracks = [
+        {"url": "https://archive.org/a.mp3", "title": "Ambient piano", "creator": "Other"},
+        {"url": "https://archive.org/b.mp3", "title": "Piano", "creator": "Ambient Artist"},
+        {"url": "https://archive.org/c.mp3", "title": "Ambient piano", "creator": "Other"},
+        {"url": "https://archive.org/d.mp3", "title": "Ambient piano night", "creator": "Composer"},
+    ]
+    ranked = katherine.rank_dj_results("ambient piano", tracks, limit=10)
+    assert ranked[0]["url"] == "https://archive.org/a.mp3"
+    assert len(ranked) == 3
+    assert all("_search_score" in track for track in ranked)
+
+
+def test_dj_queue_move_uses_one_based_positions():
+    queue = __import__("collections").deque([
+        {"title": "A"}, {"title": "B"}, {"title": "C"}
+    ])
+    assert katherine.move_dj_queue_item(queue, 3, 1)
+    assert [item["title"] for item in queue] == ["C", "A", "B"]
+    assert not katherine.move_dj_queue_item(queue, 0, 2)
+    assert not katherine.move_dj_queue_item(queue, 1, 4)
+
+
+def test_dj_mixer_ducks_music_and_limits_peak():
+    np = katherine.np
+    music = np.full(480, 20000, dtype=np.int16)
+    speech = np.full(480, 20000, dtype=np.int16)
+    mixed = katherine.mix_audio_samples(music, speech, music_volume=1.0, duck_gain=0.25)
+    assert mixed.dtype == np.int16
+    assert int(mixed[0]) == 25000
+    clipped = katherine.mix_audio_samples(music, speech, music_volume=1.0, duck_gain=1.0)
+    assert int(np.max(np.abs(clipped.astype(np.int32)))) <= 30000
+
+
+def test_dj_remote_queue_item_is_enqueued_without_downloading(monkeypatch):
+    async def fake_ensure(thread_id):
+        return True, "connected"
+
+    async def fail_download(*args, **kwargs):
+        raise AssertionError("Queued tracks must not download before playback")
+
+    monkeypatch.setattr(katherine, "load_audio_dependencies", lambda: True)
+    monkeypatch.setattr(katherine, "ensure_voice_room", fake_ensure)
+    monkeypatch.setattr(katherine, "download_dj_audio", fail_download)
+
+    async def scenario():
+        state = {
+            "task": asyncio.create_task(asyncio.sleep(60)),
+            "queue": __import__("collections").deque(),
+            "volume": 0.75,
+            "audio_source": object(),
+            "pause_event": asyncio.Event(),
+            "skip_event": asyncio.Event(),
+            "stop_event": asyncio.Event(),
+            "playback_stop_event": asyncio.Event(),
+        }
+        state["pause_event"].set()
+        katherine.DJ_ROOMS["deferred-test"] = state
+        try:
+            ok, message = await katherine.start_dj_room(
+                "deferred-test",
+                "https://archive.org/download/item/song.mp3",
+                False,
+                track_metadata={"title": "Queued song", "extension": ".mp3"},
+                enqueue=True,
+            )
+            assert ok
+            assert len(state["queue"]) == 1
+            assert state["queue"][0]["remote"] is True
+            assert state["queue"][0]["path"].startswith("https://")
+            assert "descargará" in message
+        finally:
+            task = state.get("task")
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            katherine.DJ_ROOMS.pop("deferred-test", None)
+
+    asyncio.run(scenario())
