@@ -679,6 +679,7 @@ def test_enable_room_reading_starts_mixer_and_tts_worker(monkeypatch):
 
 
 def test_music_enqueue_restarts_a_stopped_mixer_and_delivers_frames(monkeypatch):
+    monkeypatch.setattr(katherine, "np", np)
     thread_id = "dj-mixer-recovery-test"
     consumed = []
     finished = asyncio.Event()
@@ -729,6 +730,8 @@ def test_music_enqueue_restarts_a_stopped_mixer_and_delivers_frames(monkeypatch)
 
 def test_dj_playback_flushes_samples_retained_by_pyav_resampler(monkeypatch):
     import types
+
+    monkeypatch.setattr(katherine, "np", np)
 
     thread_id = "dj-resampler-flush-test"
     delayed = np.full(480, 2468, dtype=np.int16)
@@ -789,3 +792,96 @@ def test_dj_playback_flushes_samples_retained_by_pyav_resampler(monkeypatch):
     assert result is True
     assert len(enqueued) == 1
     assert np.array_equal(enqueued[0], delayed)
+
+
+
+def test_split_complete_audio_frames_preserves_samples_across_decoder_boundaries(monkeypatch):
+    monkeypatch.setattr(katherine, "np", np)
+    first = np.arange(300, dtype=np.int16)
+    second = np.arange(300, 600, dtype=np.int16)
+
+    frames, pending = katherine.split_complete_audio_frames(
+        np.empty(0, dtype=np.int16), first, frame_size=480
+    )
+    assert frames == []
+    assert np.array_equal(pending, first)
+
+    frames, pending = katherine.split_complete_audio_frames(
+        pending, second, frame_size=480
+    )
+    assert len(frames) == 1
+    assert np.array_equal(frames[0], np.arange(480, dtype=np.int16))
+    assert np.array_equal(pending, np.arange(480, 600, dtype=np.int16))
+
+
+def test_dj_decoder_pads_only_the_final_partial_pcm_frame(monkeypatch):
+    import types
+
+    monkeypatch.setattr(katherine, "np", np)
+    thread_id = "dj-pcm-continuity-test"
+    decoded_samples = np.arange(600, dtype=np.int16)
+    enqueued = []
+
+    class FakeFrame:
+        def __init__(self, values):
+            self.values = values
+
+        def to_ndarray(self):
+            return self.values.reshape(1, -1)
+
+    class FakeResampler:
+        def __init__(self, **kwargs):
+            pass
+
+        def resample(self, frame):
+            if frame is None:
+                return []
+            return [
+                FakeFrame(decoded_samples[:300]),
+                FakeFrame(decoded_samples[300:]),
+            ]
+
+    class FakeContainer:
+        streams = [types.SimpleNamespace(type="audio", duration=None, time_base=None)]
+
+        def decode(self, stream):
+            yield object()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        katherine, "pyav",
+        types.SimpleNamespace(
+            open=lambda *args, **kwargs: FakeContainer(),
+            AudioResampler=FakeResampler,
+        ),
+    )
+
+    async def fake_enqueue(key, state, samples):
+        enqueued.append(np.asarray(samples, dtype=np.int16).copy())
+        return True
+
+    monkeypatch.setattr(katherine, "enqueue_music_audio_samples", fake_enqueue)
+    state = {
+        "stop_event": asyncio.Event(),
+        "playback_stop_event": asyncio.Event(),
+        "skip_event": asyncio.Event(),
+        "pause_event": asyncio.Event(),
+        "music_audio_queue": asyncio.Queue(maxsize=2),
+        "transition_ms": 0,
+    }
+    monkeypatch.setattr(katherine, "DJ_ROOMS", {thread_id: state})
+
+    result = asyncio.run(
+        katherine._dj_play_single(
+            thread_id, __import__("pathlib").Path("unused.mp3"), state
+        )
+    )
+
+    assert result is True
+    assert len(enqueued) == 2
+    assert np.array_equal(enqueued[0], decoded_samples[:480])
+    assert np.array_equal(enqueued[1][:120], decoded_samples[480:])
+    assert np.count_nonzero(enqueued[1][120:]) == 0
+    assert state["music_decoder_finished"] is True
