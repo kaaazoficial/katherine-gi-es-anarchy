@@ -36,6 +36,12 @@ def test_dj_audio_hosts_are_exact_and_https_only():
     assert katherine.dj_audio_url_allowed(
         "https://cdn.freesound.org/previews/12/12345_67890-hq.mp3"
     )
+    assert katherine.dj_audio_url_allowed(
+        "https://tile.loc.gov/streaming-services/iiif/test/default.mp3"
+    )
+    assert not katherine.dj_audio_url_allowed(
+        "https://evil.loc.gov/streaming-services/test.mp3"
+    )
     assert not katherine.dj_audio_url_allowed(
         "https://user:pass@archive.org/download/item/song.mp3"
     )
@@ -160,6 +166,8 @@ def test_music_catalog_raises_only_when_every_source_fails(monkeypatch):
     monkeypatch.setattr(katherine, "search_wikimedia_audio", fail)
     monkeypatch.setattr(katherine, "search_ccmixter_audio", fail)
     monkeypatch.setattr(katherine, "search_audius_audio", fail)
+    monkeypatch.setattr(katherine, "search_openverse_audio", fail)
+    monkeypatch.setattr(katherine, "search_loc_national_jukebox_audio", fail)
     monkeypatch.setattr(katherine, "search_freesound_audio", fail)
     monkeypatch.setattr(katherine, "FREESOUND_API_KEY", "test-freesound-key")
     monkeypatch.setattr(katherine, "JAMENDO_CLIENT_ID", "")
@@ -1228,6 +1236,7 @@ def test_music_catalog_keeps_results_when_new_sources_fail(monkeypatch):
     monkeypatch.setattr(katherine, "search_wikimedia_audio", fail)
     monkeypatch.setattr(katherine, "search_ccmixter_audio", fail)
     monkeypatch.setattr(katherine, "search_audius_audio", fail)
+    monkeypatch.setattr(katherine, "search_loc_national_jukebox_audio", fail)
     monkeypatch.setattr(katherine, "JAMENDO_CLIENT_ID", "")
 
     tracks = asyncio.run(katherine.search_music_catalog("safe track", limit=5))
@@ -1426,6 +1435,220 @@ def test_recoverable_dj_failure_includes_track_valueerror_and_runtimeerror_marke
     assert is_recoverable_dj_failure("El archivo descargado no se puede decodificar (ValueError).")
     assert is_recoverable_dj_failure("La descarga redirigió a un dominio no autorizado.")
     assert not is_recoverable_dj_failure("No pude conectarme a la llamada (RuntimeError).")
+
+
+
+
+
+
+
+def test_loc_national_jukebox_uses_only_pre_1923_downloadable_music(monkeypatch):
+    class FakeResponse:
+        is_success = True
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    calls = []
+
+    async def fake_request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        if url == katherine.LOC_JUKEBOX_API:
+            return FakeResponse({
+                "results": [
+                    {
+                        "id": "http://www.loc.gov/item/jukebox-1910/",
+                        "title": "Old Waltz",
+                        "date": "1910-04-12",
+                        "genre": ["Popular Music"],
+                    },
+                    {
+                        "id": "http://www.loc.gov/item/jukebox-restricted/",
+                        "title": "Restricted Waltz",
+                        "date": "1912",
+                        "genre": ["Popular Music"],
+                    },
+                    {
+                        "id": "http://www.loc.gov/item/jukebox-1924/",
+                        "title": "Protected Recording",
+                        "date": "1924",
+                        "genre": ["Popular Music"],
+                    },
+                ]
+            })
+
+        if "jukebox-1910" in url:
+            return FakeResponse({
+                "item": {
+                    "title": "Old Waltz",
+                    "recording_date": "1910-04-12",
+                    "genre": ["Popular Music"],
+                    "audio_type": "Musical",
+                    "contributor_names": ["The Example Orchestra"],
+                    "access_restricted": False,
+                },
+                "resources": [{
+                    "files": [[{
+                        "download": "https://tile.loc.gov/streaming-services/iiif/old-waltz/default.mp3",
+                        "filename": "https://tile.loc.gov/storage-services/service/old-waltz.mp3",
+                        "mimetype": "audio/mpeg",
+                        "rights_restricted": False,
+                        "canDownload": True,
+                        "duration": 125,
+                    }]]
+                }],
+            })
+        if "jukebox-restricted" in url:
+            return FakeResponse({
+                "item": {
+                    "title": "Restricted Waltz",
+                    "recording_date": "1912",
+                    "genre": ["Popular Music"],
+                    "audio_type": "Musical",
+                },
+                "resources": [{
+                    "files": [[{
+                        "download": "https://tile.loc.gov/streaming-services/iiif/restricted/default.mp3",
+                        "mimetype": "audio/mpeg",
+                        "rights_restricted": True,
+                        "canDownload": False,
+                        "duration": 180,
+                    }]]
+                }],
+            })
+        raise AssertionError(f"Unexpected Library of Congress request: {url}")
+
+    monkeypatch.setattr(katherine, "external_request", fake_request)
+    katherine.DJ_SOURCE_CACHE.pop("loc_national_jukebox:old waltz", None)
+
+    tracks = asyncio.run(
+        katherine.search_loc_national_jukebox_audio("old waltz", limit=5)
+    )
+
+    assert len(tracks) == 1
+    track = tracks[0]
+    assert track["source"] == "Library of Congress"
+    assert track["source_key"] == "loc_national_jukebox"
+    assert track["title"] == "Old Waltz"
+    assert track["creator"] == "The Example Orchestra"
+    assert track["license"].startswith("Dominio público en EE. UU.")
+    assert track["url"].endswith("/default.mp3")
+    assert "Library of Congress" in track["credit_line"]
+
+    search_call = calls[0]
+    assert search_call[1] == katherine.LOC_JUKEBOX_API
+    assert search_call[2]["params"]["dates"] == "1900/1922"
+    assert "partof_repository:recorded sound section" in search_call[2]["params"]["fa"]
+    assert search_call[2]["safe_public"] is True
+    detail_calls = [call for call in calls if call[1] != katherine.LOC_JUKEBOX_API]
+    assert len(detail_calls) == 2
+    assert all(call[2]["safe_public"] is True for call in detail_calls)
+
+
+def test_loc_national_jukebox_returns_empty_for_blank_query(monkeypatch):
+    async def unexpected_request(*args, **kwargs):
+        raise AssertionError("Blank National Jukebox queries must not call the API")
+
+    monkeypatch.setattr(katherine, "external_request", unexpected_request)
+    assert asyncio.run(katherine.search_loc_national_jukebox_audio("   ")) == []
+
+
+
+def test_uncommon_ear_search_uses_verified_commercial_tracks_and_preserves_credit(monkeypatch):
+    class FakeResponse:
+        is_success = True
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "tracks": [
+                    {
+                        "id": "ue-cc0", "title": "Quiet Dawn", "artist": "Artist One",
+                        "kind": "music", "duration_s": 95,
+                        "license": {"id": "cc0", "url": "https://creativecommons.org/publicdomain/zero/1.0/", "status": "verified"},
+                        "terms": {"commercial": True, "credit": "none", "share_alike": False},
+                        "attribution": "optional", "credit_line": "",
+                        "preview_url": "https://media.uncommonear.com/p/ue-cc0.mp3",
+                        "page_url": "https://uncommonear.com/browse?t=ue-cc0",
+                    },
+                    {
+                        "id": "ue-by", "title": "Ambient Piano", "artist": "Artist Two",
+                        "kind": "music", "duration_s": 120,
+                        "license": {"id": "cc-by-4.0", "url": "https://creativecommons.org/licenses/by/4.0/", "status": "verified"},
+                        "terms": {"commercial": True, "credit": "required", "share_alike": False},
+                        "attribution": "required", "credit_line": '"Ambient Piano" by Artist Two (CC BY 4.0)',
+                        "preview_url": "https://media.uncommonear.com/p/ue-by.mp3",
+                        "page_url": "https://uncommonear.com/browse?t=ue-by",
+                    },
+                    {
+                        "id": "ue-nc", "title": "Noncommercial", "artist": "Artist Three",
+                        "kind": "music", "duration_s": 100,
+                        "license": {"id": "cc-by-nc-4.0", "url": "https://creativecommons.org/licenses/by-nc/4.0/", "status": "verified"},
+                        "terms": {"commercial": False, "credit": "required", "share_alike": False},
+                        "attribution": "required", "credit_line": "Do not use",
+                        "preview_url": "https://media.uncommonear.com/p/ue-nc.mp3",
+                        "page_url": "https://uncommonear.com/browse?t=ue-nc",
+                    },
+                    {
+                        "id": "ue-unverified", "title": "Unverified", "artist": "Artist Four",
+                        "kind": "music", "duration_s": 100,
+                        "license": {"id": "cc0", "url": "https://creativecommons.org/publicdomain/zero/1.0/", "status": "listed"},
+                        "terms": {"commercial": True, "credit": "none", "share_alike": False},
+                        "attribution": "optional", "credit_line": "",
+                        "preview_url": "https://media.uncommonear.com/p/ue-unverified.mp3",
+                        "page_url": "https://uncommonear.com/browse?t=ue-unverified",
+                    },
+                    {
+                        "id": "ue-evil", "title": "Untrusted host", "artist": "Artist Five",
+                        "kind": "music", "duration_s": 100,
+                        "license": {"id": "cc0", "url": "https://creativecommons.org/publicdomain/zero/1.0/", "status": "verified"},
+                        "terms": {"commercial": True, "credit": "none", "share_alike": False},
+                        "attribution": "optional", "credit_line": "",
+                        "preview_url": "https://evil.example/ue-evil.mp3",
+                        "page_url": "https://uncommonear.com/browse?t=ue-evil",
+                    },
+                ]
+            }
+
+    calls = []
+
+    async def fake_request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return FakeResponse()
+
+    monkeypatch.setattr(katherine, "UNCOMMON_EAR_API_KEY", "test-uncommon-ear-key")
+    monkeypatch.setattr(katherine, "external_request", fake_request)
+    katherine.DJ_SOURCE_CACHE.pop("uncommon_ear:ambient piano", None)
+
+    tracks = asyncio.run(katherine.search_uncommon_ear_audio("ambient piano", limit=5))
+
+    assert [track["identifier"] for track in tracks] == ["ue-cc0", "ue-by"]
+    assert tracks[0]["license"].startswith("CC0")
+    assert tracks[0]["credit_line"] == ""
+    assert tracks[1]["license"].startswith("CC BY 4.0")
+    assert tracks[1]["credit_line"] == '"Ambient Piano" by Artist Two (CC BY 4.0)'
+    method, url, request = calls[0]
+    assert method == "GET"
+    assert url == "https://api.uncommonear.com/v1/search"
+    assert request["headers"]["Authorization"] == "Bearer test-uncommon-ear-key"
+    assert request["params"]["kind"] == "music"
+    assert request["params"]["commercial"] is True
+    assert request["params"]["share_alike"] is False
+
+
+def test_uncommon_ear_search_is_disabled_without_an_api_key(monkeypatch):
+    async def unexpected_request(*args, **kwargs):
+        raise AssertionError("Uncommon Ear must not be called without its API key")
+
+    monkeypatch.setattr(katherine, "UNCOMMON_EAR_API_KEY", "")
+    monkeypatch.setattr(katherine, "external_request", unexpected_request)
+    assert asyncio.run(katherine.search_uncommon_ear_audio("ambient piano")) == []
+    assert asyncio.run(katherine.search_uncommon_ear_audio("   ")) == []
 
 
 
