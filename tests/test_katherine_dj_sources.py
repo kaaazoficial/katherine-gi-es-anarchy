@@ -1939,16 +1939,34 @@ def test_auto_reply_matchers_are_compiled_and_cached(monkeypatch):
 
 
 def test_auto_reply_rule_updates_invalidate_compiled_cache(monkeypatch):
+    from contextlib import contextmanager
+
     thread = "auto-reply-invalidation-test"
     katherine.AUTO_REPLY_RULE_CACHE[thread] = (
         katherine.time.monotonic() + 60,
         (),
     )
-    monkeypatch.setattr(katherine, "db_session", lambda: None)
-    monkeypatch.setattr(katherine, "list_auto_reply_rules", lambda _thread: [])
-    # Cache invalidation is tied to successful writes; the public matcher API
-    # must never keep stale compiled objects past the normal TTL.
-    assert thread in katherine.AUTO_REPLY_RULE_CACHE
-    katherine.AUTO_REPLY_RULE_CACHE.pop(thread, None)
+
+    class FakeCursor:
+        def fetchone(self):
+            return {"id": 42}
+
+    class FakeDatabase:
+        def execute(self, query, params=()):
+            return FakeCursor()
+
+    @contextmanager
+    def fake_session():
+        yield FakeDatabase()
+
+    monkeypatch.setattr(katherine, "db_session", fake_session)
+    try:
+        rule_id = katherine.add_auto_reply_rule(
+            thread, "hola", "¡Hola {usuario}!", "tester"
+        )
+        assert rule_id == 42
+        assert thread not in katherine.AUTO_REPLY_RULE_CACHE
+    finally:
+        katherine.AUTO_REPLY_RULE_CACHE.pop(thread, None)
 
 
