@@ -967,6 +967,8 @@ AUDIUS_API = "https://api.audius.co/v1"
 AUDIUS_APP_NAME = "KatherineAnarchy"
 FREESOUND_API = "https://freesound.org/apiv2"
 FREESOUND_API_KEY = os.getenv("FREESOUND_API_KEY", "").strip()
+UNCOMMON_EAR_API = "https://api.uncommonear.com/v1/search"
+UNCOMMON_EAR_API_KEY = os.getenv("UNCOMMON_EAR_API_KEY", "").strip()
 IA_ALLOWED_LICENSES = {
     "creativecommons.org/publicdomain/zero/1.0": "CC0 · Dominio público",
     "creativecommons.org/publicdomain/mark/1.0": "Public Domain Mark",
@@ -2938,6 +2940,7 @@ def dj_audio_host_allowed(host: str) -> bool:
         normalized == "archive.org"
         or normalized.endswith(".archive.org")
         or normalized == "upload.wikimedia.org"
+        or normalized == "media.uncommonear.com"
         or normalized == "jamendo.com"
         or normalized.endswith(".jamendo.com")
         or normalized == "ccmixter.org"
@@ -2983,6 +2986,8 @@ def dj_source_cooldown_key(host: str) -> str:
         return "freesound.org"
     if key == "api.openverse.org" or key.endswith(".openverse.org"):
         return "openverse.org"
+    if key == "uncommonear.com" or key.endswith(".uncommonear.com"):
+        return "uncommonear.com"
     return key
 
 
@@ -3003,7 +3008,7 @@ def cool_down_dj_source(host: str, seconds: int = 600) -> None:
     key = dj_source_cooldown_key(host)
     if key in {
         "upload.wikimedia.org", "archive.org", "jamendo.com",
-        "ccmixter.org", "audius.co", "freesound.org", "openverse.org",
+        "ccmixter.org", "audius.co", "freesound.org", "openverse.org", "uncommonear.com",
     }:
         DJ_SOURCE_COOLDOWNS[key] = time.monotonic() + max(30, min(1800, int(seconds)))
         metrics["dj_source_cooldowns"] += 1
@@ -3617,6 +3622,138 @@ async def search_freesound_audio(query: str, limit: int = 5) -> list[dict]:
     return tracks[:limit]
 
 
+async def search_uncommon_ear_audio(query: str, limit: int = 5) -> list[dict]:
+    """Search Uncommon Ear for verified, commercially reusable music previews."""
+    if not UNCOMMON_EAR_API_KEY:
+        return []
+    query = clean_archive_value(query, 160)
+    if not query:
+        return []
+    cache_key = "uncommon_ear:" + query.casefold()
+    cached = DJ_SOURCE_CACHE.get(cache_key)
+    if cached and cached.get("expires", 0) > time.time():
+        return cached.get("tracks", [])[:limit]
+
+    response = await external_request(
+        "GET",
+        UNCOMMON_EAR_API,
+        params={
+            "q": query,
+            "kind": "music",
+            "commercial": "true",
+            "share_alike": "false",
+            "limit": min(50, max(10, limit * 3)),
+            "sort": "best",
+        },
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {UNCOMMON_EAR_API_KEY}",
+            "User-Agent": "Katherine-AnarchyBot/3.2 (music catalog; https://github.com/kaaazoficial/katherine-gi-es-anarchy)",
+        },
+        timeout=20,
+    )
+    if not response.is_success:
+        if response.status_code in (401, 403, 429, 500, 502, 503, 504):
+            cool_down_dj_source("api.uncommonear.com", 600)
+        raise RuntimeError(f"Uncommon Ear respondió HTTP {response.status_code}.")
+    try:
+        records = response.json().get("tracks") or []
+    except Exception as exc:
+        raise RuntimeError("No pude interpretar los resultados de Uncommon Ear.") from exc
+    if not isinstance(records, list):
+        raise RuntimeError("Uncommon Ear devolvió un catálogo con formato inesperado.")
+
+    license_labels = {
+        "cc0": "CC0 1.0 · Dominio público",
+        "cc-by-3.0": "CC BY 3.0 · Requiere atribución",
+        "cc-by-4.0": "CC BY 4.0 · Requiere atribución",
+    }
+    tracks = []
+    for item in records:
+        if not isinstance(item, dict) or str(item.get("kind") or "music").lower() != "music":
+            continue
+        license_info = item.get("license") if isinstance(item.get("license"), dict) else {}
+        terms = item.get("terms") if isinstance(item.get("terms"), dict) else {}
+        license_id = str(license_info.get("id") or "").strip().casefold()
+        if license_id not in license_labels:
+            continue
+        if license_info.get("status") != "verified" or terms.get("commercial") is not True:
+            continue
+        if terms.get("share_alike") is not False:
+            continue
+
+        audio_url = str(item.get("preview_url") or "").strip()
+        if not dj_audio_url_allowed(audio_url):
+            continue
+        try:
+            extension = Path(urlsplit(audio_url).path).suffix.lower()
+            duration = float(item.get("duration_s") or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if extension not in DJ_AUDIO_EXTENSIONS or duration < 30:
+            continue
+
+        page_url = str(item.get("page_url") or "").strip()
+        try:
+            page = urlsplit(page_url)
+            page_port = page.port
+        except (TypeError, ValueError):
+            continue
+        if (
+            page.scheme != "https" or page.hostname != "uncommonear.com"
+            or page_port not in (None, 443) or page.username is not None
+            or page.password is not None
+        ):
+            continue
+
+        license_url = str(license_info.get("url") or "").strip()
+        try:
+            license_parsed = urlsplit(license_url)
+            license_port = license_parsed.port
+        except (TypeError, ValueError):
+            continue
+        if (
+            license_parsed.scheme != "https"
+            or license_parsed.hostname not in ("creativecommons.org", "www.creativecommons.org")
+            or license_port not in (None, 443)
+            or license_parsed.username is not None
+            or license_parsed.password is not None
+        ):
+            continue
+
+        title = clean_archive_value(item.get("title") or "Pista de Uncommon Ear", 160)
+        creator = clean_archive_value(item.get("artist") or "Artista desconocido", 120)
+        credit_line = clean_archive_value(item.get("credit_line") or "", 500)
+        attribution = str(item.get("attribution") or "").strip().lower()
+        if attribution in ("required", "requested") and not credit_line:
+            continue
+        identifier = str(item.get("id") or "").strip()
+        if not identifier:
+            continue
+        tracks.append({
+            "identifier": identifier,
+            "title": title,
+            "creator": creator,
+            "license": license_labels[license_id],
+            "license_url": license_url,
+            "item_url": page_url,
+            "url": audio_url,
+            "extension": extension,
+            "duration": duration,
+            "credit_line": credit_line,
+            "source": "Uncommon Ear",
+            "source_key": "uncommon_ear",
+        })
+        if len(tracks) >= limit:
+            break
+
+    DJ_SOURCE_CACHE[cache_key] = {"tracks": tracks, "expires": time.time() + 900}
+    if len(DJ_SOURCE_CACHE) > 300:
+        oldest = min(DJ_SOURCE_CACHE, key=lambda key: DJ_SOURCE_CACHE[key].get("expires", 0))
+        DJ_SOURCE_CACHE.pop(oldest, None)
+    return tracks[:limit]
+
+
 async def search_openverse_audio(query: str, limit: int = 5) -> list[dict]:
     """Search Openverse for openly licensed music without an API key."""
     query = clean_archive_value(query, 160)
@@ -3729,6 +3866,8 @@ async def search_music_catalog(query: str, limit: int = 5) -> list[dict]:
     ]
     if FREESOUND_API_KEY:
         providers.append(("freesound", search_freesound_audio, "freesound.org"))
+    if UNCOMMON_EAR_API_KEY:
+        providers.append(("uncommon_ear", search_uncommon_ear_audio, "api.uncommonear.com"))
     if JAMENDO_CLIENT_ID:
         providers.append(("jamendo", search_jamendo_audio, "jamendo.com"))
 
@@ -12850,6 +12989,14 @@ Uso: !enciclopedia <nombre>""",
                 )
             )
             openverse_status = "en pausa temporal" if dj_source_is_cooled("api.openverse.org") else "disponible, sin clave adicional"
+            uncommon_ear_status = (
+                "no configurado: añade UNCOMMON_EAR_API_KEY en Render"
+                if not UNCOMMON_EAR_API_KEY else
+                (
+                    f"en pausa ({max(1, (dj_source_cooldown_remaining('api.uncommonear.com') + 59) // 60)} min)"
+                    if dj_source_is_cooled("api.uncommonear.com") else "configurado, sin pausa temporal"
+                )
+            )
             await send_message(
                 thread,
                 "FUENTES MUSICALES DE KATHERINE\n"
@@ -12857,6 +13004,7 @@ Uso: !enciclopedia <nombre>""",
                 f"• Wikimedia Commons: {commons_status}; puede pausarse si el CDN bloquea la descarga.\n"
                 f"• Jamendo: {jamendo_status}.\n"
                 f"• Freesound: {freesound_status}.\n"                f"• Openverse: {openverse_status} (catálogo adicional de música abierta).\n"
+                f"• Uncommon Ear: {uncommon_ear_status} (pistas con licencia comercial verificada).\n"
                 "Una pista solo se inicia si supera los controles de licencia, tamaño, descarga, formato y decodificación. "
                 "Si un proveedor devuelve 401/403/429/5xx, se pausa temporalmente y Katherine prueba otra fuente.\n"
                 "Búsqueda por ambiente: !dj ambiente estudiar|trabajar|relajarse|dormir|jugar|combate|triste|feliz.",
