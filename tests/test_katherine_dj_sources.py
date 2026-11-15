@@ -1510,8 +1510,8 @@ def test_uncommon_ear_search_uses_verified_commercial_tracks_and_preserves_credi
     assert url == "https://api.uncommonear.com/v1/search"
     assert request["headers"]["Authorization"] == "Bearer test-uncommon-ear-key"
     assert request["params"]["kind"] == "music"
-    assert request["params"]["commercial"] == "true"
-    assert request["params"]["share_alike"] == "false"
+    assert request["params"]["commercial"] is True
+    assert request["params"]["share_alike"] is False
 
 
 def test_uncommon_ear_search_is_disabled_without_an_api_key(monkeypatch):
