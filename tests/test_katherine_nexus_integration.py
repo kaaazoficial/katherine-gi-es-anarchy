@@ -138,6 +138,9 @@ def test_unaddressed_chat_only_updates_bounded_activity_and_does_not_activate_ka
         calls["auto_replies"].append(args)
 
     monkeypatch.setattr(katherine, "maybe_send_auto_reply", capture_auto_reply)
+    async def no_spelling(*_args, **_kwargs):
+        return False
+    monkeypatch.setattr(katherine, "maybe_send_spelling_feedback", no_spelling)
 
     async def no_speech(event, source):
         return None
@@ -146,6 +149,10 @@ def test_unaddressed_chat_only_updates_bounded_activity_and_does_not_activate_ka
         calls["commands"].append(event["message"]["content"])
 
     monkeypatch.setattr(katherine, "enqueue_message_for_speech", no_speech)
+    async def no_spelling(*_args, **_kwargs):
+        return False
+    monkeypatch.setattr(katherine, "maybe_send_spelling_feedback", no_spelling)
+    monkeypatch.setattr(katherine, "detect_spanish_spelling_issues", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(katherine, "handle_command", capture_command)
     monkeypatch.setattr(katherine, "record_user", lambda uid, nickname, count_message=False: calls["users"].append((uid, nickname, count_message)))
     monkeypatch.setattr(katherine, "record_chat_activity", lambda thread, uid, nickname: calls["activity"].append((thread, uid, nickname)))
@@ -193,3 +200,111 @@ def test_addressed_natural_request_routes_to_existing_command(monkeypatch):
     asyncio.run(katherine.dispatch(event, "developer"))
     assert calls == ["!dj pausa"]
 
+
+
+def test_unaddressed_typo_gets_a_gentle_correction_without_persistent_history(monkeypatch):
+    sent = []
+
+    monkeypatch.setattr(katherine, "SPELLING_CHAT_COOLDOWN", {})
+    monkeypatch.setattr(katherine, "SPELLING_USER_COOLDOWN", {})
+
+    def fake_detect(text):
+        from types import SimpleNamespace
+        assert text == "Ola, como estas?"
+        return SimpleNamespace(
+            corrected_text="Hola, ¿cómo estás?",
+            corrections=(("Ola", "Hola"),),
+        )
+
+    async def fake_send(thread, content, source="developer", reply_id=None, buttons=None):
+        sent.append((thread, content, source))
+        return {"ok": True}
+
+    monkeypatch.setattr(katherine, "detect_spanish_spelling_issues", fake_detect)
+    monkeypatch.setattr(katherine, "send_message", fake_send)
+
+    async def scenario():
+        sent_ok = await katherine.maybe_send_spelling_feedback(
+            "room-spell", "user-1", "Viajero", "Ola, como estas?"
+        )
+        repeated = await katherine.maybe_send_spelling_feedback(
+            "room-spell", "user-1", "Viajero", "Ola, como estas?"
+        )
+        return sent_ok, repeated
+
+    assert asyncio.run(scenario()) == (True, False)
+    assert len(sent) == 1
+    assert "Hola, ¿cómo estás?" in sent[0][1]
+    assert "Te entendí perfectamente" in sent[0][1]
+    assert katherine.metrics["spelling_corrections_sent"] >= 1
+
+
+def test_affectionate_compliment_to_katherine_gets_a_warm_reply(monkeypatch):
+    sent = []
+    command_calls = []
+
+    monkeypatch.setattr(katherine, "check_antispam_message", lambda event, source: (False, None))
+
+    async def no_speech(event, source):
+        return None
+
+    async def fake_send(thread, content, source="developer", reply_id=None, buttons=None):
+        sent.append(content)
+        return {"ok": True}
+
+    async def capture_command(event, source):
+        command_calls.append(event["message"]["content"])
+
+    monkeypatch.setattr(katherine, "enqueue_message_for_speech", no_speech)
+    async def no_spelling(*_args, **_kwargs):
+        return False
+    monkeypatch.setattr(katherine, "maybe_send_spelling_feedback", no_spelling)
+    monkeypatch.setattr(katherine, "detect_spanish_spelling_issues", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(katherine, "send_message", fake_send)
+    monkeypatch.setattr(katherine, "handle_command", capture_command)
+    monkeypatch.setattr(katherine, "record_user", lambda *args, **kwargs: None)
+    monkeypatch.setattr(katherine, "record_chat_activity", lambda *args, **kwargs: None)
+
+    event = {
+        "type": "message",
+        "threadId": "room-warm",
+        "message": {
+            "content": "Eres muy linda, Katherine",
+            "author": {"uid": "user-warm", "nickname": "Viajero"},
+        },
+    }
+    asyncio.run(katherine.dispatch(event, "developer"))
+    assert len(sent) == 1
+    assert any(word in sent[0].casefold() for word in ("cumplido", "sonrojar", "ternura"))
+    assert command_calls == []
+
+
+def test_dispatch_tries_spelling_feedback_after_custom_rules(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(katherine, "check_antispam_message", lambda event, source: (False, None))
+
+    async def no_speech(event, source):
+        return None
+
+    async def no_auto_reply(*args):
+        return False
+
+    async def capture_spelling(*args):
+        calls.append(args)
+
+    monkeypatch.setattr(katherine, "enqueue_message_for_speech", no_speech)
+    monkeypatch.setattr(katherine, "maybe_send_auto_reply", no_auto_reply)
+    monkeypatch.setattr(katherine, "maybe_send_spelling_feedback", capture_spelling)
+    monkeypatch.setattr(katherine, "record_chat_activity", lambda *args, **kwargs: None)
+
+    event = {
+        "type": "message",
+        "threadId": "room-spelling-dispatch",
+        "message": {
+            "content": "Ola, como estas?",
+            "author": {"uid": "user-spelling", "nickname": "Viajero"},
+        },
+    }
+    asyncio.run(katherine.dispatch(event, "developer"))
+    assert calls == [("room-spelling-dispatch", "user-spelling", "Viajero", "Ola, como estas?")]

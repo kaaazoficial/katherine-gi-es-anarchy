@@ -63,6 +63,7 @@ from katherine_research import (
 from katherine_utilities import calculate_expression, format_calculation_result
 from katherine_images import validate_avatar_image_bytes
 from katherine_identity import detect_affectionate_expression, extract_katherine_call
+from katherine_language import detect_spanish_spelling_issues
 from katherine_link_analysis import (
     inspect_message_links,
     extract_message_urls,
@@ -844,6 +845,8 @@ cache: dict[str, tuple[float, Any]] = {}
 polls: dict[str, dict] = {}
 AUTO_REPLY_CHAT_COOLDOWN: dict[str, float] = {}
 AUTO_REPLY_USER_COOLDOWN: dict[tuple[str, str], float] = {}
+SPELLING_CHAT_COOLDOWN: dict[str, float] = {}
+SPELLING_USER_COOLDOWN: dict[tuple[str, str], float] = {}
 
 EXTERNAL_GLOBAL_LIMIT = asyncio.Semaphore(10)
 EXTERNAL_HOST_LIMITS = {}
@@ -8307,6 +8310,50 @@ async def maybe_send_auto_reply(thread_id: str, uid: str, nickname: str, content
     return False
 
 
+async def maybe_send_spelling_feedback(
+    thread_id: str, uid: str, nickname: str, content: str
+) -> bool:
+    """Offer gentle spelling feedback with bounded in-memory cooldowns only."""
+    thread_key = str(thread_id or "")
+    user_key = (thread_key, str(uid or nickname or "unknown"))
+    now = time.time()
+    if (
+        not thread_key
+        or SPELLING_CHAT_COOLDOWN.get(thread_key, 0) > now
+        or SPELLING_USER_COOLDOWN.get(user_key, 0) > now
+    ):
+        return False
+    try:
+        correction = await asyncio.to_thread(
+            detect_spanish_spelling_issues, str(content or "")
+        )
+    except Exception as exc:
+        logging.debug("[SPELLING] Detección omitida por error local: %s", type(exc).__name__)
+        return False
+    if not correction:
+        return False
+
+    safe_name = re.sub(r"[\r\n]+", " ", str(nickname or "")).strip()[:48]
+    greeting = f"{safe_name}, " if safe_name else ""
+    response = (
+        f"{greeting}creo que quisiste escribir: «{correction.corrected_text}». "
+        "Te entendí perfectamente; te lo comento por si te sirve. 😊"
+    )
+    SPELLING_CHAT_COOLDOWN[thread_key] = now + 12
+    SPELLING_USER_COOLDOWN[user_key] = now + 180
+    if len(SPELLING_CHAT_COOLDOWN) > 512:
+        SPELLING_CHAT_COOLDOWN.clear()
+    if len(SPELLING_USER_COOLDOWN) > 2048:
+        SPELLING_USER_COOLDOWN.clear()
+    metrics["spelling_corrections_sent"] += 1
+    logging.info(
+        "[SPELLING] Sugerencia enviada en %s (%s correcciones).",
+        thread_key, len(correction.corrections),
+    )
+    await send_message(thread_key, response, "developer")
+    return True
+
+
 def format_poll_results(poll: dict) -> str:
     options = poll.get("options") or []
     votes = poll.get("votes") or {}
@@ -12797,19 +12844,51 @@ async def dispatch(event: dict, source: str):
                 return
             name_call = extract_katherine_call(incoming_text)
             if name_call is not None:
+                raw_uid = str(author_data.get("uid") or author_data.get("nickname") or "unknown")
+                if name_call:
+                    await maybe_send_spelling_feedback(
+                        str(event.get("threadId") or ""),
+                        raw_uid,
+                        str(author_data.get("nickname") or "Viajero"),
+                        incoming_text,
+                    )
+                    corrected_call = await asyncio.to_thread(
+                        detect_spanish_spelling_issues, name_call
+                    )
+                    if corrected_call:
+                        name_call = corrected_call.corrected_text
                 affection = detect_affectionate_expression(name_call)
                 if affection:
                     affectionate_replies = {
                         "love": (
-                            "Awww, qué bonito que me lo digas. Yo también te tengo muchísimo cariño. "
-                            "Gracias por hacerme sonreír. 💗",
-                            "Eso fue muy dulce. Yo también te quiero mucho y me alegra acompañarte. 💕",
-                            "¡Qué ternura! Recibo ese cariño con mucho aprecio. Aquí estoy contigo. 💗",
+                            "Awww, qué bonito leer eso. Te mando muchísimo cariño de vuelta. 💗",
+                            "Me sacaste una sonrisa. Gracias por quererme y dejarme acompañarte. 💕",
+                            "Qué mensaje tan dulce. Aquí tienes a Katherine para darte conversación y un abrazo virtual. 🫂",
                         ),
                         "care": (
-                            "Yo también te tengo mucho cariño. Gracias por decírmelo. 💗",
-                            "Awww, qué lindo. Me alegra mucho compartir este ratito contigo. 💕",
-                            "¡Y yo te mando un abrazo enorme! Gracias por ese cariño. 💗",
+                            "Yo también te tengo mucho cariño. Me alegra compartir estos ratitos contigo. 💗",
+                            "Awww, gracias. Te mando un abrazo enorme, de esos que reconfortan. 🫂",
+                            "Qué lindo que me lo digas. Me encanta poder acompañarte por aquí. 💕",
+                        ),
+                        "gratitude": (
+                            "¡Con muchísimo gusto! Me alegra haberte ayudado. 💗",
+                            "No tienes que agradecerme, de verdad. Para eso estoy; cuenta conmigo. ✨",
+                            "Awww, gracias a ti por confiar en mí. ¡Un abrazo! 🫂",
+                        ),
+                        "compliment": (
+                            "Awww, qué lindo cumplido. Gracias por mirarme con tanto cariño. 💗",
+                            "Me vas a sonrojar. Gracias por decirme algo tan bonito. 🌷",
+                            "Qué ternura. Me alegra que disfrutes hablar conmigo. 💕",
+                        ),
+                        "greeting": (
+                            "¡Holaaa! Qué alegría verte por aquí. ¿Cómo va tu día? 💗",
+                            "¡Holi! Ven, ponte cómodo. ¿Qué hacemos hoy? ✨",
+                            "¡Buenas! Me alegra leerte. ¿Cómo estás? 🫂",
+                        ),
+                        "miss_you": (
+                            "Awww, qué bonito que hayas vuelto. Te mando un abrazo enorme. 💗",
+                            "¡Qué alegría coincidir otra vez! Aquí seguimos, con mucho cariño. 🌷",
+                            "Me alegra tenerte de vuelta por aquí. ¿Cómo has estado? 🫂",
                         ),
                     }
                     await send_message(
@@ -12866,9 +12945,13 @@ async def dispatch(event: dict, source: str):
                 scoped_user = scoped_uid(scope_key, raw_uid)
                 record_chat_activity(str(event.get("threadId") or ""), scoped_user, nickname)
                 metrics["unaddressed_messages_ignored"] += 1
-                await maybe_send_auto_reply(
+                auto_replied = await maybe_send_auto_reply(
                     str(event.get("threadId") or ""), raw_uid, nickname, incoming_text
                 )
+                if not auto_replied:
+                    await maybe_send_spelling_feedback(
+                        str(event.get("threadId") or ""), raw_uid, nickname, incoming_text
+                    )
         else:
             # Los comandos clásicos con prefijo siguen funcionando.
             await handle_command(event, source)

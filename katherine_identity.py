@@ -58,6 +58,17 @@ _NEGATED_AFFECTION_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+_WARM_VOCATIVE_RE = re.compile(
+    r"\b(?:gracias|mil\s+gracias|te\s+agradezco|tqm|tkm|te\s+(?:amo|quiero|adoro)|"
+    r"me\s+caes\s+(?:muy\s+)?bien|eres\s+(?:(?:muy|tan|super)\s+)?"
+    r"(?:linda|bonita|hermosa|preciosa|guapa|adorable|tierna|encantadora|"
+    r"genial|increible|especial|maravillosa|unica)|"
+    r"me\s+encanta\s+hablar\s+contigo|te\s+extra[nñ]e|"
+    r"qu[eé]\s+(?:linda|bonita|hermosa|preciosa|genial|tierna)\s+(?:eres|te\s+ves)|"
+    r"eres\s+(?:la\s+mejor|un\s+amor|un\s+sol)|me\s+haces\s+feliz)\b",
+    flags=re.IGNORECASE,
+)
+
 
 def _normalize_name(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", str(value or "").casefold())
@@ -96,6 +107,7 @@ def _is_direct_vocative(text: str, match: re.Match) -> bool:
             _GREETING_RE.match(before_trimmed + " ")
             or _DIRECT_REQUEST_RE.search(before)
             or _AFFECTION_RE.search(before)
+            or _WARM_VOCATIVE_RE.search(before)
             or "?" in before
             or "¿" in before
             or "!" in before
@@ -156,12 +168,45 @@ def extract_katherine_call(message: str) -> str | None:
 
 
 def detect_affectionate_expression(message: str) -> str | None:
-    """Recognize positive 'te amo'/'te quiero' messages, excluding explicit negations."""
+    """Classify clear warm messages addressed to Katherine without overreading them."""
     text = _normalize_name(str(message or ""))
+    if not text:
+        return None
+
+    # Explicit rejection/negation always wins over a positive keyword nearby.
+    if re.search(
+        r"\b(?:no|nunca|jamas|ya\s+no)\s+(?:te\s+(?:amo|quiero|adoro)|"
+        r"eres\s+(?:linda|bonita|hermosa|genial))\b",
+        text,
+    ):
+        return None
     if _NEGATED_AFFECTION_RE.search(text):
         return None
-    if re.search(r"\bte\s+amo\b", text):
+
+    if re.search(r"\b(?:te\s+amo|te\s+adoro|te\s+quiero\s+con\s+todo)\b", text):
         return "love"
-    if re.search(r"\bte\s+quiero\b", text):
+    if re.search(r"\b(?:te\s+quiero|te\s+aprecio|tqm|tkm|me\s+caes\s+(?:muy\s+)?bien)\b", text):
         return "care"
+    if re.search(r"\b(?:gracias|mil\s+gracias|te\s+agradezco|gracias\s+por)\b", text):
+        return "gratitude"
+    if re.search(
+        r"\b(?:eres|estas|sos)\s+(?:(?:muy|tan|super|s[uú]per)\s+)?"
+        r"(?:linda|bonita|hermosa|preciosa|guapa|adorable|tierna|"
+        r"encantadora|genial|increible|especial|maravillosa|unica)\b"
+        r"|\bme\s+encanta\s+(?:hablar\s+contigo|tu\s+forma\s+de\s+ser)\b"
+        r"|\bme\s+alegras\s+el\s+dia\b"
+        r"|\bque\s+(?:linda|bonita|hermosa|preciosa|genial|tierna)\s+(?:eres|te\s+ves)\b"
+        r"|\beres\s+(?:la\s+mejor|un\s+amor|un\s+sol)\b"
+        r"|\bme\s+haces\s+feliz\b",
+        text,
+    ):
+        return "compliment"
+    if re.search(
+        r"^(?:hola|holi|buenas|buenos\s+dias|buenas\s+tardes|"
+        r"buenas\s+noches|que\s+tal|como\s+estas)[.!?¡¿,\s]*$",
+        text,
+    ):
+        return "greeting"
+    if re.search(r"\b(?:te\s+extra[nñ]e|te\s+ech[eé]\s+de\s+menos)\b", text):
+        return "miss_you"
     return None
