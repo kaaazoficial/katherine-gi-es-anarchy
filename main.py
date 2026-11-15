@@ -3345,6 +3345,19 @@ async def drain_audio_queue(queue: asyncio.Queue | None) -> None:
             break
 
 
+def take_audio_frame(pending: Any, incoming: Any, frame_size: int = DJ_MIXER_FRAME_SAMPLES):
+    """Append incoming PCM and return exactly one frame plus unconsumed samples."""
+    buffer = np.asarray(pending, dtype=np.int16).reshape(-1)
+    chunk = np.asarray(incoming, dtype=np.int16).reshape(-1) if incoming is not None else np.empty(0, dtype=np.int16)
+    if len(chunk):
+        buffer = np.concatenate((buffer, chunk))
+    frame = buffer[:frame_size]
+    remainder = buffer[len(frame):]
+    if len(frame) < frame_size:
+        frame = np.pad(frame, (0, frame_size - len(frame)), mode="constant")
+    return frame.astype(np.int16, copy=False), remainder.astype(np.int16, copy=False)
+
+
 async def audio_mixer_loop(thread_id: str) -> None:
     """Clocked 10 ms mono mixer; never drops samples from variable-sized inputs."""
     state = DJ_ROOMS.get(str(thread_id))
@@ -3387,15 +3400,8 @@ async def audio_mixer_loop(thread_id: str) -> None:
         else:
             duck_gain = min(target_duck, duck_gain + 0.04)
 
-        music_frame = pending_music[:DJ_MIXER_FRAME_SAMPLES]
-        speech_frame = pending_speech[:DJ_MIXER_FRAME_SAMPLES]
-        pending_music = pending_music[len(music_frame):]
-        pending_speech = pending_speech[len(speech_frame):]
-
-        if len(music_frame) < DJ_MIXER_FRAME_SAMPLES:
-            music_frame = np.pad(music_frame, (0, DJ_MIXER_FRAME_SAMPLES-len(music_frame)))
-        if len(speech_frame) < DJ_MIXER_FRAME_SAMPLES:
-            speech_frame = np.pad(speech_frame, (0, DJ_MIXER_FRAME_SAMPLES-len(speech_frame)))
+        music_frame, pending_music = take_audio_frame(pending_music, None)
+        speech_frame, pending_speech = take_audio_frame(pending_speech, None)
 
         mixed = mix_audio_samples(
             music_frame,
