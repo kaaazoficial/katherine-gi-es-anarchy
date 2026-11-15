@@ -612,6 +612,18 @@ def test_enqueue_message_for_speech_puts_plain_user_text_in_the_queue(monkeypatc
             assert state["speech_queue"].qsize() == 1
             assert state["speech_queue"].get_nowait() == "Hola, buenas tardes a todos."
             assert state["speech_priority_queue"].empty()
+
+            directed_event = {
+                "threadId": thread_id,
+                "message": {
+                    "content": "Katherine, ¿puedes ayudarme?",
+                    "author": {"uid": "member-124", "nickname": "Viajero"},
+                    "mentions": [],
+                },
+            }
+            await katherine.enqueue_message_for_speech(directed_event, "developer")
+            assert state["speech_priority_queue"].qsize() == 1
+            assert state["speech_priority_queue"].get_nowait() == "Katherine, ¿puedes ayudarme?"
         finally:
             katherine.DJ_ROOMS.pop(thread_id, None)
 
