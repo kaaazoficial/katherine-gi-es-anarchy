@@ -85,3 +85,10 @@ def test_contextual_está_correction_does_not_change_demonstrative_esta():
     assert detect_spanish_spelling_issues(
         "Esta casa es bonita.", spell_checker=checker
     ) is None
+
+
+def test_initial_ola_is_corrected_even_though_it_is_a_short_word():
+    for message in ("Ola, grasias.", "¡Ola! ¿Cómo estás?", "Ola @Katherine mira https://example.com"):
+        result = detect_spanish_spelling_issues(message, spell_checker=FakeSpellChecker())
+        assert result is not None
+        assert result.corrected_text.startswith(message.replace("Ola", "Hola", 1).replace("¡Ola", "¡Hola", 1))
