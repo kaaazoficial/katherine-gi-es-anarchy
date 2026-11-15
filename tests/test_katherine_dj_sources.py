@@ -166,6 +166,8 @@ def test_music_catalog_raises_only_when_every_source_fails(monkeypatch):
     monkeypatch.setattr(katherine, "search_wikimedia_audio", fail)
     monkeypatch.setattr(katherine, "search_ccmixter_audio", fail)
     monkeypatch.setattr(katherine, "search_audius_audio", fail)
+    monkeypatch.setattr(katherine, "search_openverse_audio", fail)
+    monkeypatch.setattr(katherine, "search_loc_national_jukebox_audio", fail)
     monkeypatch.setattr(katherine, "search_freesound_audio", fail)
     monkeypatch.setattr(katherine, "FREESOUND_API_KEY", "test-freesound-key")
     monkeypatch.setattr(katherine, "JAMENDO_CLIENT_ID", "")
