@@ -12061,33 +12061,23 @@ async def dispatch(event: dict, source: str):
                     "category": "inspection_error",
                 }
             if link_verdict.get("blocked"):
-                message_id = str(
-                    message_data.get("id")
-                    or message_data.get("messageId")
-                    or message_data.get("message_id")
-                    or ""
-                ).strip()
-                deleted = False
-                if message_id:
-                    deletion = await api(
-                        "DELETE",
-                        f"/threads/{event.get('threadId')}/messages/{message_id}",
-                        source,
-                    )
-                    deleted = bool(deletion.get("ok") or deletion.get("status") == 404)
-                metrics["automatic_link_blocks"] = metrics.get("automatic_link_blocks", 0) + 1
-                logging.warning(
-                    "[LINK_GUARD] Mensaje bloqueado | categoria=%s | eliminado=%s",
-                    link_verdict.get("category", "blocked"),
-                    deleted,
+                metrics["automatic_link_warnings"] = (
+                    metrics.get("automatic_link_warnings", 0) + 1
                 )
-                if not deleted:
-                    await send_message(
-                        str(event.get("threadId") or ""),
-                        "🛡️ No se permitió el enlace: "
-                        + str(link_verdict.get("reason") or "destino no permitido."),
-                        source,
-                    )
+                logging.warning(
+                    "[LINK_GUARD] Enlace no permitido detectado; la API no permite "
+                    "eliminar mensajes ajenos | categoria=%s",
+                    link_verdict.get("category", "blocked"),
+                )
+                await send_message(
+                    str(event.get("threadId") or ""),
+                    "🛡️ Enlace no permitido detectado. Katherine no procesará este mensaje. "
+                    "La API de Anarchy no permite que un bot elimine mensajes de otros usuarios, "
+                    "por lo que el mensaje y el enlace siguen visibles. Un moderador debe retirarlo. "
+                    "Motivo: "
+                    + str(link_verdict.get("reason") or "destino no permitido."),
+                    source,
+                )
                 return
 
         await enqueue_message_for_speech(event, source)
@@ -12158,7 +12148,6 @@ async def dispatch(event: dict, source: str):
                 nickname = author.get("nickname") or "Viajero"
                 scope_key = f"{source}:{event.get('threadId')}"
                 scoped_user = scoped_uid(scope_key, raw_uid)
-                record_user(scoped_user, nickname, count_message=True)
                 record_chat_activity(str(event.get("threadId") or ""), scoped_user, nickname)
                 metrics["unaddressed_messages_ignored"] += 1
                 await maybe_send_auto_reply(
@@ -12225,40 +12214,26 @@ async def dispatch(event: dict, source: str):
                         "category": "inspection_error",
                     }
                 if verdict.get("blocked"):
-                    message_id = str(
-                        message_data.get("id")
-                        or message_data.get("messageId")
-                        or message_data.get("message_id")
-                        or ""
-                    ).strip()
-                    deleted = False
-                    if message_id:
-                        deletion = await api(
-                            "DELETE",
-                            f"/threads/{event.get('threadId')}/messages/{message_id}",
-                            source,
-                        )
-                        deleted = bool(
-                            deletion.get("ok") or deletion.get("status") == 404
-                        )
-                    metrics["automatic_link_blocks"] = (
-                        metrics.get("automatic_link_blocks", 0) + 1
+                    metrics["automatic_link_warnings"] = (
+                        metrics.get("automatic_link_warnings", 0) + 1
                     )
-                    metrics["edited_link_blocks"] = (
-                        metrics.get("edited_link_blocks", 0) + 1
+                    metrics["edited_link_warnings"] = (
+                        metrics.get("edited_link_warnings", 0) + 1
                     )
                     logging.warning(
-                        "[LINK_GUARD] Edición bloqueada | categoria=%s | eliminado=%s",
+                        "[LINK_GUARD] Enlace no permitido detectado en una edición; "
+                        "la API no permite eliminar mensajes ajenos | categoria=%s",
                         verdict.get("category", "blocked"),
-                        deleted,
                     )
-                    if not deleted:
-                        await send_message(
-                            str(event.get("threadId") or ""),
-                            "🛡️ No se permitió el enlace añadido al editar el mensaje: "
-                            + str(verdict.get("reason") or "destino no permitido."),
-                            source,
-                        )
+                    await send_message(
+                        str(event.get("threadId") or ""),
+                        "🛡️ Se detectó un enlace no permitido en la edición. Katherine no procesará "
+                        "el contenido. La API de Anarchy no permite que un bot elimine mensajes "
+                        "de otros usuarios, por lo que el mensaje editado y el enlace siguen visibles. "
+                        "Un moderador debe retirarlo. Motivo: "
+                        + str(verdict.get("reason") or "destino no permitido."),
+                        source,
+                    )
         logging.info("[EVENTO] %s", kind)
 
     elif kind == "thread.removed":

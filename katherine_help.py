@@ -107,7 +107,7 @@ def _command_help_sections(prefix: str):
             (False, f"• {prefix}join — Entra a la llamada | {prefix}salirsala — Sale de ella."),
             (False, f"• {prefix}salas — Lista las salas disponibles."),
             (False, f"• {prefix}voz participantes — Muestra quién está en la llamada."),
-            (False, f"• {prefix}voz hablando — Muestra quién está hablando."),
+            (False, f"• {prefix}voz hablando — Muestra quién tiene el rol de hablante (no detecta voz activa)."),
             (False, f"• {prefix}voz estado — Estado actual de la llamada."),
             (True, "▸ Reproductor DJ"),
             (False, f"• {prefix}dj buscar <tema> — Busca música."),
