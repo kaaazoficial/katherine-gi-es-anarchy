@@ -19,6 +19,7 @@ import socket
 import sys
 import unicodedata
 import tempfile
+import weakref
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -947,6 +948,12 @@ DJ_FAVORITES_TTL = 86400
 DJ_ARCHIVE_CACHE: dict[str, dict] = {}
 DJ_SOURCE_CACHE: dict[str, dict] = {}
 DJ_SOURCE_COOLDOWNS: dict[str, float] = {}
+# Per-event-loop coordination avoids cross-loop asyncio primitives in tests and
+# coalesces identical catalog queries without retaining completed user requests.
+DJ_PROVIDER_SEMAPHORES = weakref.WeakKeyDictionary()
+DJ_SEARCH_INFLIGHT = weakref.WeakKeyDictionary()
+DJ_PROVIDER_CONCURRENCY = 6
+DJ_DECODER_BATCH_SIZE = 6
 DJ_REMOTE_AUDIO_MAX_BYTES = 80 * 1024 * 1024
 DJ_QUEUE_MAX_TRACKS = 10
 DJ_SEARCH_RESULT_LIMIT = 10
@@ -4119,8 +4126,18 @@ async def search_openverse_audio(query: str, limit: int = 5) -> list[dict]:
     return tracks[:limit]
 
 
-async def search_music_catalog(query: str, limit: int = 5) -> list[dict]:
-    """Search configured catalogs concurrently, de-duplicate and rank their results."""
+def dj_catalog_provider_semaphore():
+    """Return a bounded provider semaphore owned by the current event loop."""
+    loop = asyncio.get_running_loop()
+    semaphore = DJ_PROVIDER_SEMAPHORES.get(loop)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(DJ_PROVIDER_CONCURRENCY)
+        DJ_PROVIDER_SEMAPHORES[loop] = semaphore
+    return semaphore
+
+
+async def _search_music_catalog_uncached(query: str, limit: int = 5) -> list[dict]:
+    """Search every configured source with bounded concurrency and resilient fallback."""
     providers = [
         ("archive", search_archive_audio, "archive.org"),
         ("commons", search_wikimedia_audio, "upload.wikimedia.org"),
@@ -4146,8 +4163,14 @@ async def search_music_catalog(query: str, limit: int = 5) -> list[dict]:
             "Intenta de nuevo en unos minutos."
         )
 
+    semaphore = dj_catalog_provider_semaphore()
+
+    async def run_provider(searcher):
+        async with semaphore:
+            return await searcher(query, max(limit, limit * 2))
+
     results = await asyncio.gather(
-        *(searcher(query, max(limit, limit * 2)) for _, searcher, _ in active_providers),
+        *(run_provider(searcher) for _, searcher, _ in active_providers),
         return_exceptions=True,
     )
     buckets = []
@@ -4184,6 +4207,43 @@ async def search_music_catalog(query: str, limit: int = 5) -> list[dict]:
     if not mixed and errors and len(errors) == len(active_providers):
         raise RuntimeError("Todos los catálogos musicales están temporalmente fuera de servicio.")
     return rank_dj_results(query, mixed, limit=limit)
+
+
+async def search_music_catalog(query: str, limit: int = 5) -> list[dict]:
+    """Coalesce identical searches and bound concurrent calls to remote catalogs."""
+    query = clean_archive_value(query, 160)
+    if not query:
+        return []
+    try:
+        limit = max(1, min(20, int(limit)))
+    except (TypeError, ValueError, OverflowError):
+        limit = 5
+
+    loop = asyncio.get_running_loop()
+    inflight = DJ_SEARCH_INFLIGHT.get(loop)
+    if inflight is None:
+        inflight = {}
+        DJ_SEARCH_INFLIGHT[loop] = inflight
+    key = (query.casefold(), limit)
+    task = inflight.get(key)
+    if task is None or task.done():
+        task = loop.create_task(_search_music_catalog_uncached(query, limit))
+        inflight[key] = task
+
+        def discard_finished(completed):
+            if inflight.get(key) is completed:
+                inflight.pop(key, None)
+            if not completed.cancelled():
+                try:
+                    completed.exception()
+                except Exception:
+                    pass
+
+        task.add_done_callback(discard_finished)
+    else:
+        metrics["dj_catalog_search_coalesced"] += 1
+
+    return (await asyncio.shield(task))[:limit]
 
 
 
@@ -4359,20 +4419,25 @@ async def audio_mixer_loop(thread_id: str) -> None:
             # for the next 20 ms LiveKit frame. Previously this stopped at one
             # output frame while waiting for the larger prebuffer, deadlocking
             # the producer against the bounded queue.
+            incoming_chunks = []
             while (
                 music_queue is not None
-                and len(pending_music) < target_buffer_samples
-                and len(pending_music) < max_pending_samples
+                and len(pending_music) + sum(len(chunk) for chunk in incoming_chunks) < target_buffer_samples
+                and len(pending_music) + sum(len(chunk) for chunk in incoming_chunks) < max_pending_samples
             ):
                 try:
                     incoming = music_queue.get_nowait()
                 except asyncio.QueueEmpty:
                     break
                 if incoming is not None and len(incoming):
-                    pending_music = np.concatenate((
-                        pending_music,
-                        np.asarray(incoming, dtype=np.int16).reshape(-1),
-                    ))
+                    incoming_chunks.append(
+                        np.asarray(incoming, dtype=np.int16).reshape(-1)
+                    )
+            if incoming_chunks:
+                if len(pending_music):
+                    incoming_chunks.insert(0, pending_music)
+                pending_music = np.concatenate(incoming_chunks)
+                metrics["dj_mixer_queue_batches"] += 1
 
             state["music_pending_samples"] = len(pending_music)
 
@@ -5632,6 +5697,34 @@ async def _next_audio_decode_item_async(iterator):
         raise
 
 
+def _next_audio_decode_batch(iterator, batch_size: int = DJ_DECODER_BATCH_SIZE) -> list:
+    """Fetch several decoded frames per thread-pool handoff, preserving order."""
+    items = []
+    for _ in range(max(1, min(16, int(batch_size)))):
+        item = _next_audio_decode_item(iterator)
+        items.append(item)
+        if item is _AUDIO_DECODE_EOF:
+            break
+    return items
+
+
+async def _next_audio_decode_batch_async(
+    iterator, batch_size: int = DJ_DECODER_BATCH_SIZE
+) -> list:
+    task = asyncio.create_task(
+        asyncio.to_thread(_next_audio_decode_batch, iterator, batch_size)
+    )
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # Do not close a PyAV container while its worker thread is decoding it.
+        try:
+            await task
+        except Exception:
+            pass
+        raise
+
+
 async def _dj_play_single(thread_id: str, path: Path, state: dict) -> bool:
     """Decode on a worker thread so PyAV cannot starve the LiveKit event loop."""
     iterator = _iter_audio_decode_frames(path, frame_size=DJ_MIXER_OUTPUT_SAMPLES)
@@ -5680,10 +5773,23 @@ async def _dj_play_single(thread_id: str, path: Path, state: dict) -> bool:
         return True
 
     try:
+        pending_items = deque()
         while True:
             if state["stop_event"].is_set() or state["playback_stop_event"].is_set():
                 return False
-            item = await _next_audio_decode_item_async(iterator)
+            if not pending_items:
+                batch = await _next_audio_decode_batch_async(
+                    iterator, DJ_DECODER_BATCH_SIZE
+                )
+                pending_items.extend(batch)
+                metrics["dj_decoder_batches"] += 1
+                metrics["dj_decoder_frames_prefetched"] += sum(
+                    1 for item in batch if item is not _AUDIO_DECODE_EOF
+                    and item[0] == "frame"
+                )
+            if not pending_items:
+                break
+            item = pending_items.popleft()
             if item is _AUDIO_DECODE_EOF:
                 break
             kind, value, sample_count = item
@@ -12686,7 +12792,7 @@ Uso: !enciclopedia <nombre>""",
         dj_actions = {
             "pausa", "pausar", "reanudar", "continuar", "saltar", "skip",
             "cola", "queue", "actual", "estado", "añadir", "agregar",
-            "encolar", "reproducir", "quitar", "mover", "vaciar",
+            "encolar", "reproducir", "seleccionar", "select", "quitar", "mover", "vaciar",
             "repetir", "transicion", "transición", "duck"
         }
         if command == "!dj" and subcommand in dj_actions:
@@ -12701,6 +12807,26 @@ Uso: !enciclopedia <nombre>""",
             action = ""
 
         if action:
+            if action in ("encolar", "reproducir", "seleccionar", "select"):
+                number = args[1] if len(args) > 1 else ""
+                enqueue_selection = action == "encolar"
+                ok, result, selected = await select_dj_search_result(
+                    thread, number, enqueue=enqueue_selection
+                )
+                if enqueue_selection:
+                    response_text = f"🎶 {result}" if ok else f"DJ: {result}"
+                    await send_message(thread, response_text, source, reply)
+                elif ok and selected:
+                    await send_message(
+                        thread,
+                        format_dj_track_announcement(selected),
+                        source,
+                        reply,
+                        allow_safe_links=True,
+                    )
+                else:
+                    await send_message(thread, f"DJ: {result}", source, reply)
+                return
             state = DJ_ROOMS.get(thread)
             if not state:
                 await send_message(thread, "Katherine no está conectada a una llamada. Usa !join o !dj primero.", source, reply)
@@ -12755,44 +12881,6 @@ Uso: !enciclopedia <nombre>""",
                 else:
                     ok, result = await start_dj_room(thread, path, False, enqueue=True)
                     await send_message(thread, f"🎶 {result}" if ok else f"DJ: {result}", source, reply)
-            elif action == "encolar":
-                try:
-                    index = int(args[1]) - 1
-                    saved = DJ_SEARCH_RESULTS.get(thread) or {}
-                    track = saved.get("tracks", [])[index]
-                    if saved.get("expires", 0) <= time.time():
-                        raise IndexError
-                except (IndexError, TypeError, ValueError):
-                    await send_message(thread, "Usa !dj buscar <tema> y luego !dj encolar <número> (1-10).", source, reply)
-                    return
-                ok, result = await start_dj_room(
-                    thread, track["url"], False, track_metadata=track, enqueue=True
-                )
-                await send_message(thread, f"🎶 {result}" if ok else f"DJ: {result}", source, reply)
-            elif action == "reproducir":
-                try:
-                    index = int(args[1]) - 1
-                    saved = DJ_SEARCH_RESULTS.get(thread) or {}
-                    track = saved.get("tracks", [])[index]
-                    if saved.get("expires", 0) <= time.time():
-                        raise IndexError
-                except (IndexError, TypeError, ValueError):
-                    await send_message(thread, "Usa !dj buscar <tema> y luego !dj reproducir <número> (1-10).", source, reply)
-                    return
-                ok, result, selected, _ = await start_dj_search_with_fallback(
-                    thread, saved.get("tracks", []), index
-                )
-                if ok and selected:
-                    credit = str(selected.get("credit_line") or "").strip()
-                    answer = f"🎧 Ahora suena: {selected.get('title')}"
-                    if credit:
-                        answer += f"\nCréditos: {credit}"
-                else:
-                    credit = ""
-                    answer = f"DJ: {result}"
-                await send_message(
-                    thread, answer, source, reply, allow_safe_links=bool(credit)
-                )
             elif action == "quitar":
                 try:
                     position = int(args[1])
@@ -13130,6 +13218,23 @@ Uso: !enciclopedia <nombre>""",
                 reply
             )
             return
+
+        # Forma corta: !dj 3 reproduce el tercer resultado de la búsqueda vigente.
+        if args and args[0].isdigit():
+            ok, result, selected = await select_dj_search_result(
+                thread, args[0], enqueue=False
+            )
+            if ok and selected:
+                await send_message(
+                    thread,
+                    format_dj_track_announcement(selected),
+                    dj_source,
+                    reply,
+                    allow_safe_links=True,
+                )
+            else:
+                await send_message(thread, f"DJ: {result}", dj_source, reply)
+            return
         if args and args[0].lower() in ("probar", "test", "diagnostico"):
             if not is_admin_uid(admin_uid):
                 await send_message(
@@ -13376,6 +13481,7 @@ Uso: !enciclopedia <nombre>""",
                      "value": str(start_index + index)}
                     for index, track in enumerate(page_tracks)
                 ],
+                payload={"search_id": saved.get("search_id")},
                 ttl=900
             )
             listing = "\n".join(
@@ -13387,7 +13493,7 @@ Uso: !enciclopedia <nombre>""",
             await send_message(
                 thread,
                 f"RESULTADOS DJ · PÁGINA {page}/2\nBúsqueda: {saved.get('query') or 'consulta anterior'}\n\n"
-                f"{listing}\n\nUsa !dj encolar <número> para añadir sin interrumpir la pista actual.",
+                f"{listing}\n\nPulsa un botón o usa !dj reproducir <número>; para la cola: !dj encolar <número>.",
                 dj_source, reply, buttons
             )
             return
@@ -13428,7 +13534,9 @@ Uso: !enciclopedia <nombre>""",
                 )
                 return
 
+            search_id = secrets.token_hex(8)
             DJ_SEARCH_RESULTS[thread] = {
+                "search_id": search_id,
                 "tracks": results,
                 "query": search_term,
                 "expires": time.time() + 900
@@ -13448,6 +13556,7 @@ Uso: !enciclopedia <nombre>""",
                     }
                     for index, track in enumerate(results)
                 ],
+                payload={"search_id": search_id},
                 ttl=900
             )
             listing = "\n".join(
@@ -13458,8 +13567,8 @@ Uso: !enciclopedia <nombre>""",
             await send_message(
                 thread,
                 f"CATÁLOGO MUSICAL · BÚSQUEDA MULTIFUENTE\nBúsqueda: {search_term}\n\n"
-                f"{listing}\n\nLos botones reproducen ahora las primeras cinco. Para la cola: !dj encolar <número>. "
-                "Para otra pista: !dj reproducir <número>. Resultados 6-10: !dj resultados 2.",
+                f"{listing}\n\nPulsa un botón o escribe !dj reproducir <número> (también !dj <número>). "
+                "Para añadir a la cola: !dj encolar <número>. Resultados 6-10: !dj resultados 2.",
                 dj_source,
                 reply,
                 buttons
@@ -13639,6 +13748,85 @@ async def start_dj_search_with_fallback(
     return False, last_error, None, None
 
 
+def format_dj_track_announcement(track: dict) -> str:
+    """Format the selected track with its original item, creator and license credits."""
+    item_url = str(track.get("item_url") or "").strip()
+    license_url = str(track.get("license_url") or "").strip()
+    item_label = (
+        f"{track.get('title') or 'Pista'} — {track.get('creator') or 'Autor no indicado'}"
+    )
+    item_credit = (
+        f"[{item_label}]({item_url})"
+        if item_url and is_safe_public_url(item_url)
+        else item_label
+    )
+    license_label = str(track.get("license") or "Licencia no indicada")
+    license_credit = (
+        f"[{license_label}]({license_url})"
+        if license_url and is_safe_public_url(license_url)
+        else license_label
+    )
+    lines = [
+        f"🎧 Ahora suena: {track.get('title') or 'Pista'} — "
+        f"{track.get('creator') or 'Autor no indicado'}",
+        f"Fuente: {track.get('source') or 'Catálogo musical'}",
+        f"Créditos: {item_credit}",
+        f"Licencia: {license_credit}",
+    ]
+    attribution = str(track.get("credit_line") or "").strip()
+    if attribution and attribution not in (item_credit, license_credit):
+        lines.append(f"Atribución: {attribution}")
+    return "\n".join(lines)
+
+
+async def select_dj_search_result(
+    thread_id: str,
+    number: Any,
+    *,
+    enqueue: bool = False,
+) -> tuple[bool, str, dict | None]:
+    """Resolve a user-facing 1-based result number and play or enqueue that track."""
+    saved = DJ_SEARCH_RESULTS.get(str(thread_id)) or {}
+    if saved.get("expires", 0) <= time.time():
+        DJ_SEARCH_RESULTS.pop(str(thread_id), None)
+        return False, "Los resultados caducaron. Usa !dj buscar <tema> otra vez.", None
+    try:
+        index = int(number) - 1
+        tracks = saved.get("tracks") or []
+        if index < 0 or index >= len(tracks):
+            raise IndexError
+        track = tracks[index]
+    except (TypeError, ValueError, IndexError):
+        return (
+            False,
+            "Usa !dj buscar <tema> y luego !dj reproducir <número> o !dj encolar <número> (1-10).",
+            None,
+        )
+
+    if enqueue:
+        ok, message = await start_dj_room(
+            str(thread_id), track["url"], False, track_metadata=track, enqueue=True
+        )
+        return ok, message, track if ok else None
+
+    ok, message, selected, _ = await start_dj_search_with_fallback(
+        str(thread_id), tracks, index
+    )
+    return ok, message, selected
+
+
+def is_button_source_allowed(action: dict, source: str) -> bool:
+    """Allow only the deliberate DJ developer-message/community-interaction bridge."""
+    return (
+        action.get("source") == source
+        or (
+            action.get("type") == "dj_select"
+            and action.get("source") == "developer"
+            and source == "community"
+        )
+    )
+
+
 async def handle_interaction(event: dict, source: str):
     button_id = str(event.get("buttonId") or "")
     thread_id = str(event.get("threadId") or "")
@@ -13683,7 +13871,7 @@ async def handle_interaction(event: dict, source: str):
     if not action:
         return
     if (
-        action.get("source") != source
+        not is_button_source_allowed(action, source)
         or action.get("thread") != thread_id
         or action.get("expires", 0) <= time.time()
     ):
@@ -13872,62 +14060,53 @@ async def handle_interaction(event: dict, source: str):
         return
 
     if action_type == "dj_select":
-        BUTTON_ACTIONS.pop(button_id, None)
-        # La interacción llega por el bot comunitario, pero el mensaje con
-        # botones pertenece al bot developer. Usamos developer para editarlo y responder.
         dj_source = "developer"
-        await remove_pressed_buttons(event, dj_source, remove=True)
-
         saved = DJ_SEARCH_RESULTS.get(thread_id) or {}
-        if saved.get("expires", 0) <= time.time():
-            DJ_SEARCH_RESULTS.pop(thread_id, None)
+        search_id = str(payload.get("search_id") or "")
+        if (
+            saved.get("expires", 0) <= time.time()
+            or not search_id
+            or search_id != str(saved.get("search_id") or "")
+        ):
+            BUTTON_ACTIONS.pop(button_id, None)
+            await remove_pressed_buttons(event, dj_source, remove=True)
             await send_message(
                 thread_id,
-                "Los resultados de búsqueda caducaron. Usa !dj buscar <tema> otra vez.",
-                dj_source
+                "Estos botones pertenecen a una búsqueda anterior. Usa !dj buscar <tema> para generar resultados nuevos.",
+                dj_source,
             )
             return
+
+        BUTTON_ACTIONS.pop(button_id, None)
+        await remove_pressed_buttons(event, dj_source, remove=True)
         raw_choice = str(choice or "")
         queue_choice = raw_choice.startswith("queue:")
         try:
             selected_index = int(raw_choice.split(":", 1)[1] if queue_choice else raw_choice)
-            track = saved.get("tracks", [])[selected_index]
+            if selected_index < 0 or selected_index >= len(saved.get("tracks") or []):
+                raise IndexError
         except (TypeError, ValueError, IndexError):
             await send_message(thread_id, "Esa selección ya no está disponible.", dj_source)
             return
 
-        if queue_choice:
-            ok, message = await start_dj_room(
-                thread_id, track["url"], False, track_metadata=track, enqueue=True
-            )
-            await send_message(thread_id, f"🎶 {message}" if ok else f"DJ: {message}", dj_source)
-            return
-
-        ok, message, selected_track, selected_index = await start_dj_search_with_fallback(
-            thread_id, saved.get("tracks", []), selected_index
+        ok, message, selected_track = await select_dj_search_result(
+            thread_id,
+            selected_index + 1,
+            enqueue=queue_choice,
         )
-        if ok and selected_track:
-            track = selected_track
-            item_url = str(track.get("item_url") or "").strip()
-            license_url = str(track.get("license_url") or "").strip()
-            item_label = f"{track['title']} — {track.get('creator', 'Autor no indicado')}"
-            item_credit = (
-                f"[{item_label}]({item_url})"
-                if item_url and is_safe_public_url(item_url)
-                else item_label
+        if queue_choice:
+            await send_message(
+                thread_id,
+                f"🎶 {message}" if ok else f"DJ: {message}",
+                dj_source,
             )
-            license_credit = (
-                f"[{track['license']}]({license_url})"
-                if license_url and is_safe_public_url(license_url)
-                else str(track.get("license") or "Licencia no indicada")
+        elif ok and selected_track:
+            await send_message(
+                thread_id,
+                format_dj_track_announcement(selected_track),
+                dj_source,
+                allow_safe_links=True,
             )
-            credit = (
-                f"🎧 Ahora suena: {track['title']} — {track['creator']}\n"
-                f"Fuente: {track.get('source', 'catálogo musical')}\n"
-                f"Créditos: {item_credit}\n"
-                f"Licencia: {license_credit}"
-            )
-            await send_message(thread_id, credit, dj_source, allow_safe_links=True)
         else:
             await send_message(thread_id, f"DJ: {message}", dj_source)
         return
