@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from difflib import SequenceMatcher
+from functools import lru_cache
 from typing import Iterable
 
 try:
@@ -20,6 +21,16 @@ def normalize_command_name(value: str) -> str:
     return re.sub(r"[^a-z0-9_]", "", token)
 
 
+@lru_cache(maxsize=32)
+def _normalized_command_choices(commands: frozenset[str]) -> tuple[str, ...]:
+    """Normalize immutable command catalogs once for typo suggestions."""
+    return tuple(sorted({
+        normalized
+        for command in commands
+        if (normalized := normalize_command_name(command))
+    }))
+
+
 def suggest_command(
     value: str,
     allowed_commands: Iterable[str],
@@ -31,11 +42,8 @@ def suggest_command(
     if len(query) < 4:
         return None
 
-    choices = sorted({
-        normalize_command_name(command)
-        for command in allowed_commands
-        if normalize_command_name(command)
-    })
+    commands = frozenset(str(command) for command in allowed_commands)
+    choices = _normalized_command_choices(commands)
     if not choices:
         return None
 

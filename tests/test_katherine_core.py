@@ -542,3 +542,30 @@ def test_retry_after_parser_accepts_http_date():
     future = datetime.now(timezone.utc).replace(microsecond=0)
     header = format_datetime(future)
     assert katherine.retry_after_seconds(header) == 0
+
+
+def test_message_user_and_activity_updates_share_one_transaction(database, monkeypatch):
+    monkeypatch.setattr(
+        database, "get_chat_activity_clock_bucket", lambda: ("2026-11-15", 20)
+    )
+    database.record_user_and_chat_activity(
+        "scoped:room:user", "Viajero", "room", count_message=True
+    )
+
+    user = database.get_user("scoped:room:user")
+    assert user is not None
+    assert user["nickname"] == "Viajero"
+    assert user["message_count"] == 1
+    with database.db_session() as db:
+        daily = db.execute(
+            "SELECT message_count FROM chat_activity_daily "
+            "WHERE thread_id=? AND uid=? AND day_key=?",
+            ("room", "scoped:room:user", "2026-11-15"),
+        ).fetchone()
+        hourly = db.execute(
+            "SELECT message_count FROM chat_activity_hourly "
+            "WHERE thread_id=? AND day_key=? AND hour_of_day=?",
+            ("room", "2026-11-15", 20),
+        ).fetchone()
+    assert daily["message_count"] == 1
+    assert hourly["message_count"] == 1

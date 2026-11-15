@@ -177,6 +177,8 @@ def load_tts_dependency() -> bool:
 
 
 AI_CORE = KatherineAI()
+AI_COMMANDS_PUBLIC = AI_PUBLIC_COMMANDS
+AI_COMMANDS_ADMIN = AI_PUBLIC_COMMANDS | AI_ADMIN_COMMANDS
 AI_TOOL_OUTPUT_CAPTURE: ContextVar[list[str] | None] = ContextVar(
     "katherine_ai_tool_output_capture", default=None
 )
@@ -273,15 +275,60 @@ def init_db():
     initialize_database(db_session)
 
 
+def record_user_and_chat_activity(
+    uid: str,
+    nickname: str,
+    thread_id: str,
+    *,
+    count_message: bool = True,
+) -> None:
+    """Persist user presence and chat activity in one short SQLite transaction."""
+    now = time.time()
+    day_key, hour = get_chat_activity_clock_bucket()
+    safe_uid = str(uid)
+    safe_nickname = str(nickname or "Viajero")[:80]
+    with db_session() as db:
+        db.execute(
+            """INSERT INTO users(uid,nickname,created_at,last_seen,message_count)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(uid) DO UPDATE SET
+               nickname=excluded.nickname,
+               last_seen=excluded.last_seen,
+               message_count=users.message_count + excluded.message_count""",
+            (safe_uid, safe_nickname, now, now, 1 if count_message else 0),
+        )
+        if thread_id:
+            db.execute(
+                """INSERT INTO chat_activity_daily(
+                       thread_id,uid,nickname,day_key,message_count
+                   ) VALUES(?,?,?,?,1)
+                   ON CONFLICT(thread_id,uid,day_key) DO UPDATE SET
+                   nickname=excluded.nickname,
+                   message_count=chat_activity_daily.message_count+1""",
+                (str(thread_id), safe_uid, safe_nickname, day_key),
+            )
+            db.execute(
+                """INSERT INTO chat_activity_hourly(
+                       thread_id,day_key,hour_of_day,message_count
+                   ) VALUES(?,?,?,1)
+                   ON CONFLICT(thread_id,day_key,hour_of_day) DO UPDATE SET
+                   message_count=chat_activity_hourly.message_count+1""",
+                (str(thread_id), day_key, hour),
+            )
+
+
 def record_user(uid: str, nickname: str, count_message: bool = False):
+    """Compatibility wrapper for non-message user updates."""
     now = time.time()
     with db_session() as db:
-        db.execute("""INSERT INTO users(uid,nickname,created_at,last_seen,message_count)
-            VALUES(?,?,?,?,?)
-            ON CONFLICT(uid) DO UPDATE SET nickname=excluded.nickname,
-            last_seen=excluded.last_seen,
-            message_count=users.message_count + excluded.message_count""",
-            (uid, nickname[:80], now, now, 1 if count_message else 0))
+        db.execute(
+            """INSERT INTO users(uid,nickname,created_at,last_seen,message_count)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(uid) DO UPDATE SET nickname=excluded.nickname,
+               last_seen=excluded.last_seen,
+               message_count=users.message_count + excluded.message_count""",
+            (uid, nickname[:80], now, now, 1 if count_message else 0),
+        )
 
 
 def scoped_uid(scope_key: str, uid: str) -> str:
@@ -10382,8 +10429,7 @@ async def _handle_command_impl(event: dict, source: str):
     nickname = author.get("nickname") or "Viajero"
     message_id = msg.get("messageId")
 
-    record_user(uid, nickname, count_message=True)
-    record_chat_activity(thread, uid, nickname)
+    record_user_and_chat_activity(uid, nickname, thread, count_message=True)
 
     used_prefix = next(
         (candidate for candidate in COMMAND_PREFIXES if content.startswith(candidate)),
@@ -10462,9 +10508,7 @@ async def _handle_command_impl(event: dict, source: str):
         # Explicitly addressed requests must reach the AI/router first; automatic
         # keyword replies must never intercept a requested action.
         session_key = build_ai_session_key(source, thread, author, message_id)
-        allowed_ai_commands = set(AI_PUBLIC_COMMANDS)
-        if is_admin_uid(admin_uid):
-            allowed_ai_commands.update(AI_ADMIN_COMMANDS)
+        allowed_ai_commands = (AI_COMMANDS_ADMIN if is_admin_uid(admin_uid) else AI_COMMANDS_PUBLIC)
         metrics["ai_requests"] += 1
         ai_rate_key = build_ai_rate_key(source, thread, author)
         ai_result = await AI_CORE.assist(
@@ -10711,9 +10755,7 @@ async def _handle_command_impl(event: dict, source: str):
                 await send_message(thread, "Uso: !ia preguntar <consulta>.", source, reply)
                 return
             prompt = ("Consulta de Genshin Impact. Usa la enciclopedia o guías existentes para verificar. " if sub == "genshin" else "") + rest
-            allowed_ai_commands = set(AI_PUBLIC_COMMANDS)
-            if is_admin_uid(admin_uid):
-                allowed_ai_commands.update(AI_ADMIN_COMMANDS)
+            allowed_ai_commands = (AI_COMMANDS_ADMIN if is_admin_uid(admin_uid) else AI_COMMANDS_PUBLIC)
             metrics["ai_requests"] += 1
             result = await AI_CORE.assist(
                 prompt, session_key, external_request,
@@ -13979,9 +14021,7 @@ Uso: !enciclopedia <nombre>""",
         return
 
     # High-confidence spelling suggestions are informational only: never auto-execute.
-    allowed_suggestions = set(AI_PUBLIC_COMMANDS)
-    if is_admin_uid(admin_uid):
-        allowed_suggestions.update(AI_ADMIN_COMMANDS)
+    allowed_suggestions = (AI_COMMANDS_ADMIN if is_admin_uid(admin_uid) else AI_COMMANDS_PUBLIC)
     suggestion = suggest_command(command, allowed_suggestions, score_cutoff=86)
     if suggestion:
         suggested_name, score = suggestion
