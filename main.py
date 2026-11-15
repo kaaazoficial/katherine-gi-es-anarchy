@@ -3391,6 +3391,12 @@ async def audio_mixer_loop(thread_id: str) -> None:
     state = DJ_ROOMS.get(str(thread_id))
     if not state:
         return
+    if np is None or livekit_rtc is None:
+        metrics["audio_mixer_dependency_unavailable"] += 1
+        logging.error(
+            "[DJ_MIXER] No se inicia el emisor: NumPy o LiveKit no están cargados."
+        )
+        return
 
     music_queue = state.get("music_audio_queue")
     pending_music = np.empty(0, dtype=np.int16)
@@ -3551,6 +3557,8 @@ def ensure_audio_mixer_running(thread_id: str, state: dict | None = None) -> boo
         or current["stop_event"].is_set()
         or current.get("_cleanup_started")
         or current.get("audio_source") is None
+        or np is None
+        or livekit_rtc is None
     ):
         return False
     task = current.get("mixer_task")
@@ -3592,6 +3600,10 @@ async def enqueue_music_audio_samples(
     queue = state.get("music_audio_queue")
     if not key or queue is None:
         raise RuntimeError("La cola musical de audio no está disponible.")
+    if np is None or livekit_rtc is None:
+        raise RuntimeError(
+            "Las dependencias NumPy y LiveKit deben estar cargadas antes de enviar música."
+        )
 
     array = np.asarray(samples, dtype=np.int16).reshape(-1)
     loop = asyncio.get_running_loop()
@@ -3868,9 +3880,9 @@ async def ensure_voice_room(thread_id: str):
                 "started_at": time.time()
             }
             room_state = DJ_ROOMS[thread_id]
-            if not ensure_audio_mixer_running(thread_id, room_state):
-                raise RuntimeError("No pude iniciar el mezclador de audio de LiveKit.")
-
+            # The music mixer is intentionally lazy: TTS has its own LiveKit
+            # source, and idle voice rooms must not start a NumPy-dependent DJ
+            # task before the optional audio decoder has been loaded.
             def on_livekit_disconnected(reason=None):
                 current_state = DJ_ROOMS.get(thread_id)
                 if (
