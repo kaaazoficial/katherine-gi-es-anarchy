@@ -588,6 +588,110 @@ def test_music_mixer_ignores_tts_queue_and_publishes_music_only(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_music_mixer_keeps_internal_buffer_bounded(monkeypatch):
+    import types
+
+    monkeypatch.setattr(katherine, "np", np)
+    thread_id = "music-mixer-bounded-buffer-test"
+    captured = []
+
+    class FakeAudioSource:
+        queued_duration = 0.0
+
+        async def capture_frame(self, frame):
+            captured.append(np.frombuffer(bytes(frame.data), dtype=np.int16).copy())
+
+    class FakeAudioFrame:
+        @staticmethod
+        def create(sample_rate, channels, samples):
+            assert (sample_rate, channels, samples) == (48000, 1, 480)
+            return types.SimpleNamespace(data=bytearray(samples * 2))
+
+    monkeypatch.setattr(
+        katherine, "livekit_rtc",
+        types.SimpleNamespace(AudioFrame=FakeAudioFrame),
+    )
+
+    async def scenario():
+        queue = asyncio.Queue(maxsize=16)
+        for value in range(12):
+            await queue.put(np.full(480, value + 1, dtype=np.int16))
+        state = {
+            "stop_event": asyncio.Event(),
+            "music_audio_queue": queue,
+            "speaking": asyncio.Event(),
+            "audio_source": FakeAudioSource(),
+            "volume": 1.0,
+            "duck_enabled": True,
+            "music_duck_gain": 1.0,
+            "music_buffer_started": True,
+            "music_decoder_finished": False,
+            "mixer_task": None,
+            "task": object(),
+        }
+        katherine.DJ_ROOMS[thread_id] = state
+        try:
+            task = asyncio.create_task(katherine.audio_mixer_loop(thread_id))
+            state["mixer_task"] = task
+            for _ in range(30):
+                if len(captured) >= 3:
+                    break
+                await asyncio.sleep(0.005)
+            assert len(captured) >= 3
+            assert queue.qsize() >= 8
+            assert state["music_pending_samples"] <= 480
+        finally:
+            state["stop_event"].set()
+            task = state.get("mixer_task")
+            if task and not task.done():
+                await task
+            katherine.DJ_ROOMS.pop(thread_id, None)
+
+    asyncio.run(scenario())
+
+
+def test_stop_music_clears_livekit_native_queue_and_stops_mixer(monkeypatch):
+    thread_id = "stop-music-clears-source-test"
+    cleared = []
+
+    class FakeAudioSource:
+        def clear_queue(self):
+            cleared.append(True)
+
+    async def scenario():
+        queue = asyncio.Queue(maxsize=4)
+        await queue.put(np.ones(480, dtype=np.int16))
+        state = {
+            "stop_event": asyncio.Event(),
+            "playback_stop_event": asyncio.Event(),
+            "music_audio_queue": queue,
+            "audio_source": FakeAudioSource(),
+            "music_pending_samples": 480,
+            "music_buffer_started": True,
+            "music_decoder_finished": False,
+            "music_duck_gain": 0.28,
+            "queue": [],
+            "filename": "track.mp3",
+            "track": {"title": "track"},
+            "temporary_audio_path": None,
+            "task": None,
+            "mixer_task": None,
+        }
+        katherine.DJ_ROOMS[thread_id] = state
+        try:
+            assert await katherine.stop_dj_playback(thread_id)
+            assert cleared == [True]
+            assert queue.empty()
+            assert state["music_pending_samples"] == 0
+            assert state["music_duck_gain"] == 1.0
+            assert state["playback_stop_event"].is_set()
+            assert not state["stop_event"].is_set()
+        finally:
+            katherine.DJ_ROOMS.pop(thread_id, None)
+
+    asyncio.run(scenario())
+
+
 def test_stream_speech_file_uses_independent_livekit_source(monkeypatch):
     import types
 
