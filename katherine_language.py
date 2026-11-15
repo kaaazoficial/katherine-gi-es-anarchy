@@ -70,6 +70,11 @@ _DOMAIN_WORDS = frozenset({
     "natlan", "mondstadt", "liyue", "inazuma", "snezhnaya", "primogemas",
     "abyss", "abyssal", "build", "builds", "main", "subdps", "dps",
     "arle", "fischl", "xiangling", "xingqiu", "bennett", "chevreuse",
+    "kaeya", "albedo", "noelle", "tartaglia", "xianyun", "chiori",
+    "sigewinne", "wriothesley", "dainsleif", "enkanomiya", "focalors",
+    "openai", "openrouter", "python", "javascript", "typescript", "html",
+    "css", "sql", "api", "github", "render", "livekit", "edge", "tts",
+    "discord", "bandit", "ruff", "pyspellchecker", "anarchyapps",
 })
 
 _spellchecker: Any = None
