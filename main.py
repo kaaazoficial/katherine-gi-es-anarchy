@@ -11923,7 +11923,7 @@ Uso: !enciclopedia <nombre>""",
 
             test_query = " ".join(args[1:]).strip() or "ambient instrumental"
             normalized_query = clean_archive_value(test_query, 80)
-            archive_terms = re.findall(r"[\\wáéíóúñü-]+", normalized_query, flags=re.I)[:5]
+            archive_terms = re.findall(r"[\wáéíóúñü-]+", normalized_query, flags=re.I)[:5]
             if not normalized_query or not archive_terms:
                 await send_message(
                     thread,
