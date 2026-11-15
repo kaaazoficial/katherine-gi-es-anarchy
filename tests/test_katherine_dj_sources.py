@@ -1852,3 +1852,121 @@ def test_openverse_search_filters_licenses_and_preserves_attribution(monkeypatch
 
 def test_openverse_search_returns_empty_for_blank_query():
     assert asyncio.run(katherine.search_openverse_audio("   ")) == []
+
+
+
+def test_dj_search_buttons_use_only_compact_numeric_labels():
+    tracks = [
+        {"title": "A very long song title that should never be inside the button"},
+        {"title": "Another long song title"},
+        {"title": "Third"},
+    ]
+    buttons = katherine.build_dj_search_button_choices(tracks)
+    assert buttons == [
+        {"label": "1", "value": "0"},
+        {"label": "2", "value": "1"},
+        {"label": "3", "value": "2"},
+    ]
+    page_two = katherine.build_dj_search_button_choices(tracks, start_index=5)
+    assert page_two == [
+        {"label": "6", "value": "5"},
+        {"label": "7", "value": "6"},
+        {"label": "8", "value": "7"},
+    ]
+
+
+def test_chat_setting_cache_reuses_reads_and_updates_immediately(monkeypatch):
+    from contextlib import contextmanager
+
+    calls = {"select": 0, "write": 0}
+    stored = {"setting_value": "0"}
+
+    class FakeCursor:
+        def fetchone(self):
+            return dict(stored)
+
+    class FakeDatabase:
+        def execute(self, query, params=()):
+            if query.lstrip().upper().startswith("SELECT"):
+                calls["select"] += 1
+                return FakeCursor()
+            calls["write"] += 1
+            stored["setting_value"] = str(params[2])
+            return FakeCursor()
+
+    @contextmanager
+    def fake_session():
+        yield FakeDatabase()
+
+    monkeypatch.setattr(katherine, "db_session", fake_session)
+    key = ("setting-cache-test", "auto_replies_enabled")
+    katherine.CHAT_SETTING_CACHE.pop(key, None)
+    try:
+        assert katherine.get_chat_setting(*key, default="") == "0"
+        assert katherine.get_chat_setting(*key, default="") == "0"
+        assert calls["select"] == 1
+
+        katherine.set_chat_setting(*key, value="1")
+        assert katherine.get_chat_setting(*key, default="") == "1"
+        assert calls["select"] == 1
+        assert calls["write"] == 1
+    finally:
+        katherine.CHAT_SETTING_CACHE.pop(key, None)
+
+
+def test_auto_reply_matchers_are_compiled_and_cached(monkeypatch):
+    thread = "auto-reply-cache-test"
+    calls = []
+
+    def fake_rules(thread_id):
+        calls.append(thread_id)
+        return [
+            {"id": 1, "trigger_phrase": "hola", "response_text": "¡Hola!", "enabled": 1},
+            {"id": 2, "trigger_phrase": "hola katherine", "response_text": "Aquí estoy", "enabled": 1},
+        ]
+
+    monkeypatch.setattr(katherine, "list_auto_reply_rules", fake_rules)
+    katherine.AUTO_REPLY_RULE_CACHE.pop(thread, None)
+    try:
+        first = katherine.get_auto_reply_matchers(thread)
+        second = katherine.get_auto_reply_matchers(thread)
+        assert first is second
+        assert len(calls) == 1
+        assert [rule["id"] for rule, _pattern in first] == [2, 1]
+        assert first[0][1].search("hola katherine") is not None
+    finally:
+        katherine.AUTO_REPLY_RULE_CACHE.pop(thread, None)
+
+
+def test_auto_reply_rule_updates_invalidate_compiled_cache(monkeypatch):
+    from contextlib import contextmanager
+
+    thread = "auto-reply-invalidation-test"
+    katherine.AUTO_REPLY_RULE_CACHE[thread] = (
+        katherine.time.monotonic() + 60,
+        (),
+    )
+
+    class FakeCursor:
+        def fetchone(self):
+            return {"id": 42}
+
+    class FakeDatabase:
+        def execute(self, query, params=()):
+            return FakeCursor()
+
+    @contextmanager
+    def fake_session():
+        yield FakeDatabase()
+
+    monkeypatch.setattr(katherine, "db_session", fake_session)
+    try:
+        rule_id = katherine.add_auto_reply_rule(
+            thread, "hola", "¡Hola {usuario}!", "tester"
+        )
+        assert rule_id == 42
+        assert thread not in katherine.AUTO_REPLY_RULE_CACHE
+    finally:
+        katherine.AUTO_REPLY_RULE_CACHE.pop(thread, None)
+
+

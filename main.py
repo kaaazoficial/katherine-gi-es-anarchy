@@ -308,23 +308,41 @@ def find_user_by_nickname(nickname: str, scope_key: str | None = None):
 
 
 def get_chat_setting(thread_id: str, key: str, default: str = "") -> str:
+    cache_key = (str(thread_id), str(key))
+    now = time.monotonic()
+    cached = CHAT_SETTING_CACHE.get(cache_key)
+    if cached is not None and cached[0] > now:
+        metrics["chat_setting_cache_hits"] += 1
+        return str(cached[1]) if cached[1] is not None else str(default)
+
+    metrics["chat_setting_cache_misses"] += 1
     with db_session() as db:
         row = db.execute(
             "SELECT setting_value FROM chat_settings WHERE thread_id=? AND setting_key=?",
-            (str(thread_id), str(key))
+            cache_key
         ).fetchone()
-        return str(row["setting_value"]) if row else str(default)
+    stored_value = str(row["setting_value"]) if row else None
+    if cache_key not in CHAT_SETTING_CACHE and len(CHAT_SETTING_CACHE) >= CHAT_SETTING_CACHE_MAX_ENTRIES:
+        CHAT_SETTING_CACHE.pop(next(iter(CHAT_SETTING_CACHE)), None)
+    CHAT_SETTING_CACHE[cache_key] = (now + CHAT_SETTING_CACHE_TTL, stored_value)
+    return stored_value if stored_value is not None else str(default)
 
 
 def set_chat_setting(thread_id: str, key: str, value: str):
+    cache_key = (str(thread_id), str(key))
+    stored_value = str(value)
     with db_session() as db:
         db.execute(
             """INSERT INTO chat_settings(thread_id,setting_key,setting_value,updated_at)
                VALUES(?,?,?,?)
                ON CONFLICT(thread_id,setting_key) DO UPDATE SET
                setting_value=excluded.setting_value, updated_at=excluded.updated_at""",
-            (str(thread_id), str(key), str(value), time.time())
+            (cache_key[0], cache_key[1], stored_value, time.time())
         )
+    CHAT_SETTING_CACHE[cache_key] = (
+        time.monotonic() + CHAT_SETTING_CACHE_TTL,
+        stored_value,
+    )
 
 
 def is_admin_uid(uid: str) -> bool:
@@ -845,6 +863,14 @@ cache: dict[str, tuple[float, Any]] = {}
 polls: dict[str, dict] = {}
 AUTO_REPLY_CHAT_COOLDOWN: dict[str, float] = {}
 AUTO_REPLY_USER_COOLDOWN: dict[tuple[str, str], float] = {}
+CHAT_SETTING_CACHE: dict[tuple[str, str], tuple[float, str | None]] = {}
+CHAT_SETTING_CACHE_TTL = 15.0
+CHAT_SETTING_CACHE_MAX_ENTRIES = 2048
+AUTO_REPLY_RULE_CACHE: dict[str, tuple[float, tuple[tuple[dict, Any], ...]]] = {}
+AUTO_REPLY_RULE_CACHE_TTL = 15.0
+AUTO_REPLY_RULE_CACHE_MAX_ENTRIES = 512
+_CHAT_ACTIVITY_CLOCK_MINUTE = -1
+_CHAT_ACTIVITY_CLOCK_VALUE = ("", 0)
 
 EXTERNAL_GLOBAL_LIMIT = asyncio.Semaphore(10)
 EXTERNAL_HOST_LIMITS = {}
@@ -1231,7 +1257,12 @@ def cleanup_expired_state():
     for button_key, poll_id in list(poll_button_map.items()):
         if poll_id not in active_poll_ids:
             poll_button_map.pop(button_key, None)
-    cutoff = time.monotonic() - 600
+    monotonic_now = time.monotonic()
+    for store in (CHAT_SETTING_CACHE, AUTO_REPLY_RULE_CACHE):
+        for key, item in list(store.items()):
+            if not isinstance(item, tuple) or len(item) != 2 or item[0] <= monotonic_now:
+                store.pop(key, None)
+    cutoff = monotonic_now - 600
     for key, history in list(send_history_chat.items()):
         while history and history[0] < cutoff:
             history.popleft()
@@ -9433,10 +9464,23 @@ async def resolve_avatar_image(source_url: str) -> tuple[bytes, str]:
 
 
 
+def get_chat_activity_clock_bucket() -> tuple[str, int]:
+    """Reuse Santiago's date/hour conversion for all messages within the same minute."""
+    global _CHAT_ACTIVITY_CLOCK_MINUTE, _CHAT_ACTIVITY_CLOCK_VALUE
+    current_time = time.time()
+    minute_key = int(current_time // 60)
+    if minute_key != _CHAT_ACTIVITY_CLOCK_MINUTE:
+        local_now = datetime.fromtimestamp(current_time, ZoneInfo("America/Santiago"))
+        _CHAT_ACTIVITY_CLOCK_VALUE = (
+            local_now.strftime("%Y-%m-%d"),
+            int(local_now.hour),
+        )
+        _CHAT_ACTIVITY_CLOCK_MINUTE = minute_key
+    return _CHAT_ACTIVITY_CLOCK_VALUE
+
+
 def record_chat_activity(thread_id: str, uid: str, nickname: str):
-    local_now = datetime.now(ZoneInfo("America/Santiago"))
-    day_key = local_now.strftime("%Y-%m-%d")
-    hour = int(local_now.hour)
+    day_key, hour = get_chat_activity_clock_bucket()
     with db_session() as db:
         db.execute(
             """INSERT INTO chat_activity_daily(thread_id,uid,nickname,day_key,message_count)
@@ -9574,7 +9618,9 @@ def add_auto_reply_rule(thread_id: str, trigger_phrase: str, response_text: str,
             "SELECT id FROM auto_reply_rules WHERE thread_id=? AND trigger_phrase=?",
             (str(thread_id), phrase)
         ).fetchone()
-        return int(row["id"])
+        rule_id = int(row["id"])
+    AUTO_REPLY_RULE_CACHE.pop(str(thread_id), None)
+    return rule_id
 
 
 def remove_auto_reply_rule(thread_id: str, rule_id: int) -> bool:
@@ -9583,7 +9629,10 @@ def remove_auto_reply_rule(thread_id: str, rule_id: int) -> bool:
             "DELETE FROM auto_reply_rules WHERE thread_id=? AND id=?",
             (str(thread_id), int(rule_id))
         )
-        return cursor.rowcount > 0
+        removed = cursor.rowcount > 0
+    if removed:
+        AUTO_REPLY_RULE_CACHE.pop(str(thread_id), None)
+    return removed
 
 
 def list_auto_reply_rules(thread_id: str):
@@ -9594,6 +9643,41 @@ def list_auto_reply_rules(thread_id: str):
             (str(thread_id),)
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def get_auto_reply_matchers(thread_id: str):
+    """Return short-lived compiled phrase matchers for this room."""
+    key = str(thread_id)
+    now = time.monotonic()
+    cached = AUTO_REPLY_RULE_CACHE.get(key)
+    if cached is not None and cached[0] > now:
+        metrics["auto_reply_rule_cache_hits"] += 1
+        return cached[1]
+
+    metrics["auto_reply_rule_cache_misses"] += 1
+    rules = list_auto_reply_rules(key)
+    ordered = sorted(
+        (
+            rule for rule in rules
+            if rule.get("enabled") and str(rule.get("trigger_phrase") or "").strip()
+        ),
+        key=lambda item: len(str(item["trigger_phrase"])),
+        reverse=True,
+    )
+    matchers = tuple(
+        (
+            rule,
+            re.compile(
+                r"(?<!\w)" + re.escape(str(rule["trigger_phrase"]).strip().casefold()) + r"(?!\w)",
+                flags=re.UNICODE,
+            ),
+        )
+        for rule in ordered
+    )
+    if key not in AUTO_REPLY_RULE_CACHE and len(AUTO_REPLY_RULE_CACHE) >= AUTO_REPLY_RULE_CACHE_MAX_ENTRIES:
+        AUTO_REPLY_RULE_CACHE.pop(next(iter(AUTO_REPLY_RULE_CACHE)), None)
+    AUTO_REPLY_RULE_CACHE[key] = (now + AUTO_REPLY_RULE_CACHE_TTL, matchers)
+    return matchers
 
 
 async def maybe_send_auto_reply(thread_id: str, uid: str, nickname: str, content: str):
@@ -9607,13 +9691,8 @@ async def maybe_send_auto_reply(thread_id: str, uid: str, nickname: str, content
     normalized = re.sub(r"\s+", " ", str(content or "")).strip().casefold()
     if not normalized or len(normalized) > 800:
         return
-    rules = list_auto_reply_rules(thread_id)
-    for rule in sorted(rules, key=lambda item: len(item["trigger_phrase"]), reverse=True):
-        phrase = str(rule["trigger_phrase"] or "").strip().casefold()
-        if not phrase or not rule["enabled"]:
-            continue
-        pattern = r"(?<!\w)" + re.escape(phrase) + r"(?!\w)"
-        if re.search(pattern, normalized, flags=re.UNICODE):
+    for rule, pattern in get_auto_reply_matchers(thread_id):
+        if pattern.search(normalized):
             response = str(rule["response_text"]).replace("{usuario}", str(nickname)[:80])
             AUTO_REPLY_CHAT_COOLDOWN[str(thread_id)] = now + 4
             AUTO_REPLY_USER_COOLDOWN[(str(thread_id), str(uid))] = now + 30
@@ -9621,7 +9700,6 @@ async def maybe_send_auto_reply(thread_id: str, uid: str, nickname: str, content
             await send_message(thread_id, response, "developer")
             return True
     return False
-
 
 
 def format_poll_results(poll: dict) -> str:
@@ -13476,11 +13554,7 @@ Uso: !enciclopedia <nombre>""",
                 dj_source,
                 thread,
                 "dj_select",
-                [
-                    {"label": f"{start_index + index + 1}. {track.get('title') or 'Pista'}"[:40],
-                     "value": str(start_index + index)}
-                    for index, track in enumerate(page_tracks)
-                ],
+                build_dj_search_button_choices(page_tracks, start_index),
                 payload={"search_id": saved.get("search_id")},
                 ttl=900
             )
@@ -13549,13 +13623,7 @@ Uso: !enciclopedia <nombre>""",
                 dj_source,
                 thread,
                 "dj_select",
-                [
-                    {
-                        "label": f"{index + 1}. {track['title']}"[:40],
-                        "value": str(index)
-                    }
-                    for index, track in enumerate(results)
-                ],
+                build_dj_search_button_choices(results),
                 payload={"search_id": search_id},
                 ttl=900
             )
@@ -13746,6 +13814,16 @@ async def start_dj_search_with_fallback(
             break
         metrics["dj_fallback_tracks_skipped"] += 1
     return False, last_error, None, None
+
+
+def build_dj_search_button_choices(
+    tracks: list[dict], start_index: int = 0
+) -> list[dict]:
+    """Use compact numeric labels; full titles remain in the result text."""
+    return [
+        {"label": str(start_index + index + 1), "value": str(start_index + index)}
+        for index, _track in enumerate(tracks[:5])
+    ]
 
 
 def format_dj_track_announcement(track: dict) -> str:
