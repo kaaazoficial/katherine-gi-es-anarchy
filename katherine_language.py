@@ -147,23 +147,23 @@ def detect_spanish_spelling_issues(
     checker = spell_checker or _get_spellchecker()
     replacements: list[tuple[int, int, str, str]] = []
 
-    # A greeting typo is clear only at the beginning of a sentence/message.
-    first_token = tokens[0]
-    if (
-        first_token.start() == len(visible) - len(visible.lstrip())
-        and first_token.group(1).casefold() == "ola"
-        and not _overlaps(first_token.start(), first_token.end(), ranges)
-    ):
-        replacements.append((
-            first_token.start(), first_token.end(),
-            _preserve_case(first_token.group(1), "hola"),
-            first_token.group(1),
-        ))
+    for match in tokens:
+        start, end = match.span(1)
+        if _overlaps(start, end, ranges):
+            continue
+        word = match.group(1)
+        normalized = word.casefold()
+        explicit = _COMMON_FIXES.get(normalized)
+        if normalized == "ola" and start == len(visible) - len(visible.lstrip()):
+            explicit = "hola"
+        if explicit:
+            replacements.append((
+                start, end, _preserve_case(word, explicit), word
+            ))
+        if len(replacements) >= 2:
+            break
 
-    if checker is None:
-        if not replacements:
-            return None
-    else:
+    if checker is not None and len(replacements) < 2:
         with _spell_lock:
             for match in tokens:
                 start, end = match.span(1)
@@ -176,6 +176,8 @@ def detect_spanish_spelling_issues(
                     or normalized in _DOMAIN_WORDS
                     or normalized in _CHAT_SLANG
                     or normalized in _COMMON_FIXES
+                    or (normalized == "ola" and start == len(visible) - len(visible.lstrip()))
+                    or any(old == word for _a, _b, _c, old in replacements)
                     or (word.isupper() and len(word) <= 8)
                 ):
                     continue
@@ -197,8 +199,11 @@ def detect_spanish_spelling_issues(
                 replacements.append((
                     start, end, _preserve_case(word, candidate), word
                 ))
-                if len(replacements) >= 3:
+                if len(replacements) >= 2:
                     break
+
+    if not replacements:
+        return None
 
     # Several unknown words usually indicate a name, another language, or
     # stylized slang. Do not pretend to know how to rewrite that message.
