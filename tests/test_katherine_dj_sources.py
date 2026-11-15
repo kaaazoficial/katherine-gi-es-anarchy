@@ -963,7 +963,8 @@ def test_dj_playback_flushes_samples_retained_by_pyav_resampler(monkeypatch):
 
     assert result is True
     assert len(enqueued) == 1
-    assert np.array_equal(enqueued[0], delayed)
+    assert np.array_equal(enqueued[0][:480], delayed)
+    assert np.count_nonzero(enqueued[0][480:]) == 0
 
 
 
@@ -1052,8 +1053,7 @@ def test_dj_decoder_pads_only_the_final_partial_pcm_frame(monkeypatch):
     )
 
     assert result is True
-    assert len(enqueued) == 2
-    assert np.array_equal(enqueued[0], decoded_samples[:480])
-    assert np.array_equal(enqueued[1][:120], decoded_samples[480:])
-    assert np.count_nonzero(enqueued[1][120:]) == 0
+    assert len(enqueued) == 1
+    assert np.array_equal(enqueued[0][:600], decoded_samples)
+    assert np.count_nonzero(enqueued[0][600:]) == 0
     assert state["music_decoder_finished"] is True
