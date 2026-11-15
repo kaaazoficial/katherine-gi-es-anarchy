@@ -12886,6 +12886,20 @@ async def dispatch(event: dict, source: str):
                     metrics["affectionate_name_replies"] += 1
                     return
 
+            if name_call:
+                raw_uid = str(author_data.get("uid") or author_data.get("nickname") or "unknown")
+                await maybe_send_spelling_feedback(
+                    str(event.get("threadId") or ""),
+                    raw_uid,
+                    str(author_data.get("nickname") or "Viajero"),
+                    incoming_text,
+                )
+                corrected_call = await asyncio.to_thread(
+                    detect_spanish_spelling_issues, name_call
+                )
+                if corrected_call:
+                    name_call = corrected_call.corrected_text
+
             routing_text = (
                 f"Katherine, {name_call}" if name_call is not None and name_call
                 else "Katherine" if name_call is not None
@@ -12915,19 +12929,6 @@ async def dispatch(event: dict, source: str):
                             source,
                         )
                     else:
-                        raw_uid = str(author_data.get("uid") or author_data.get("nickname") or "unknown")
-                        if name_call:
-                            await maybe_send_spelling_feedback(
-                                thread_id,
-                                raw_uid,
-                                str(author_data.get("nickname") or "Viajero"),
-                                incoming_text,
-                            )
-                            corrected_call = await asyncio.to_thread(
-                                detect_spanish_spelling_issues, name_call
-                            )
-                            if corrected_call:
-                                name_call = corrected_call.corrected_text
                         name_event = dict(event)
                         name_message = dict(message_data)
                         name_message["content"] = f"{PREFIX}asistente {name_call}"
