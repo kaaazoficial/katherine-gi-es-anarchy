@@ -81,3 +81,18 @@ def test_warm_messages_cover_gratitude_compliments_and_greetings(message, expect
     call = extract_katherine_call(message)
     assert call is not None
     assert detect_affectionate_expression(call) == expected
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("Qué linda eres, Katherine", "compliment"),
+        ("Eres la mejor, Katherine", "compliment"),
+        ("Katherine, eres un sol", "compliment"),
+        ("Katherine, me haces feliz", "compliment"),
+    ],
+)
+def test_warm_replies_recognize_more_natural_compliments(message, expected):
+    call = extract_katherine_call(message)
+    assert call is not None
+    assert detect_affectionate_expression(call) == expected
