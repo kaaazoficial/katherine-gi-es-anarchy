@@ -3448,8 +3448,29 @@ async def audio_mixer_loop(thread_id: str) -> None:
                     "[DJ_MIXER] Falló la emisión en %s (%s, intento %s/3).",
                     thread_id, type(exc).__name__, consecutive_failures,
                 )
+                if is_livekit_audio_source_failure(exc):
+                    state["_cleanup_started"] = True
+                    state["reading_enabled"] = False
+                    state["mixer_retry_after"] = time.monotonic() + 30.0
+                    metrics["tts_livekit_source_failures"] += 1
+                    logging.error(
+                        "[TTS] LiveKit invalidó la fuente de audio en %s. "
+                        "Se desactiva la lectura para evitar bloquear la cola.",
+                        thread_id,
+                    )
+                    break
                 if consecutive_failures >= 3:
                     state["mixer_retry_after"] = time.monotonic() + 2.0
+                    state["mixer_consecutive_failures"] = (
+                        int(state.get("mixer_consecutive_failures", 0)) + 1
+                    )
+                    if state["mixer_consecutive_failures"] >= 3:
+                        state["reading_enabled"] = False
+                        logging.error(
+                            "[TTS] Se pausó la lectura en %s tras tres ciclos "
+                            "de fallos del mezclador.",
+                            thread_id,
+                        )
                     break
                 await asyncio.sleep(0.2)
                 continue
@@ -3888,12 +3909,58 @@ def clean_speech_text(content: str, include_links: bool = False, include_mention
 
 
 async def stream_speech_file(thread_id: str, file_path: str):
+    """Decode TTS and preserve sample continuity across PyAV decoder frames."""
     state = DJ_ROOMS.get(str(thread_id))
-    if not state:
-        return
-    if not await asyncio.to_thread(load_audio_dependencies):
+    if not state or not await asyncio.to_thread(load_audio_dependencies):
         return
     container = pyav.open(file_path, mode="r")
+    pending = np.empty(0, dtype=np.int16)
+
+    async def send_full_frames(final: bool = False) -> None:
+        nonlocal pending
+        while len(pending) >= DJ_MIXER_FRAME_SAMPLES or (final and len(pending)):
+            if (
+                DJ_ROOMS.get(str(thread_id)) is not state
+                or state["stop_event"].is_set()
+                or not state.get("reading_enabled")
+            ):
+                return
+            frame = pending[:DJ_MIXER_FRAME_SAMPLES]
+            pending = pending[len(frame):]
+            if len(frame) < DJ_MIXER_FRAME_SAMPLES:
+                frame = np.pad(
+                    frame,
+                    (0, DJ_MIXER_FRAME_SAMPLES - len(frame)),
+                    mode="constant",
+                )
+            tts_volume = max(0.0, min(1.0, float(state.get("tts_volume", 0.75))))
+            if tts_volume <= 0:
+                frame = np.zeros_like(frame)
+            elif tts_volume < 1:
+                frame = np.clip(
+                    frame.astype(np.float32) * tts_volume,
+                    -32768, 32767
+                ).astype(np.int16)
+
+            # Restart the writer if it ended unexpectedly; do not fill a dead
+            # queue until the TTS worker becomes permanently blocked.
+            while not ensure_audio_mixer_running(thread_id, state):
+                if (
+                    DJ_ROOMS.get(str(thread_id)) is not state
+                    or state["stop_event"].is_set()
+                    or not state.get("reading_enabled")
+                ):
+                    return
+                await asyncio.sleep(0.1)
+            try:
+                await asyncio.wait_for(
+                    enqueue_audio_samples(state.get("speech_audio_queue"), frame),
+                    timeout=3.0,
+                )
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError("El mezclador no consume la cola de voz.") from exc
+            metrics["tts_audio_frames_enqueued"] += 1
+
     try:
         audio_stream = next(
             (stream for stream in container.streams if stream.type == "audio"),
@@ -3912,34 +3979,24 @@ async def stream_speech_file(thread_id: str, file_path: str):
                 or state["stop_event"].is_set()
                 or not state.get("reading_enabled")
             ):
-                break
+                return
             for frame in resampler.resample(decoded):
                 samples = np.asarray(frame.to_ndarray(), dtype=np.int16).reshape(-1)
-                for offset in range(0, len(samples), 480):
-                    if (
-                        DJ_ROOMS.get(str(thread_id)) is not state
-                        or state["stop_event"].is_set()
-                        or not state.get("reading_enabled")
-                    ):
-                        return
-                    chunk = samples[offset:offset + 480]
-                    if not len(chunk):
-                        continue
-                    # Volumen independiente para TTS; se lee en cada bloque para
-                    # permitir cambios en tiempo real mientras Katherine habla.
-                    tts_volume = max(
-                        0.0, min(1.0, float(state.get("tts_volume", 0.75)))
-                    )
-                    if tts_volume <= 0:
-                        chunk = np.zeros_like(chunk)
-                    elif tts_volume < 1:
-                        chunk = np.clip(
-                            chunk.astype(np.float32) * tts_volume,
-                            -32768, 32767
-                        ).astype(np.int16)
-                    await enqueue_audio_samples(
-                        state.get("speech_audio_queue"), chunk
-                    )
+                if len(samples):
+                    pending = np.concatenate((pending, samples))
+                    await send_full_frames()
+
+        # Flush any samples retained by the resampler before padding the single
+        # final partial 10 ms frame, rather than padding at every decoder boundary.
+        try:
+            for frame in resampler.resample(None):
+                samples = np.asarray(frame.to_ndarray(), dtype=np.int16).reshape(-1)
+                if len(samples):
+                    pending = np.concatenate((pending, samples))
+                    await send_full_frames()
+        except (TypeError, ValueError, AttributeError):
+            pass
+        await send_full_frames(final=True)
     finally:
         container.close()
 
@@ -3951,6 +4008,9 @@ async def speech_queue_worker(thread_id: str):
     metrics["tts_worker_starts"] += 1
     logging.info("[TTS] Worker de lectura activo en %s.", thread_id)
     while not state["stop_event"].is_set():
+        if not state.get("reading_enabled"):
+            await asyncio.sleep(0.1)
+            continue
         queue = state.get("speech_priority_queue")
         try:
             text_to_read = queue.get_nowait()
@@ -4157,6 +4217,10 @@ async def enqueue_message_for_speech(event: dict, source: str):
             pass
     try:
         queue.put_nowait(speech_text)
+        logging.debug(
+            "[TTS] Mensaje agregado a lectura en %s (%s caracteres).",
+            thread_id, len(speech_text),
+        )
         metrics["tts_messages_enqueued"] += 1
         metrics["tts_priority_enqueued" if is_directed else "tts_regular_enqueued"] += 1
         ensure_audio_mixer_running(thread_id, state)
