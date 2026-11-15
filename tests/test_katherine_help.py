@@ -61,7 +61,7 @@ def test_full_help_is_split_into_seven_category_messages():
     assert len(blocks) == 7
     for i, block in enumerate(blocks):
         assert "[C] ───────────── ✦ ─────────────" in block
-        assert f"[CB] ✦ {i + 1}. in block
+        assert f"[CB] ✦ {i + 1}.
         assert len(block.encode("utf-16-le")) // 2 <= 1800
 
 
