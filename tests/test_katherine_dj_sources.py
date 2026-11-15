@@ -2063,3 +2063,73 @@ def test_dj_playback_does_not_reddecode_track_after_livekit_output_failure(monke
         asyncio.run(scenario())
     finally:
         katherine.DJ_ROOMS.pop(thread_id, None)
+
+
+
+def test_dj_download_cache_coalesces_and_reuses_recent_audio(monkeypatch, tmp_path):
+    url = "https://archive.org/download/cache-test/track.mp3"
+    created = []
+
+    async def fake_download(source, file_extension=None):
+        path = tmp_path / f"track-{len(created)}.mp3"
+        path.write_bytes(b"validated audio bytes")
+        created.append(path)
+        return path
+
+    monkeypatch.setattr(katherine, "dj_audio_url_allowed", lambda value: value == url)
+    monkeypatch.setattr(katherine, "_download_dj_audio_uncached", fake_download)
+    monkeypatch.setattr(katherine, "DJ_ROOMS", {})
+    katherine.DJ_AUDIO_FILE_CACHE.clear()
+
+    async def scenario():
+        first, second = await asyncio.gather(
+            katherine.download_dj_audio(url, ".mp3"),
+            katherine.download_dj_audio(url, ".mp3"),
+        )
+        third = await katherine.download_dj_audio(url, ".mp3")
+        assert first == second == third
+        assert created == [first]
+        assert katherine.dj_audio_path_is_cached(first)
+        assert first.is_file()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        for item in katherine.DJ_AUDIO_FILE_CACHE.values():
+            path = __import__("pathlib").Path(item["path"])
+            path.unlink(missing_ok=True)
+        katherine.DJ_AUDIO_FILE_CACHE.clear()
+
+
+def test_dj_audio_cache_expiry_never_deletes_a_track_in_active_playback(monkeypatch, tmp_path):
+    cached_path = tmp_path / "active-track.mp3"
+    cached_path.write_bytes(b"audio")
+    cache_key = "active-track-test"
+    now = katherine.time.time()
+    state = {
+        "temporary_audio_path": str(cached_path),
+        "queue": __import__("collections").deque(),
+    }
+    monkeypatch.setattr(katherine, "DJ_ROOMS", {"active-audio-cache-test": state})
+    katherine.DJ_AUDIO_FILE_CACHE.clear()
+    katherine.DJ_AUDIO_FILE_CACHE[cache_key] = {
+        "path": str(cached_path.resolve()),
+        "size": cached_path.stat().st_size,
+        "expires": now - 1,
+        "last_used": now - 100,
+    }
+
+    try:
+        katherine.cleanup_dj_audio_file_cache(now=now)
+        assert cached_path.is_file()
+        assert cache_key in katherine.DJ_AUDIO_FILE_CACHE
+        assert katherine.cleanup_dj_audio_file(cached_path) is False
+        assert cached_path.is_file()
+
+        state["temporary_audio_path"] = None
+        katherine.cleanup_dj_audio_file_cache(now=now + 1)
+        assert not cached_path.exists()
+        assert cache_key not in katherine.DJ_AUDIO_FILE_CACHE
+    finally:
+        katherine.DJ_AUDIO_FILE_CACHE.clear()
+        cached_path.unlink(missing_ok=True)
