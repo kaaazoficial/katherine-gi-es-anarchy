@@ -259,6 +259,7 @@ def test_affectionate_compliment_to_katherine_gets_a_warm_reply(monkeypatch):
     async def no_spelling(*_args, **_kwargs):
         return False
     monkeypatch.setattr(katherine, "maybe_send_spelling_feedback", no_spelling)
+    monkeypatch.setattr(katherine, "detect_spanish_spelling_issues", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(katherine, "send_message", fake_send)
     monkeypatch.setattr(katherine, "handle_command", capture_command)
     monkeypatch.setattr(katherine, "record_user", lambda *args, **kwargs: None)
