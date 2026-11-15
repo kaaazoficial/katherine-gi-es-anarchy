@@ -74,3 +74,21 @@ def test_music_section_has_current_music_controls():
         "!volumen", "!leer", "!noleer", "!tts",
     ):
         assert command in music
+
+
+def test_help_builders_cache_immutable_results_without_sharing_mutable_lists():
+    first_text = build_commands_help_text("!")
+    second_text = build_commands_help_text("!")
+    assert first_text is second_text
+
+    first_blocks = build_commands_help_blocks("!")
+    second_blocks = build_commands_help_blocks("!")
+    assert first_blocks == second_blocks
+    assert first_blocks is not second_blocks
+    first_blocks.pop()
+    assert len(build_commands_help_blocks("!")) == 7
+
+    first_category = filter_commands_help_text(first_text, "musica")
+    second_category = filter_commands_help_text(second_text, "musica")
+    assert first_category is second_category
+    assert "!dj buscar" in first_category
