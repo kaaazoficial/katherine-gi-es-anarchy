@@ -1970,3 +1970,96 @@ def test_auto_reply_rule_updates_invalidate_compiled_cache(monkeypatch):
         katherine.AUTO_REPLY_RULE_CACHE.pop(thread, None)
 
 
+
+
+
+def test_dj_decode_propagates_output_failure_without_reclassifying_it(monkeypatch):
+    thread_id = "dj-output-failure-type-test"
+    state = {
+        "stop_event": asyncio.Event(),
+        "playback_stop_event": asyncio.Event(),
+        "skip_event": asyncio.Event(),
+        "pause_event": asyncio.Event(),
+        "music_audio_queue": asyncio.Queue(maxsize=2),
+        "transition_ms": 0,
+    }
+    state["pause_event"].set()
+
+    class FakeIterator:
+        def close(self):
+            pass
+
+    async def fake_decode_batch(iterator, batch_size):
+        return [
+            ("frame", np.full(960, 1200, dtype=np.int16), 960),
+            katherine._AUDIO_DECODE_EOF,
+        ]
+
+    async def fail_output(*args, **kwargs):
+        raise katherine.DJAudioOutputUnavailable("mixer unavailable")
+
+    monkeypatch.setattr(katherine, "_iter_audio_decode_frames", lambda *args, **kwargs: FakeIterator())
+    monkeypatch.setattr(katherine, "_next_audio_decode_batch_async", fake_decode_batch)
+    monkeypatch.setattr(katherine, "enqueue_music_audio_samples", fail_output)
+    monkeypatch.setattr(katherine, "DJ_ROOMS", {thread_id: state})
+
+    async def scenario():
+        try:
+            try:
+                await katherine._dj_play_single(
+                    thread_id, __import__("pathlib").Path("track.mp3"), state
+                )
+            except katherine.DJAudioOutputUnavailable:
+                pass
+            else:
+                raise AssertionError("Output failure must propagate as a terminal DJ audio error")
+            assert state["music_decoder_finished"] is True
+        finally:
+            katherine.DJ_ROOMS.pop(thread_id, None)
+
+    asyncio.run(scenario())
+
+
+def test_dj_playback_does_not_reddecode_track_after_livekit_output_failure(monkeypatch):
+    from collections import deque
+    from pathlib import Path
+
+    thread_id = "dj-no-redecode-after-output-failure"
+    attempts = []
+    messages = []
+
+    async def fail_once(*args, **kwargs):
+        attempts.append(args[1])
+        raise katherine.DJAudioOutputUnavailable("mixer queue timed out")
+
+    async def fake_send_message(room, message, source):
+        messages.append((room, message, source))
+
+    state = {
+        "stop_event": asyncio.Event(),
+        "playback_stop_event": asyncio.Event(),
+        "skip_event": asyncio.Event(),
+        "queue": deque(),
+        "temporary_audio_path": None,
+        "track": {"title": "CPU test"},
+        "filename": "CPU test",
+        "repeat_mode": "off",
+    }
+    monkeypatch.setattr(katherine, "DJ_ROOMS", {thread_id: state})
+    monkeypatch.setattr(katherine, "_dj_play_single", fail_once)
+    monkeypatch.setattr(katherine, "send_message", fake_send_message)
+
+    async def scenario():
+        state["task"] = asyncio.current_task()
+        await katherine.dj_playback_loop(
+            thread_id, Path("cpu-test.mp3"), False, audio_source=object()
+        )
+        assert len(attempts) == 1
+        assert state["playback_stop_event"].is_set()
+        assert messages and "salida de audio" in messages[0][1].lower()
+        assert state["task"] is None
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        katherine.DJ_ROOMS.pop(thread_id, None)
