@@ -552,6 +552,7 @@ def test_music_mixer_ignores_tts_queue_and_publishes_music_only(monkeypatch):
             "volume": 1.0,
             "duck_enabled": True,
             "music_duck_gain": 1.0,
+            "music_buffer_started": True,
             "mixer_task": None,
         }
         katherine.DJ_ROOMS[thread_id] = state
