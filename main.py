@@ -3358,6 +3358,29 @@ def take_audio_frame(pending: Any, incoming: Any, frame_size: int = DJ_MIXER_FRA
     return frame.astype(np.int16, copy=False), remainder.astype(np.int16, copy=False)
 
 
+def split_complete_audio_frames(
+    pending: Any,
+    incoming: Any = None,
+    frame_size: int = DJ_MIXER_FRAME_SAMPLES,
+) -> tuple[list[np.ndarray], np.ndarray]:
+    """Join decoder chunks and return only full PCM frames plus the remainder."""
+    buffer = np.asarray(pending, dtype=np.int16).reshape(-1)
+    chunk = (
+        np.asarray(incoming, dtype=np.int16).reshape(-1)
+        if incoming is not None else np.empty(0, dtype=np.int16)
+    )
+    if len(chunk):
+        buffer = np.concatenate((buffer, chunk))
+    complete_length = (len(buffer) // frame_size) * frame_size
+    complete = buffer[:complete_length]
+    remainder = buffer[complete_length:]
+    frames = [
+        complete[offset:offset + frame_size].copy()
+        for offset in range(0, complete_length, frame_size)
+    ]
+    return frames, remainder.copy()
+
+
 async def audio_mixer_loop(thread_id: str) -> None:
     """Mezcla audio en bloques de 10 ms, sin publicar silencio cuando no hay contenido."""
     state = DJ_ROOMS.get(str(thread_id))
@@ -3918,21 +3941,23 @@ async def stream_speech_file(thread_id: str, file_path: str):
 
     async def send_full_frames(final: bool = False) -> None:
         nonlocal pending
-        while len(pending) >= DJ_MIXER_FRAME_SAMPLES or (final and len(pending)):
+        frames, pending = split_complete_audio_frames(pending)
+        if final and len(pending):
+            final_frame = np.pad(
+                pending,
+                (0, DJ_MIXER_FRAME_SAMPLES - len(pending)),
+                mode="constant",
+            )
+            frames.append(final_frame.astype(np.int16, copy=False))
+            pending = np.empty(0, dtype=np.int16)
+
+        for frame in frames:
             if (
                 DJ_ROOMS.get(str(thread_id)) is not state
                 or state["stop_event"].is_set()
                 or not state.get("reading_enabled")
             ):
                 return
-            frame = pending[:DJ_MIXER_FRAME_SAMPLES]
-            pending = pending[len(frame):]
-            if len(frame) < DJ_MIXER_FRAME_SAMPLES:
-                frame = np.pad(
-                    frame,
-                    (0, DJ_MIXER_FRAME_SAMPLES - len(frame)),
-                    mode="constant",
-                )
             tts_volume = max(0.0, min(1.0, float(state.get("tts_volume", 0.75))))
             if tts_volume <= 0:
                 frame = np.zeros_like(frame)
