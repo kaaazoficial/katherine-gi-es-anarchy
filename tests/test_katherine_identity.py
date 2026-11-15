@@ -1,6 +1,6 @@
 import pytest
 
-from katherine_identity import extract_katherine_call
+from katherine_identity import detect_affectionate_expression, extract_katherine_call
 
 
 @pytest.mark.parametrize(
@@ -15,9 +15,16 @@ from katherine_identity import extract_katherine_call
         ("@Kathi revisa mi pregunta", "revisa mi pregunta"),
         ("¡Ey, Katheryne! ¿Estás ahí?", "¿Estás ahí?"),
         ("Katherine", ""),
+        ("Hola, Katherine, ¿cómo estás?", "Hola ¿cómo estás?"),
+        ("¿Qué opinas, Katherine, de Cyno?", "¿Qué opinas de Cyno?"),
+        ("Puedes ayudarme Katherine?", "Puedes ayudarme?"),
+        ("Te quiero mucho, Katherine", "Te quiero mucho"),
+        ("¿Me ayudas con mi build? Kathy", "¿Me ayudas con mi build?"),
+        ("Revisa mi equipo, Katherin", "Revisa mi equipo"),
+        ("Katherine, dime qué opinas de esta canción", "dime qué opinas de esta canción"),
     ],
 )
-def test_recognizes_katherine_name_typos_and_nicknames(message, expected):
+def test_recognizes_katherine_name_at_start_middle_or_end(message, expected):
     assert extract_katherine_call(message) == expected
 
 
@@ -26,11 +33,29 @@ def test_recognizes_katherine_name_typos_and_nicknames(message, expected):
     [
         "Me gusta Katherine como nombre.",
         "Hoy hablé con Kathy en el chat.",
-        "Katrina, ¿puedes venir?",
+        "Mi amiga Katherine llegó ayer.",
         "KatherineBot, inicia.",
+        "Katrina, ¿puedes venir?",
         "Hola a todos.",
         "",
     ],
 )
-def test_does_not_trigger_for_ordinary_mentions_or_unrelated_names(message):
+def test_does_not_trigger_for_casual_mentions_or_unrelated_names(message):
     assert extract_katherine_call(message) is None
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("te amo", "love"),
+        ("Te amo mucho, Katherine", "love"),
+        ("Katherine, te quiero", "care"),
+        ("te quiero un montón", "care"),
+        ("No te quiero", None),
+        ("Ya no te amo", None),
+        ("Nunca te quise", None),
+        ("me gusta esa frase: te amo", "love"),
+    ],
+)
+def test_detects_affectionate_expressions_without_explicit_negation(message, expected):
+    assert detect_affectionate_expression(message) == expected
