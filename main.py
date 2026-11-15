@@ -956,6 +956,7 @@ DJ_SEARCH_RESULT_LIMIT = 10
 DJ_TRANSITION_FADE_SECONDS = 0.5
 DJ_TTS_DUCK_GAIN = 0.28
 DJ_MIXER_FRAME_SAMPLES = 480
+DJ_AUDIO_ENQUEUE_TIMEOUT_SECONDS = 3.0
 JAMENDO_CLIENT_ID = os.getenv("JAMENDO_CLIENT_ID", "").strip()
 IA_BASE = "https://archive.org"
 JAMENDO_API = "https://api.jamendo.com/v3.0/tracks/"
@@ -3556,6 +3557,71 @@ async def enqueue_audio_samples(queue: asyncio.Queue | None, samples: Any) -> No
         await queue.put(np.asarray(chunk, dtype=np.int16).copy())
 
 
+async def enqueue_music_audio_samples(
+    thread_id: str, state: dict, samples: Any
+) -> bool:
+    """Enqueue music PCM while recovering a stopped mixer and bounding backpressure."""
+    key = str(thread_id or "")
+    queue = state.get("music_audio_queue")
+    if not key or queue is None:
+        raise RuntimeError("La cola musical de audio no está disponible.")
+
+    array = np.asarray(samples, dtype=np.int16).reshape(-1)
+    loop = asyncio.get_running_loop()
+    for offset in range(0, len(array), DJ_MIXER_FRAME_SAMPLES):
+        chunk = array[offset:offset + DJ_MIXER_FRAME_SAMPLES]
+        if not len(chunk):
+            continue
+        if len(chunk) < DJ_MIXER_FRAME_SAMPLES:
+            chunk = np.pad(
+                chunk,
+                (0, DJ_MIXER_FRAME_SAMPLES - len(chunk)),
+                mode="constant",
+            )
+        chunk = np.asarray(chunk, dtype=np.int16).copy()
+        deadline = loop.time() + DJ_AUDIO_ENQUEUE_TIMEOUT_SECONDS
+
+        while True:
+            if (
+                DJ_ROOMS.get(key) is not state
+                or state.get("stop_event") is None
+                or state["stop_event"].is_set()
+                or (
+                    state.get("playback_stop_event") is not None
+                    and state["playback_stop_event"].is_set()
+                )
+            ):
+                return False
+            if state.get("skip_event") is not None and state["skip_event"].is_set():
+                return False
+            if state.get("_cleanup_started"):
+                raise RuntimeError(
+                    "LiveKit invalidó la fuente de audio; es necesario reconectar la sala."
+                )
+
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise RuntimeError(
+                    "El mezclador no consume la cola musical; se canceló la espera."
+                )
+            if not ensure_audio_mixer_running(key, state):
+                await asyncio.sleep(min(0.1, remaining))
+                continue
+
+            try:
+                await asyncio.wait_for(
+                    queue.put(chunk),
+                    timeout=min(0.25, remaining),
+                )
+                break
+            except asyncio.TimeoutError:
+                # A failed mixer may have exited while the bounded queue was full.
+                # Re-enter the loop so ensure_audio_mixer_running can recreate it.
+                continue
+
+    return True
+
+
 def ensure_speech_worker_running(thread_id: str, state: dict | None = None) -> bool:
     """Recover the TTS worker if it stopped while reading remained enabled."""
     key = str(thread_id or "")
@@ -4439,7 +4505,7 @@ async def download_dj_audio(url: str, file_extension: str | None = None) -> Path
 
 
 async def _dj_play_single(thread_id: str, path: Path, state: dict) -> bool:
-    """Decode one track into bounded PCM frames for the shared audio mixer."""
+    """Decode one track and keep the shared LiveKit mixer alive while enqueueing PCM."""
     container = pyav.open(str(path), mode="r")
     try:
         audio_stream = next(
@@ -4462,45 +4528,68 @@ async def _dj_play_single(thread_id: str, path: Path, state: dict) -> bool:
             48000 * max(0.0, min(2.0, float(state.get("transition_ms", 500)) / 1000.0))
         )
         position = 0
-        for decoded in container.decode(audio_stream):
-            if state["stop_event"].is_set() or state["playback_stop_event"].is_set():
-                return False
-            for frame in resampler.resample(decoded):
-                samples = np.asarray(frame.to_ndarray(), dtype=np.int16).reshape(-1)
-                for offset in range(0, len(samples), DJ_MIXER_FRAME_SAMPLES):
+
+        async def enqueue_resampled_frame(frame) -> bool:
+            nonlocal position
+            samples = np.asarray(frame.to_ndarray(), dtype=np.int16).reshape(-1)
+            for offset in range(0, len(samples), DJ_MIXER_FRAME_SAMPLES):
+                if state["stop_event"].is_set() or state["playback_stop_event"].is_set():
+                    return False
+                if state["skip_event"].is_set():
+                    await drain_audio_queue(state.get("music_audio_queue"))
+                    return False
+                while not state["pause_event"].is_set():
                     if state["stop_event"].is_set() or state["playback_stop_event"].is_set():
                         return False
                     if state["skip_event"].is_set():
                         await drain_audio_queue(state.get("music_audio_queue"))
                         return False
-                    while not state["pause_event"].is_set():
-                        if state["stop_event"].is_set() or state["playback_stop_event"].is_set():
-                            return False
-                        if state["skip_event"].is_set():
-                            await drain_audio_queue(state.get("music_audio_queue"))
-                            return False
-                        await asyncio.sleep(0.04)
-                    chunk = samples[offset:offset + DJ_MIXER_FRAME_SAMPLES]
-                    if not len(chunk):
-                        continue
-                    if fade_samples:
-                        fade_in = min(1.0, max(0.0, (position + len(chunk)) / fade_samples))
-                        fade_out = 1.0
-                        if total_samples is not None:
-                            remaining = max(0, total_samples - position)
-                            if remaining < fade_samples:
-                                fade_out = min(1.0, remaining / fade_samples)
-                        gain = min(fade_in, fade_out)
-                        if gain < 0.999:
-                            chunk = np.clip(
-                                chunk.astype(np.float32) * gain,
-                                -32768, 32767
-                            ).astype(np.int16)
-                    await enqueue_audio_samples(state.get("music_audio_queue"), chunk)
-                    position += len(chunk)
+                    await asyncio.sleep(0.04)
+
+                chunk = samples[offset:offset + DJ_MIXER_FRAME_SAMPLES]
+                if not len(chunk):
+                    continue
+                if fade_samples:
+                    fade_in = min(1.0, max(0.0, (position + len(chunk)) / fade_samples))
+                    fade_out = 1.0
+                    if total_samples is not None:
+                        remaining_samples = max(0, total_samples - position)
+                        if remaining_samples < fade_samples:
+                            fade_out = min(1.0, remaining_samples / fade_samples)
+                    gain = min(fade_in, fade_out)
+                    if gain < 0.999:
+                        chunk = np.clip(
+                            chunk.astype(np.float32) * gain,
+                            -32768, 32767
+                        ).astype(np.int16)
+
+                queued = await enqueue_music_audio_samples(thread_id, state, chunk)
+                if not queued:
+                    if state["skip_event"].is_set():
+                        await drain_audio_queue(state.get("music_audio_queue"))
+                    return False
+                position += len(chunk)
+            return True
+
+        for decoded in container.decode(audio_stream):
+            if state["stop_event"].is_set() or state["playback_stop_event"].is_set():
+                return False
+            for frame in resampler.resample(decoded):
+                if not await enqueue_resampled_frame(frame):
+                    return False
+
+        # Flush PyAV's resampler at EOF so the final decoded samples are not lost.
+        try:
+            delayed_frames = resampler.resample(None)
+        except (TypeError, ValueError, AttributeError):
+            delayed_frames = []
+        for frame in delayed_frames:
+            if not await enqueue_resampled_frame(frame):
+                return False
         return True
     finally:
         container.close()
+
 
 async def dj_playback_loop(
     thread_id: str,
