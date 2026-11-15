@@ -1608,3 +1608,10 @@ def test_action_instructions_never_claim_success_before_result():
     from katherine_ai import build_ai_instructions
     prompt = build_ai_instructions({"ayuda"}, "action")
     assert "no confirmes éxito antes del resultado" in prompt
+
+
+
+def test_base_instructions_are_warm_and_tactful_about_spelling():
+    assert "responde con calidez genuina" in BASE_INSTRUCTIONS
+    assert "Nunca avergüences" in BASE_INSTRUCTIONS
+    assert "No corrijas jerga, abreviaturas, nombres propios" in BASE_INSTRUCTIONS
