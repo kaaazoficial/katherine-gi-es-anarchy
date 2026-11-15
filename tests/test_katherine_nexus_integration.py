@@ -249,6 +249,9 @@ def test_affectionate_compliment_to_katherine_gets_a_warm_reply(monkeypatch):
         command_calls.append(event["message"]["content"])
 
     monkeypatch.setattr(katherine, "enqueue_message_for_speech", no_speech)
+    async def no_spelling(*_args, **_kwargs):
+        return False
+    monkeypatch.setattr(katherine, "maybe_send_spelling_feedback", no_spelling)
     monkeypatch.setattr(katherine, "send_message", fake_send)
     monkeypatch.setattr(katherine, "handle_command", capture_command)
     monkeypatch.setattr(katherine, "record_user", lambda *args, **kwargs: None)
