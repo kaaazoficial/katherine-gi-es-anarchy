@@ -3623,7 +3623,7 @@ def ensure_speech_worker_running(thread_id: str, state: dict | None = None) -> b
     task = current.get("speech_task")
     if task is not None and not task.done():
         return True
-    if not ensure_audio_mixer_running(key, current):
+    if current.get("speech_audio_source") is None:
         return False
     current["speech_task"] = asyncio.create_task(
         speech_queue_worker(key),
@@ -4205,12 +4205,6 @@ async def enable_room_reading(thread_id: str):
 
     state = DJ_ROOMS[str(thread_id)]
     state["reading_enabled"] = True
-    if not ensure_audio_mixer_running(str(thread_id), state):
-        state["reading_enabled"] = False
-        return False, (
-            "La salida de audio todavía se está recuperando. "
-            "Vuelve a ejecutar !leer en unos segundos."
-        )
     if not ensure_speech_worker_running(str(thread_id), state):
         state["reading_enabled"] = False
         return False, "No pude iniciar el lector TTS. Revisa los registros de audio e inténtalo otra vez."
@@ -4329,7 +4323,6 @@ async def enqueue_message_for_speech(event: dict, source: str):
         )
         metrics["tts_messages_enqueued"] += 1
         metrics["tts_priority_enqueued" if is_directed else "tts_regular_enqueued"] += 1
-        ensure_audio_mixer_running(thread_id, state)
         ensure_speech_worker_running(thread_id, state)
     except asyncio.QueueFull:
         metrics["tts_messages_dropped"] += 1
