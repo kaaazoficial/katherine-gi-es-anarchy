@@ -487,3 +487,181 @@ def test_take_audio_frame_keeps_extra_input_for_next_tick():
     expected = np.concatenate((pending, incoming))
     assert np.array_equal(frame, expected[:480])
     assert np.array_equal(remainder, expected[480:])
+
+
+
+def test_split_complete_audio_frames_keeps_decoder_boundaries_contiguous():
+    np = katherine.np
+    first = np.arange(300, dtype=np.int16)
+    second = np.arange(300, dtype=np.int16) + 300
+
+    frames, pending = katherine.split_complete_audio_frames(
+        np.empty(0, dtype=np.int16), first
+    )
+    assert frames == []
+    assert len(pending) == 300
+
+    frames, pending = katherine.split_complete_audio_frames(pending, second)
+    assert len(frames) == 1
+    assert len(frames[0]) == 480
+    assert np.array_equal(frames[0], np.arange(480, dtype=np.int16))
+    assert len(pending) == 120
+    assert np.array_equal(pending, np.arange(480, 600, dtype=np.int16))
+
+    third = np.arange(840, dtype=np.int16) + 600
+    frames, pending = katherine.split_complete_audio_frames(pending, third)
+    assert len(frames) == 2
+    assert all(len(frame) == 480 for frame in frames)
+    joined = np.concatenate(frames + [pending])
+    assert np.array_equal(joined, np.arange(600, 1440, dtype=np.int16))
+
+
+def test_audio_mixer_does_not_publish_silence_and_sends_queued_speech(monkeypatch):
+    import types
+
+    np = katherine.np
+    thread_id = "tts-mixer-idle-test"
+    captured = []
+
+    class FakeAudioSource:
+        async def capture_frame(self, frame):
+            captured.append(bytes(frame.data))
+
+    class FakeAudioFrame:
+        @staticmethod
+        def create(sample_rate, channels, samples):
+            assert sample_rate == 48000
+            assert channels == 1
+            assert samples == 480
+            return types.SimpleNamespace(data=bytearray(samples * 2))
+
+    monkeypatch.setattr(
+        katherine,
+        "livekit_rtc",
+        types.SimpleNamespace(AudioFrame=FakeAudioFrame),
+    )
+
+    async def scenario():
+        state = {
+            "stop_event": asyncio.Event(),
+            "music_audio_queue": asyncio.Queue(maxsize=8),
+            "speech_audio_queue": asyncio.Queue(maxsize=8),
+            "speaking": asyncio.Event(),
+            "audio_source": FakeAudioSource(),
+            "volume": 0.75,
+            "duck_enabled": True,
+            "mixer_task": None,
+        }
+        katherine.DJ_ROOMS[thread_id] = state
+        try:
+            task = asyncio.create_task(katherine.audio_mixer_loop(thread_id))
+            state["mixer_task"] = task
+            await asyncio.sleep(0.035)
+            assert captured == []
+
+            await state["speech_audio_queue"].put(
+                np.full(480, 1234, dtype=np.int16)
+            )
+            for _ in range(20):
+                if captured:
+                    break
+                await asyncio.sleep(0.01)
+            assert captured
+            spoken = np.frombuffer(captured[0], dtype=np.int16)
+            assert len(spoken) == 480
+            assert np.all(spoken == 1234)
+        finally:
+            state["stop_event"].set()
+            task = state.get("mixer_task")
+            if task and not task.done():
+                await task
+            katherine.DJ_ROOMS.pop(thread_id, None)
+
+    asyncio.run(scenario())
+
+
+def test_enqueue_message_for_speech_puts_plain_user_text_in_the_queue(monkeypatch):
+    thread_id = "tts-enqueue-test"
+    queued = []
+
+    async def fake_putter(queue, text):
+        queued.append(text)
+
+    monkeypatch.setattr(katherine, "ensure_audio_mixer_running", lambda *args: True)
+    monkeypatch.setattr(katherine, "ensure_speech_worker_running", lambda *args: True)
+
+    async def scenario():
+        state = {
+            "reading_enabled": True,
+            "speech_queue": asyncio.Queue(maxsize=20),
+            "speech_priority_queue": asyncio.Queue(maxsize=5),
+            "speech_recent": {},
+            "tts_read_links": False,
+            "tts_read_mentions": False,
+        }
+        katherine.DJ_ROOMS[thread_id] = state
+        try:
+            event = {
+                "threadId": thread_id,
+                "message": {
+                    "content": "Hola, buenas tardes a todos.",
+                    "author": {"uid": "member-123", "nickname": "Viajero"},
+                    "mentions": [],
+                },
+            }
+            await katherine.enqueue_message_for_speech(event, "developer")
+            assert state["speech_queue"].qsize() == 1
+            assert state["speech_queue"].get_nowait() == "Hola, buenas tardes a todos."
+            assert state["speech_priority_queue"].empty()
+        finally:
+            katherine.DJ_ROOMS.pop(thread_id, None)
+
+    asyncio.run(scenario())
+
+
+def test_enable_room_reading_starts_mixer_and_tts_worker(monkeypatch):
+    thread_id = "tts-enable-test"
+
+    async def fake_ensure_voice_room(value):
+        assert value == thread_id
+        katherine.DJ_ROOMS[thread_id] = {
+            "stop_event": asyncio.Event(),
+            "audio_source": object(),
+            "reading_enabled": False,
+            "speech_task": None,
+            "mixer_task": None,
+        }
+        return True, "connected"
+
+    async def wait_until_stopped(value):
+        await katherine.DJ_ROOMS[value]["stop_event"].wait()
+
+    monkeypatch.setattr(katherine, "load_tts_dependency", lambda: True)
+    monkeypatch.setattr(katherine, "load_audio_dependencies", lambda: True)
+    monkeypatch.setattr(katherine, "ensure_voice_room", fake_ensure_voice_room)
+    monkeypatch.setattr(katherine, "audio_mixer_loop", wait_until_stopped)
+    monkeypatch.setattr(katherine, "speech_queue_worker", wait_until_stopped)
+
+    async def scenario():
+        try:
+            ok, message = await katherine.enable_room_reading(thread_id)
+            assert ok, message
+            state = katherine.DJ_ROOMS[thread_id]
+            assert state["reading_enabled"] is True
+            assert state["mixer_task"] is not None
+            assert not state["mixer_task"].done()
+            assert state["speech_task"] is not None
+            assert not state["speech_task"].done()
+        finally:
+            state = katherine.DJ_ROOMS.get(thread_id)
+            if state:
+                state["stop_event"].set()
+                tasks = [
+                    task for task in (state.get("mixer_task"), state.get("speech_task"))
+                    if task is not None
+                ]
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+            katherine.DJ_ROOMS.pop(thread_id, None)
+
+    asyncio.run(scenario())
