@@ -965,6 +965,8 @@ WIKIMEDIA_API = "https://commons.wikimedia.org/w/api.php"
 CCMIXTER_API = "https://ccmixter.org/api/query"
 AUDIUS_API = "https://api.audius.co/v1"
 AUDIUS_APP_NAME = "KatherineAnarchy"
+FREESOUND_API = "https://freesound.org/apiv2"
+FREESOUND_API_KEY = os.getenv("FREESOUND_API_KEY", "").strip()
 IA_ALLOWED_LICENSES = {
     "creativecommons.org/publicdomain/zero/1.0": "CC0 · Dominio público",
     "creativecommons.org/publicdomain/mark/1.0": "Public Domain Mark",
@@ -2942,16 +2944,26 @@ def dj_audio_host_allowed(host: str) -> bool:
         or normalized.endswith(".ccmixter.org")
         or normalized == "audius.co"
         or normalized.endswith(".audius.co")
+        or normalized == "freesound.org"
+        or normalized.endswith(".freesound.org")
+        or normalized == "media.uncommonear.com"
     )
 
 
 def dj_audio_url_allowed(url: str) -> bool:
-    parsed = urlparse(str(url or ""))
+    """Reject malformed and non-HTTPS media URLs without leaking parser exceptions."""
+    try:
+        parsed = urlparse(str(url or ""))
+        hostname = parsed.hostname or ""
+        port = parsed.port
+    except (TypeError, ValueError):
+        return False
     return (
         parsed.scheme == "https"
+        and port in (None, 443)
         and not parsed.username
         and not parsed.password
-        and dj_audio_host_allowed(parsed.hostname or "")
+        and dj_audio_host_allowed(hostname)
     )
 
 
@@ -2968,6 +2980,8 @@ def dj_source_cooldown_key(host: str) -> str:
         return "ccmixter.org"
     if key == "audius.co" or key.endswith(".audius.co"):
         return "audius.co"
+    if key == "freesound.org" or key.endswith(".freesound.org"):
+        return "freesound.org"
     return key
 
 
@@ -2988,7 +3002,7 @@ def cool_down_dj_source(host: str, seconds: int = 600) -> None:
     key = dj_source_cooldown_key(host)
     if key in {
         "upload.wikimedia.org", "archive.org", "jamendo.com",
-        "ccmixter.org", "audius.co",
+        "ccmixter.org", "audius.co", "freesound.org",
     }:
         DJ_SOURCE_COOLDOWNS[key] = time.monotonic() + max(30, min(1800, int(seconds)))
         metrics["dj_source_cooldowns"] += 1
@@ -3472,6 +3486,119 @@ async def search_audius_audio(query: str, limit: int = 5) -> list[dict]:
     return tracks[:limit]
 
 
+
+
+async def search_freesound_audio(query: str, limit: int = 5) -> list[dict]:
+    """Search Freesound's official API; accept only CC0/CC-BY music-length previews."""
+    if not FREESOUND_API_KEY:
+        return []
+    query = clean_archive_value(query, 80)
+    if not query:
+        return []
+    cache_key = "freesound:" + query.casefold()
+    cached = DJ_SOURCE_CACHE.get(cache_key)
+    if cached and cached.get("expires", 0) > time.time():
+        return cached.get("tracks", [])[:limit]
+
+    response = await external_request(
+        "GET",
+        f"{FREESOUND_API}/search/",
+        params={
+            "query": f"{query} music",
+            "filter": 'duration:[30 TO *] license:(Attribution OR "Creative Commons 0")',
+            "sort": "score",
+            "page": 1,
+            "page_size": max(10, min(30, limit * 4)),
+            "fields": "id,name,username,license,duration,previews,url,filesize,tags",
+        },
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Token {FREESOUND_API_KEY}",
+            "User-Agent": "Katherine-AnarchyBot/3.4 (licensed music catalog; https://github.com/kaaazoficial/katherine-gi-es-anarchy)",
+        },
+        timeout=20,
+    )
+    if not response.is_success:
+        if response.status_code in (403, 429, 500, 502, 503, 504):
+            cool_down_dj_source("freesound.org", 600)
+        raise RuntimeError(f"Freesound respondió HTTP {response.status_code}.")
+
+    try:
+        payload = response.json()
+        records = payload.get("results") or []
+        if not isinstance(records, list):
+            raise ValueError("Freesound no devolvió una lista de resultados.")
+    except Exception as exc:
+        raise RuntimeError("No pude interpretar los resultados de Freesound.") from exc
+
+    tracks = []
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        license_name = str(item.get("license") or "").strip().casefold()
+        if license_name == "creative commons 0":
+            license_url = "https://creativecommons.org/publicdomain/zero/1.0/"
+            license_label = "CC0 · Dominio público"
+        elif license_name == "attribution":
+            license_url = "https://creativecommons.org/licenses/by/4.0/"
+            license_label = "CC BY 4.0 · Requiere atribución"
+        else:
+            # In particular, exclude Attribution NonCommercial.
+            continue
+
+        previews = item.get("previews") if isinstance(item.get("previews"), dict) else {}
+        audio_url = str(
+            previews.get("preview-hq-mp3")
+            or previews.get("preview-hq-ogg")
+            or ""
+        ).strip()
+        if not dj_audio_url_allowed(audio_url):
+            continue
+        extension = Path(urlsplit(audio_url).path).suffix.lower()
+        if extension not in DJ_AUDIO_EXTENSIONS:
+            continue
+        try:
+            duration_s = float(item.get("duration") or 0)
+            file_size = int(item.get("filesize") or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if duration_s < 30 or file_size > DJ_REMOTE_AUDIO_MAX_BYTES:
+            continue
+
+        identifier = str(item.get("id") or "").strip()
+        username = clean_archive_value(item.get("username") or "Autor no indicado")
+        if not identifier.isdigit():
+            continue
+        tracks.append({
+            "identifier": identifier,
+            "title": clean_archive_value(item.get("name") or "Pista de Freesound", 160),
+            "creator": username,
+            "license": license_label,
+            "license_url": license_url,
+            "item_url": f"https://freesound.org/s/{quote(identifier, safe='')}/",
+            "url": audio_url,
+            "extension": extension,
+            "duration": duration_s,
+            "credit_line": (
+                f"{clean_archive_value(item.get('name') or 'Pista', 120)} "
+                f"by {username} (Freesound, {license_label})"
+            ) if license_name == "attribution" else "",
+            "source": "Freesound",
+            "source_key": "freesound",
+        })
+        if len(tracks) >= limit:
+            break
+
+    DJ_SOURCE_CACHE[cache_key] = {
+        "tracks": tracks,
+        "expires": time.time() + 900,
+    }
+    if len(DJ_SOURCE_CACHE) > 300:
+        oldest = min(DJ_SOURCE_CACHE, key=lambda key: DJ_SOURCE_CACHE[key].get("expires", 0))
+        DJ_SOURCE_CACHE.pop(oldest, None)
+    return tracks[:limit]
+
+
 async def search_music_catalog(query: str, limit: int = 5) -> list[dict]:
     """Search configured catalogs concurrently, de-duplicate and rank their results."""
     providers = [
@@ -3480,6 +3607,8 @@ async def search_music_catalog(query: str, limit: int = 5) -> list[dict]:
         ("ccmixter", search_ccmixter_audio, "ccmixter.org"),
         ("audius", search_audius_audio, "api.audius.co"),
     ]
+    if FREESOUND_API_KEY:
+        providers.append(("freesound", search_freesound_audio, "freesound.org"))
     if JAMENDO_CLIENT_ID:
         providers.append(("jamendo", search_jamendo_audio, "jamendo.com"))
 
@@ -4699,7 +4828,10 @@ async def enqueue_message_for_speech(event: dict, source: str):
 
 async def download_dj_audio(url: str, file_extension: str | None = None) -> Path:
     """Stream a catalog track to disk with allowlist, DNS pinning and strict byte caps."""
-    parsed = urlparse(str(url))
+    try:
+        parsed = urlparse(str(url))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("El enlace de audio está mal formado.") from exc
     if not dj_audio_url_allowed(url):
         raise ValueError("El enlace no pertenece a una fuente musical autorizada.")
 
@@ -4837,17 +4969,22 @@ async def download_dj_audio(url: str, file_extension: str | None = None) -> Path
         if total_bytes < 1024:
             raise RuntimeError("El archivo descargado está vacío o incompleto.")
 
-        container = pyav.open(str(temp_path), mode="r")
+        try:
+            container = pyav.open(str(temp_path), mode="r")
+        except Exception as exc:
+            raise ValueError(
+                f"El archivo descargado no se puede decodificar ({type(exc).__name__})."
+            ) from exc
         try:
             audio_stream = next(
                 (stream for stream in container.streams if stream.type == "audio"),
                 None
             )
             if audio_stream is None:
-                raise RuntimeError("El archivo descargado no contiene una pista de audio.")
+                raise ValueError("El archivo descargado no contiene una pista de audio.")
             first_frame = next(container.decode(audio_stream), None)
             if first_frame is None:
-                raise RuntimeError("La pista no contiene frames de audio decodificables.")
+                raise ValueError("La pista no contiene frames de audio decodificables.")
         finally:
             container.close()
 
@@ -4892,12 +5029,14 @@ def _iter_audio_decode_frames(
 
         total_samples = None
         try:
-            if audio_stream.duration is not None and audio_stream.time_base is not None:
+            stream_duration = getattr(audio_stream, "duration", None)
+            stream_time_base = getattr(audio_stream, "time_base", None)
+            if stream_duration is not None and stream_time_base is not None:
                 total_samples = max(
                     0,
-                    int(float(audio_stream.duration * audio_stream.time_base) * 48000),
+                    int(float(stream_duration * stream_time_base) * 48000),
                 )
-        except (TypeError, ValueError, OverflowError):
+        except (AttributeError, TypeError, ValueError, OverflowError):
             total_samples = None
         yield ("duration", total_samples, None)
 
@@ -12119,11 +12258,14 @@ Uso: !enciclopedia <nombre>""",
                 ok, result, selected, _ = await start_dj_search_with_fallback(
                     thread, saved.get("tracks", []), index
                 )
-                await send_message(
-                    thread,
-                    f"🎧 Ahora suena: {selected.get('title')}" if ok and selected else f"DJ: {result}",
-                    source, reply
-                )
+                if ok and selected:
+                    credit = str(selected.get("credit_line") or "").strip()
+                    answer = f"🎧 Ahora suena: {selected.get('title')}"
+                    if credit:
+                        answer += f"\nCréditos: {credit}"
+                else:
+                    answer = f"DJ: {result}"
+                await send_message(thread, answer, source, reply)
             elif action == "quitar":
                 try:
                     position = int(args[1])
@@ -12488,6 +12630,9 @@ Uso: !enciclopedia <nombre>""",
             DJ_ARCHIVE_CACHE.pop("search:" + " ".join(archive_terms).casefold(), None)
             DJ_SOURCE_CACHE.pop("commons:" + normalized_query.casefold(), None)
             DJ_SOURCE_CACHE.pop("jamendo:" + normalized_query.casefold(), None)
+            DJ_SOURCE_CACHE.pop("ccmixter:" + normalized_query.casefold(), None)
+            DJ_SOURCE_CACHE.pop("audius:" + normalized_query.casefold(), None)
+            DJ_SOURCE_CACHE.pop("freesound:" + normalized_query.casefold(), None)
             try:
                 results = await search_music_catalog(normalized_query, limit=5)
             except Exception as exc:
@@ -12573,12 +12718,21 @@ Uso: !enciclopedia <nombre>""",
                     f"en pausa ({max(1, (dj_source_cooldown_remaining('jamendo.com') + 59) // 60)} min)"
                     if dj_source_is_cooled("jamendo.com") else "configurado, sin pausa temporal"
                 )
+            freesound_status = (
+                "no configurado: añade FREESOUND_API_KEY en Render"
+                if not FREESOUND_API_KEY else
+                (
+                    f"en pausa ({max(1, (dj_source_cooldown_remaining('freesound.org') + 59) // 60)} min)"
+                    if dj_source_is_cooled("freesound.org") else "configurado, sin pausa temporal"
+                )
+            )
             await send_message(
                 thread,
                 "FUENTES MUSICALES DE KATHERINE\n"
                 f"• Internet Archive: {archive_status}.\n"
                 f"• Wikimedia Commons: {commons_status}; puede pausarse si el CDN bloquea la descarga.\n"
                 f"• Jamendo: {jamendo_status}.\n"
+                f"• Freesound: {freesound_status}.\n"
                 "Una pista solo se inicia si supera los controles de licencia, tamaño, descarga, formato y decodificación. "
                 "Si un proveedor devuelve 401/403/429/5xx, se pausa temporalmente y Katherine prueba otra fuente.\n"
                 "Búsqueda por ambiente: !dj ambiente estudiar|trabajar|relajarse|dormir|jugar|combate|triste|feliz.",
@@ -12879,7 +13033,10 @@ async def start_dj_search_with_fallback(
     """Try the selected track and later search results if a file cannot be validated."""
     if not tracks:
         return False, "No hay pistas disponibles.", None, None
-    start = max(0, min(len(tracks) - 1, int(selected_index)))
+    try:
+        start = max(0, min(len(tracks) - 1, int(selected_index)))
+    except (TypeError, ValueError, OverflowError):
+        return False, "El número de pista seleccionado no es válido.", None, None
     last_error = "No pude preparar ninguna pista."
     candidate_order = list(range(start, len(tracks))) + list(range(0, start))
     blocked_sources: set[str] = set()
@@ -12887,11 +13044,24 @@ async def start_dj_search_with_fallback(
         "archive": "archive.org",
         "commons": "upload.wikimedia.org",
         "jamendo": "jamendo.com",
+        "ccmixter": "ccmixter.org",
+        "audius": "api.audius.co",
+        "freesound": "freesound.org",
     }
     for index in candidate_order:
         track = tracks[index]
+        if not isinstance(track, dict):
+            metrics["dj_fallback_tracks_skipped"] += 1
+            last_error = "El catálogo devolvió un resultado musical inválido."
+            continue
         source_key = str(track.get("source_key") or "").strip().lower()
-        track_host = source_hosts.get(source_key) or (urlsplit(str(track.get("url") or "")).hostname or "")
+        try:
+            parsed_candidate = urlsplit(str(track.get("url") or ""))
+            track_host = source_hosts.get(source_key) or (parsed_candidate.hostname or "")
+        except (TypeError, ValueError):
+            metrics["dj_fallback_tracks_skipped"] += 1
+            last_error = "El catálogo devolvió un enlace musical mal formado."
+            continue
         cooldown_key = dj_source_cooldown_key(track_host)
         if cooldown_key in blocked_sources or dj_source_is_cooled(cooldown_key):
             metrics["dj_fallback_tracks_skipped"] += 1
