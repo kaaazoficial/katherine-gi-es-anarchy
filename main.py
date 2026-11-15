@@ -5702,7 +5702,7 @@ def cleanup_dj_audio_file(path: str | Path | None) -> bool:
     """Remove ordinary temporary files, but leave cache-owned files to the TTL cleaner."""
     if not path or dj_audio_path_is_cached(path):
         return False
-    cleanup_dj_audio_file(path)
+    Path(path).unlink(missing_ok=True)
     return True
 
 
@@ -5846,6 +5846,18 @@ async def download_dj_audio(url: str, file_extension: str | None = None) -> Path
             cleanup_dj_audio_file_cache(
                 protected_paths={cache_path}
             )
+            cached_total = sum(
+                max(0, int(item.get("size", 0)))
+                for item in DJ_AUDIO_FILE_CACHE.values()
+                if isinstance(item, dict)
+            )
+            if (
+                len(DJ_AUDIO_FILE_CACHE) > DJ_AUDIO_FILE_CACHE_MAX_ENTRIES
+                or cached_total > DJ_AUDIO_FILE_CACHE_MAX_BYTES
+            ):
+                # Keep the returned download as a normal temporary file when the
+                # remaining overage belongs to other rooms' active tracks.
+                DJ_AUDIO_FILE_CACHE.pop(cache_key, None)
         return downloaded_path
 
 
