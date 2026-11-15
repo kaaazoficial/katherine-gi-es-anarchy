@@ -676,3 +676,116 @@ def test_enable_room_reading_starts_mixer_and_tts_worker(monkeypatch):
             katherine.DJ_ROOMS.pop(thread_id, None)
 
     asyncio.run(scenario())
+
+
+def test_music_enqueue_restarts_a_stopped_mixer_and_delivers_frames(monkeypatch):
+    thread_id = "dj-mixer-recovery-test"
+    consumed = []
+    finished = asyncio.Event()
+
+    async def fake_mixer(key):
+        state = katherine.DJ_ROOMS[key]
+        queue = state["music_audio_queue"]
+        while not state["stop_event"].is_set():
+            try:
+                frame = await asyncio.wait_for(queue.get(), timeout=0.05)
+            except asyncio.TimeoutError:
+                if len(consumed) >= 2:
+                    finished.set()
+                    return
+                continue
+            consumed.append(frame.copy())
+            if len(consumed) >= 2:
+                finished.set()
+                return
+
+    monkeypatch.setattr(katherine, "audio_mixer_loop", fake_mixer)
+
+    async def scenario():
+        state = {
+            "stop_event": asyncio.Event(),
+            "playback_stop_event": asyncio.Event(),
+            "skip_event": asyncio.Event(),
+            "music_audio_queue": asyncio.Queue(maxsize=1),
+            "mixer_task": None,
+        }
+        katherine.DJ_ROOMS[thread_id] = state
+        try:
+            samples = np.arange(960, dtype=np.int16)
+            assert await katherine.enqueue_music_audio_samples(thread_id, state, samples)
+            await asyncio.wait_for(finished.wait(), timeout=1.0)
+            assert len(consumed) == 2
+            assert np.array_equal(np.concatenate(consumed), samples)
+            assert state["mixer_task"] is not None
+        finally:
+            state["stop_event"].set()
+            task = state.get("mixer_task")
+            if task and not task.done():
+                await task
+            katherine.DJ_ROOMS.pop(thread_id, None)
+
+    asyncio.run(scenario())
+
+
+def test_dj_playback_flushes_samples_retained_by_pyav_resampler(monkeypatch):
+    import types
+
+    thread_id = "dj-resampler-flush-test"
+    delayed = np.full(480, 2468, dtype=np.int16)
+    enqueued = []
+
+    class FakeFrame:
+        def to_ndarray(self):
+            return delayed.reshape(1, -1)
+
+    class FakeResampler:
+        def __init__(self, **kwargs):
+            self.flush_called = False
+
+        def resample(self, frame):
+            if frame is None:
+                self.flush_called = True
+                return [FakeFrame()]
+            return []
+
+    class FakeContainer:
+        streams = [types.SimpleNamespace(type="audio", duration=None, time_base=None)]
+
+        def decode(self, stream):
+            yield object()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        katherine, "pyav",
+        types.SimpleNamespace(
+            open=lambda *args, **kwargs: FakeContainer(),
+            AudioResampler=FakeResampler,
+        ),
+    )
+
+    async def fake_enqueue(key, state, samples):
+        enqueued.append(np.asarray(samples, dtype=np.int16).copy())
+        return True
+
+    monkeypatch.setattr(katherine, "enqueue_music_audio_samples", fake_enqueue)
+    monkeypatch.setattr(katherine, "DJ_ROOMS", {thread_id: {
+        "stop_event": asyncio.Event(),
+        "playback_stop_event": asyncio.Event(),
+        "skip_event": asyncio.Event(),
+        "pause_event": asyncio.Event(),
+        "music_audio_queue": asyncio.Queue(maxsize=2),
+        "transition_ms": 0,
+    }})
+
+    result = asyncio.run(
+        katherine._dj_play_single(
+            thread_id, __import__("pathlib").Path("unused.mp3"),
+            katherine.DJ_ROOMS[thread_id],
+        )
+    )
+
+    assert result is True
+    assert len(enqueued) == 1
+    assert np.array_equal(enqueued[0], delayed)
