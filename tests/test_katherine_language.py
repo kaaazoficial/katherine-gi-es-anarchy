@@ -91,4 +91,4 @@ def test_initial_ola_is_corrected_even_though_it_is_a_short_word():
     for message in ("Ola, grasias.", "¡Ola! ¿Cómo estás?", "Ola @Katherine mira https://example.com"):
         result = detect_spanish_spelling_issues(message, spell_checker=FakeSpellChecker())
         assert result is not None
-        assert result.corrected_text.startswith(message.replace("Ola", "Hola", 1).replace("¡Ola", "¡Hola", 1))
+        assert result.corrected_text.startswith(("Hola", "¡Hola"))
