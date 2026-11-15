@@ -4,7 +4,7 @@ from __future__ import annotations
 import unicodedata
 
 
-SEPARATOR = "[C] ══════════════════════════════"
+SEPARATOR = "[C] ───────────── ✦ ─────────────"
 CATEGORY_TITLES = (
     "1. AYUDA E INTELIGENCIA ARTIFICIAL",
     "2. GENSHIN IMPACT",
@@ -157,7 +157,7 @@ def _command_help_sections(prefix: str):
 
 
 def _format_section(title: str, entries: list[tuple[bool, str]]) -> list[str]:
-    lines = [f"[CB] {title}", "[C]"]
+    lines = [f"[CB] ✦ {title} ✦", "[C]"]
     for is_heading, value in entries:
         lines.append(f"[CB] {value}" if is_heading else f"[C] {value}")
     return lines
@@ -165,10 +165,10 @@ def _format_section(title: str, entries: list[tuple[bool, str]]) -> list[str]:
 
 def _intro_lines(prefix: str) -> list[str]:
     return [
-        "[CB] KATHERINE · GUÍA DE COMANDOS",
+        "[CB] ✦ KATHERINE · GUÍA DE COMANDOS ✦",
         f"[C] Prefijo principal: {prefix} (También acepta ! y -)",
         f"[C] Usa {prefix}ayuda <categoría> para consultar una sola sección.",
-        "[C] Guía de texto, sin paneles ni botones.",
+        "[C] Catálogo de comandos · Accesos y funciones.",
         "[C]",
     ]
 
@@ -251,7 +251,7 @@ def filter_commands_help_text(help_text: str, topic: str | None = None) -> str:
                 prefix = line.removeprefix("[C] Prefijo principal: ").split(" (", 1)[0].strip() or "!"
                 break
         return (
-            "[CB] KATHERINE · GUÍA DE COMANDOS\n"
+            "[CB] ✦ KATHERINE · GUÍA DE COMANDOS ✦\n"
             f"[C] Categoría no reconocida. Disponibles: ia, genshin, social, juegos, musica, multimedia, admin.\n"
             f"[C] Ejemplo: {prefix}ayuda genshin."
         )
