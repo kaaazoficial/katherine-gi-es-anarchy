@@ -534,7 +534,7 @@ def test_music_mixer_ignores_tts_queue_and_publishes_music_only(monkeypatch):
     class FakeAudioFrame:
         @staticmethod
         def create(sample_rate, channels, samples):
-            assert (sample_rate, channels, samples) == (48000, 1, 480)
+            assert (sample_rate, channels, samples) == (48000, 1, 960)
             return types.SimpleNamespace(data=bytearray(samples * 2))
 
     monkeypatch.setattr(
@@ -571,6 +571,11 @@ def test_music_mixer_ignores_tts_queue_and_publishes_music_only(monkeypatch):
             await state["music_audio_queue"].put(
                 np.full(480, 4321, dtype=np.int16)
             )
+            await asyncio.sleep(0.025)
+            assert captured == []
+            await state["music_audio_queue"].put(
+                np.full(480, 4321, dtype=np.int16)
+            )
             for _ in range(20):
                 if captured:
                     break
@@ -604,7 +609,7 @@ def test_music_mixer_keeps_internal_buffer_bounded(monkeypatch):
     class FakeAudioFrame:
         @staticmethod
         def create(sample_rate, channels, samples):
-            assert (sample_rate, channels, samples) == (48000, 1, 480)
+            assert (sample_rate, channels, samples) == (48000, 1, 960)
             return types.SimpleNamespace(data=bytearray(samples * 2))
 
     monkeypatch.setattr(
@@ -614,7 +619,7 @@ def test_music_mixer_keeps_internal_buffer_bounded(monkeypatch):
 
     async def scenario():
         queue = asyncio.Queue(maxsize=16)
-        for value in range(12):
+        for value in range(16):
             await queue.put(np.full(480, value + 1, dtype=np.int16))
         state = {
             "stop_event": asyncio.Event(),
@@ -638,8 +643,8 @@ def test_music_mixer_keeps_internal_buffer_bounded(monkeypatch):
                     break
                 await asyncio.sleep(0.005)
             assert len(captured) >= 3
-            assert queue.qsize() >= 8
-            assert state["music_pending_samples"] <= 480
+            assert queue.qsize() >= 10
+            assert state["music_pending_samples"] <= 960
         finally:
             state["stop_event"].set()
             task = state.get("mixer_task")
@@ -958,7 +963,8 @@ def test_dj_playback_flushes_samples_retained_by_pyav_resampler(monkeypatch):
 
     assert result is True
     assert len(enqueued) == 1
-    assert np.array_equal(enqueued[0], delayed)
+    assert np.array_equal(enqueued[0][:480], delayed)
+    assert np.count_nonzero(enqueued[0][480:]) == 0
 
 
 
@@ -1047,8 +1053,7 @@ def test_dj_decoder_pads_only_the_final_partial_pcm_frame(monkeypatch):
     )
 
     assert result is True
-    assert len(enqueued) == 2
-    assert np.array_equal(enqueued[0], decoded_samples[:480])
-    assert np.array_equal(enqueued[1][:120], decoded_samples[480:])
-    assert np.count_nonzero(enqueued[1][120:]) == 0
+    assert len(enqueued) == 1
+    assert np.array_equal(enqueued[0][:600], decoded_samples)
+    assert np.count_nonzero(enqueued[0][600:]) == 0
     assert state["music_decoder_finished"] is True
