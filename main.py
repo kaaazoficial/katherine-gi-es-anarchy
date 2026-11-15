@@ -341,6 +341,49 @@ def get_user(uid: str):
         return dict(row) if row else None
 
 
+def get_user_profile(uid: str, viewer_uid: str) -> tuple[dict | None, int]:
+    """Read a profile and its viewer-relative affinity in one SQLite query."""
+    with db_session() as db:
+        row = db.execute(
+            """SELECT u.*, COALESCE(a.score,0) AS viewer_affinity
+               FROM users AS u
+               LEFT JOIN affinities AS a
+                 ON a.uid=? AND a.target_uid=u.uid
+               WHERE u.uid=?""",
+            (str(viewer_uid), str(uid)),
+        ).fetchone()
+    if row is None:
+        return None, 0
+    profile = dict(row)
+    affinity = int(profile.pop("viewer_affinity", 0) or 0)
+    return profile, affinity
+
+
+def find_user_profile_by_nickname(
+    nickname: str, scope_key: str | None, viewer_uid: str
+) -> tuple[dict | None, int]:
+    """Resolve a local nickname and its affinity without a second DB session."""
+    params: list[Any] = [str(viewer_uid), str(nickname).lstrip("@")]
+    sql = (
+        "SELECT u.*, COALESCE(a.score,0) AS viewer_affinity "
+        "FROM users AS u LEFT JOIN affinities AS a "
+        "ON a.uid=? AND a.target_uid=u.uid "
+        "WHERE lower(u.nickname)=lower(?)"
+    )
+    if scope_key:
+        prefix = str(scope_key) + ":"
+        sql += " AND substr(u.uid,1,?)=?"
+        params.extend([len(prefix), prefix])
+    sql += " ORDER BY u.last_seen DESC LIMIT 1"
+    with db_session() as db:
+        row = db.execute(sql, tuple(params)).fetchone()
+    if row is None:
+        return None, 0
+    profile = dict(row)
+    affinity = int(profile.pop("viewer_affinity", 0) or 0)
+    return profile, affinity
+
+
 def find_user_by_nickname(nickname: str, scope_key: str | None = None):
     with db_session() as db:
         sql = "SELECT * FROM users WHERE lower(nickname)=lower(?)"
@@ -429,6 +472,18 @@ def get_moderation_warnings(thread_id: str, target_uid: str, limit: int = 10):
             (str(thread_id), str(target_uid), max(1, min(30, int(limit))))
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def count_active_moderation_warnings(thread_id: str, target_uid: str) -> int:
+    """Count active warnings in SQL instead of loading and scanning detail rows."""
+    with db_session() as db:
+        row = db.execute(
+            """SELECT COUNT(*) AS total
+               FROM moderation_warnings
+               WHERE thread_id=? AND target_uid=? AND active=1""",
+            (str(thread_id), str(target_uid)),
+        ).fetchone()
+    return int(row["total"] or 0) if row else 0
 
 
 def revoke_moderation_warning(thread_id: str, warning_id: int, moderator_uid: str) -> bool:
@@ -907,6 +962,9 @@ send_history_bot = deque()
 send_history_chat = defaultdict(deque)
 
 cache: dict[str, tuple[float, Any]] = {}
+# Duplicate Genshin DB misses share one request per event loop. Completed tasks
+# are removed immediately and never become a persistent result or user cache.
+_GAME_REQUEST_INFLIGHT: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 polls: dict[str, dict] = {}
 AUTO_REPLY_CHAT_COOLDOWN: dict[str, float] = {}
 AUTO_REPLY_USER_COOLDOWN: dict[tuple[str, str], float] = {}
@@ -6460,6 +6518,34 @@ async def start_dj_room(
 # GENSHIN DATABASE API# ---------------------------------------------------------------------------
 # GENSHIN DATABASE API
 # ---------------------------------------------------------------------------
+async def _await_shared_game_request(key: str, request_factory):
+    """Coalesce concurrent identical Genshin API misses without caching tasks."""
+    loop = asyncio.get_running_loop()
+    loop_tasks = _GAME_REQUEST_INFLIGHT.get(loop)
+    if loop_tasks is None:
+        loop_tasks = {}
+        _GAME_REQUEST_INFLIGHT[loop] = loop_tasks
+
+    task = loop_tasks.get(key)
+    if task is None or task.done():
+        task = loop.create_task(request_factory())
+        loop_tasks[key] = task
+
+        def discard_completed(done_task):
+            if loop_tasks.get(key) is done_task:
+                loop_tasks.pop(key, None)
+            if not loop_tasks:
+                _GAME_REQUEST_INFLIGHT.pop(loop, None)
+
+        task.add_done_callback(discard_completed)
+        metrics["game_api_unique_requests"] += 1
+    else:
+        metrics["game_api_singleflight_waits"] += 1
+
+    # One cancelled webhook must not cancel the shared request for other chats.
+    return await asyncio.shield(task)
+
+
 async def game_data(folder: str, query: str, extra_params: dict | None = None):
     clean_query = strip_game_scope_qualifier(query)
     clean_query = clean_query or str(query or "").strip()
@@ -6467,50 +6553,55 @@ async def game_data(folder: str, query: str, extra_params: dict | None = None):
     key = f"{folder}:{clean_query.casefold()}:{options_key}"
 
     if key in cache and cache[key][0] > time.time():
+        metrics["game_api_cache_hits"] += 1
         return cache[key][1]
+    metrics["game_api_cache_misses"] += 1
 
-    params = {
-        "query": clean_query,
-        "dumpResult": "true",
-        "matchNames": "true",
-        "matchAltNames": "true",
-        "matchAliases": "true",
-        "queryLanguages": "english,spanish",
-        "resultLanguage": "spanish"
-    }
-    if extra_params:
-        params.update(extra_params)
+    async def fetch_game_data():
+        params = {
+            "query": clean_query,
+            "dumpResult": "true",
+            "matchNames": "true",
+            "matchAltNames": "true",
+            "matchAliases": "true",
+            "queryLanguages": "english,spanish",
+            "resultLanguage": "spanish"
+        }
+        if extra_params:
+            params.update(extra_params)
 
-    try:
-        response = await external_request(
-            "GET", f"{GAME_API}/{folder}", params=params, timeout=18
-        )
-        response.raise_for_status()
-        payload = response.json()
-        data = unwrap_genshin_db_response(payload)
+        try:
+            response = await external_request(
+                "GET", f"{GAME_API}/{folder}", params=params, timeout=18
+            )
+            response.raise_for_status()
+            payload = response.json()
+            data = unwrap_genshin_db_response(payload)
 
-        # dumpResult envelopes may describe a failed match rather than contain
-        # an entity. Never cache or expose those diagnostics as encyclopedia data.
-        if data is None or data == {} or data == []:
+            # dumpResult envelopes may describe a failed match rather than contain
+            # an entity. Never cache or expose those diagnostics as encyclopedia data.
+            if data is None or data == {} or data == []:
+                return None
+
+            cache[key] = (time.time() + 21600, data)
+
+            if len(cache) > 400:
+                cleanup_expired_state()
+                while len(cache) > 400:
+                    cache.pop(next(iter(cache)))
+
+            return data
+
+        except Exception as exc:
+            logging.warning(
+                "Genshin API %s/%s: %s",
+                folder,
+                clean_query,
+                exc
+            )
             return None
 
-        cache[key] = (time.time() + 21600, data)
-
-        if len(cache) > 400:
-            cleanup_expired_state()
-            while len(cache) > 400:
-                cache.pop(next(iter(cache)))
-
-        return data
-
-    except Exception as exc:
-        logging.warning(
-            "Genshin API %s/%s: %s",
-            folder,
-            clean_query,
-            exc
-        )
-        return None
+    return await _await_shared_game_request(key, fetch_game_data)
 
 
 def normalize_game_entity_name(value: Any) -> str:
@@ -6730,39 +6821,45 @@ def describe_game(data: Any, fallback: str, folder: str | None = None) -> str:
 
 
 async def game_stats(folder: str, query: str):
-    key = f"stats:{folder}:{query.casefold()}"
+    clean_query = str(query or "").strip()
+    key = f"stats:{folder}:{clean_query.casefold()}"
 
     if key in cache and cache[key][0] > time.time():
+        metrics["game_api_cache_hits"] += 1
         return cache[key][1]
+    metrics["game_api_cache_misses"] += 1
 
-    params = {
-        "folder": folder,
-        "query": query,
-        "queryLanguages": "english,spanish"
-    }
+    async def fetch_game_stats():
+        params = {
+            "folder": folder,
+            "query": clean_query,
+            "queryLanguages": "english,spanish"
+        }
 
-    try:
-        response = await external_request(
-            "GET", f"{GAME_API}/stats", params=params, timeout=18
-        )
-        response.raise_for_status()
-        data = response.json()
+        try:
+            response = await external_request(
+                "GET", f"{GAME_API}/stats", params=params, timeout=18
+            )
+            response.raise_for_status()
+            data = response.json()
 
-        if isinstance(data, dict):
-            if "result" in data and isinstance(data["result"], dict):
-                data = data["result"]
-            cache[key] = (time.time() + 21600, data)
-            return data
+            if isinstance(data, dict):
+                if "result" in data and isinstance(data["result"], dict):
+                    data = data["result"]
+                cache[key] = (time.time() + 21600, data)
+                return data
 
-    except Exception as exc:
-        logging.warning(
-            "No se pudieron consultar estadísticas de %s (%s): %s",
-            query,
-            folder,
-            exc
-        )
+        except Exception as exc:
+            logging.warning(
+                "No se pudieron consultar estadísticas de %s (%s)",
+                clean_query,
+                folder,
+                type(exc).__name__,
+            )
 
-    return None
+        return None
+
+    return await _await_shared_game_request(key, fetch_game_stats)
 
 
 async def character_stats(query: str):
@@ -11243,11 +11340,13 @@ async def _handle_command_impl(event: dict, source: str):
         target_uid, target_name = target_from_message(msg, args, scope_key)
 
         if target_uid:
-            user = get_user(target_uid)
+            user, affinity = get_user_profile(target_uid, uid)
         elif target_name:
-            user = find_user_by_nickname(target_name, scope_key)
+            user, affinity = find_user_profile_by_nickname(
+                target_name, scope_key, uid
+            )
         else:
-            user = get_user(uid)
+            user, affinity = get_user_profile(uid, uid)
 
         if not user:
             await send_message(
@@ -11258,8 +11357,6 @@ async def _handle_command_impl(event: dict, source: str):
                 reply
             )
             return
-
-        affinity = get_affinity(uid, user["uid"]) if user["uid"] != uid else 0
 
         lines = [
             f"PERFIL — {user['nickname']}",
@@ -13563,10 +13660,7 @@ Uso: !enciclopedia <nombre>""",
                 raw_uid, nickname, reason or "Sin motivo indicado", automatic=False
             )
             log_admin_action(thread, raw_uid, nickname, "advertencia_creada", f"ID #{warning_id} · {target_name}: {reason or 'Sin motivo indicado'}")
-            active_count = sum(
-                1 for item in get_moderation_warnings(thread, target_uid, 30)
-                if item["active"]
-            )
+            active_count = count_active_moderation_warnings(thread, target_uid)
             await send_message(thread, f"⚠️ Advertencia #{warning_id} registrada para @{target_name}. Total activas: {active_count}.", source, reply)
         else:
             warnings = get_moderation_warnings(thread, target_uid, 20)
