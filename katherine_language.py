@@ -42,7 +42,10 @@ _SPANISH_MARKERS = frozenset({
     "lo", "los", "me", "mi", "mucho", "muy", "necesito", "no", "nos",
     "para", "pero", "por", "porque", "que", "qué", "se", "si", "sí",
     "soy", "te", "tengo", "todo", "tu", "tú", "un", "una", "uno", "y",
-    "ya", "yo",
+    "ya", "yo", "por", "favor", "puedes", "quiero", "ayuda", "ayudar",
+    "necesitas", "pregunta", "preguntas", "hablar", "contigo", "estas",
+    "buenos", "dias", "días", "tardes", "noches", "problema", "electricidad",
+    "escribir", "perdon", "perdón",
 })
 _CHAT_SLANG = frozenset({
     "bro", "crack", "jaja", "jajaja", "jeje", "jejeje", "xd", "uwu",
