@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unicodedata
+from functools import lru_cache
 
 
 SEPARATOR = "[C] ══════════════════════════════"
@@ -177,8 +178,9 @@ def _utf16_length(value: str) -> int:
     return len(value.encode("utf-16-le")) // 2
 
 
+@lru_cache(maxsize=8)
 def build_commands_help_text(prefix: str = "!") -> str:
-    """Build the full guide in the user's exact Anarchy markup layout."""
+    """Build and cache the immutable full guide for each configured prefix."""
     prefix, sections = _command_help_sections(prefix)
     lines = _intro_lines(prefix)
     for index, (title, entries) in enumerate(sections):
@@ -187,8 +189,11 @@ def build_commands_help_text(prefix: str = "!") -> str:
     return "\n".join(lines)
 
 
-def build_commands_help_blocks(prefix: str = "!", max_units: int = 1800) -> list[str]:
-    """Return one category per message while preserving the supplied guide layout."""
+@lru_cache(maxsize=16)
+def _build_commands_help_blocks_cached(
+    prefix: str = "!", max_units: int = 1800
+) -> tuple[str, ...]:
+    """Cache immutable blocks; callers receive a fresh list from the public API."""
     if max_units < 200:
         raise ValueError("El tamaño mínimo de bloque debe ser al menos 200 unidades UTF-16.")
 
@@ -207,7 +212,12 @@ def build_commands_help_blocks(prefix: str = "!", max_units: int = 1800) -> list
         if _utf16_length(block) > max_units:
             raise ValueError(f"La categoría {title!r} supera el límite del mensaje.")
         blocks.append(block)
-    return blocks
+    return tuple(blocks)
+
+
+def build_commands_help_blocks(prefix: str = "!", max_units: int = 1800) -> list[str]:
+    """Return fresh category blocks backed by a short-lived immutable cache."""
+    return list(_build_commands_help_blocks_cached(prefix, max_units))
 
 
 _CATEGORY_ALIASES = {
@@ -237,8 +247,9 @@ def _normalize(value: str) -> str:
     return "".join(char for char in decomposed if not unicodedata.combining(char)).strip()
 
 
+@lru_cache(maxsize=64)
 def filter_commands_help_text(help_text: str, topic: str | None = None) -> str:
-    """Return a category using the same markers and section order as the full guide."""
+    """Cache immutable full/category help text for frequently requested topics."""
     requested = _normalize(topic or "")
     if not requested or requested in {"todo", "todos", "completo", "all"}:
         return str(help_text)
