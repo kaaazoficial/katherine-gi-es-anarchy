@@ -129,7 +129,7 @@ def _remove_vocative(text: str, start: int, end: int) -> str:
         result = f"{before} {after}"
     else:
         result = before or after
-    result = re.sub(r"\s+([,;:!?¡¿])", r"\1", result)
+    result = re.sub(r"\s+([,;:!?])", r"\1", result)
     result = re.sub(r"([,;:])(?:\s*[,;:])+", r"\1", result)
     result = re.sub(r"\s{2,}", " ", result)
     return result.strip(" ,;:—")
