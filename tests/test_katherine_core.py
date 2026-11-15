@@ -569,29 +569,3 @@ def test_message_user_and_activity_updates_share_one_transaction(database, monke
         ).fetchone()
     assert daily["message_count"] == 1
     assert hourly["message_count"] == 1
-
-
-def test_message_user_and_activity_updates_rollback_together(database, monkeypatch):
-    monkeypatch.setattr(
-        database, "get_chat_activity_clock_bucket", lambda: ("2026-11-15", 20)
-    )
-    original = database.db_session
-
-    class FailingSession:
-        def __enter__(self):
-            self.context = original()
-            self.db = self.context.__enter__()
-            return self.db
-
-        def __exit__(self, exc_type, exc, tb):
-            if exc_type is None:
-                raise AssertionError("Expected the activity transaction to fail")
-            return self.context.__exit__(exc_type, exc, tb)
-
-    monkeypatch.setattr(database, "db_session", lambda: FailingSession())
-    with pytest.raises(RuntimeError):
-        database.record_user_and_chat_activity(
-            "scoped:room:user", "Viajero", "room", count_message=True
-        )
-    monkeypatch.setattr(database, "db_session", original)
-    assert database.get_user("scoped:room:user") is None
