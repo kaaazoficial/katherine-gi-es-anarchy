@@ -3693,11 +3693,22 @@ async def audio_mixer_loop(thread_id: str) -> None:
             if DJ_ROOMS.get(str(thread_id)) is not state:
                 return
 
-            # Accumulate only enough 10 ms producer chunks for one 20 ms
-            # LiveKit frame. The buffer remains strictly bounded.
+            prebuffer_samples = DJ_MIXER_PREBUFFER_FRAMES * DJ_MIXER_FRAME_SAMPLES
+            target_buffer_samples = (
+                prebuffer_samples
+                if not state.get("music_buffer_started", False)
+                and not state.get("music_decoder_finished", False)
+                else output_samples
+            )
+
+            # Before playback starts, keep draining 10 ms producer chunks until
+            # the full prebuffer is reached. Once started, refill only enough
+            # for the next 20 ms LiveKit frame. Previously this stopped at one
+            # output frame while waiting for the larger prebuffer, deadlocking
+            # the producer against the bounded queue.
             while (
                 music_queue is not None
-                and len(pending_music) < output_samples
+                and len(pending_music) < target_buffer_samples
                 and len(pending_music) < max_pending_samples
             ):
                 try:
@@ -3712,7 +3723,6 @@ async def audio_mixer_loop(thread_id: str) -> None:
 
             state["music_pending_samples"] = len(pending_music)
 
-            prebuffer_samples = DJ_MIXER_PREBUFFER_FRAMES * DJ_MIXER_FRAME_SAMPLES
             if (
                 len(pending_music)
                 and not state.get("music_buffer_started", False)

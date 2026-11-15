@@ -1216,3 +1216,71 @@ def test_music_catalog_keeps_results_when_new_sources_fail(monkeypatch):
 
     assert len(tracks) == 1
     assert tracks[0]["url"] == "https://archive.org/good.mp3"
+
+
+
+def test_dj_mixer_drains_full_prebuffer_before_first_livekit_frame(monkeypatch):
+    import types
+
+    monkeypatch.setattr(katherine, "np", np)
+    captured = []
+    first_frame_sent = asyncio.Event()
+
+    class FakeAudioSource:
+        queued_duration = 0.0
+
+        async def capture_frame(self, frame):
+            captured.append(np.frombuffer(bytes(frame.data), dtype=np.int16).copy())
+            first_frame_sent.set()
+
+    class FakeAudioFrame:
+        @staticmethod
+        def create(sample_rate, channels, samples):
+            assert (sample_rate, channels, samples) == (48000, 1, 960)
+            return types.SimpleNamespace(data=bytearray(samples * 2))
+
+    monkeypatch.setattr(
+        katherine,
+        "livekit_rtc",
+        types.SimpleNamespace(AudioFrame=FakeAudioFrame),
+    )
+
+    async def scenario():
+        thread_id = "dj-prebuffer-deadlock-regression"
+        stop_event = asyncio.Event()
+        music_queue = asyncio.Queue(maxsize=32)
+        for index in range(katherine.DJ_MIXER_PREBUFFER_FRAMES):
+            await music_queue.put(
+                np.full(katherine.DJ_MIXER_FRAME_SAMPLES, index + 1, dtype=np.int16)
+            )
+
+        state = {
+            "stop_event": stop_event,
+            "music_audio_queue": music_queue,
+            "audio_source": FakeAudioSource(),
+            "speaking": asyncio.Event(),
+            "volume": 1.0,
+            "duck_enabled": False,
+            "music_duck_gain": 1.0,
+            "music_buffer_started": False,
+            "music_decoder_finished": False,
+            "music_pending_samples": 0,
+            "mixer_task": None,
+        }
+        katherine.DJ_ROOMS[thread_id] = state
+        task = asyncio.create_task(katherine.audio_mixer_loop(thread_id))
+        try:
+            await asyncio.wait_for(first_frame_sent.wait(), timeout=0.5)
+            assert state["music_buffer_started"] is True
+            assert len(captured) >= 1
+            expected = np.concatenate([
+                np.full(katherine.DJ_MIXER_FRAME_SAMPLES, index + 1, dtype=np.int16)
+                for index in range(2)
+            ])
+            assert np.array_equal(captured[0], expected)
+        finally:
+            stop_event.set()
+            await asyncio.wait_for(task, timeout=0.5)
+            katherine.DJ_ROOMS.pop(thread_id, None)
+
+    asyncio.run(scenario())
