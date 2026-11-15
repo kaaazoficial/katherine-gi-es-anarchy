@@ -203,6 +203,7 @@ def detect_spanish_spelling_issues(
         if len(replacements) >= 2:
             break
 
+    first_token_start = tokens[0].start(1)
     for match in tokens:
         start, end = match.span(1)
         if _overlaps(start, end, ranges):
@@ -210,7 +211,7 @@ def detect_spanish_spelling_issues(
         word = match.group(1)
         normalized = word.casefold()
         explicit = _COMMON_FIXES.get(normalized)
-        if normalized == "ola" and start == len(visible) - len(visible.lstrip()):
+        if normalized == "ola" and start == first_token_start:
             explicit = "hola"
         if explicit:
             replacements.append((
@@ -233,7 +234,7 @@ def detect_spanish_spelling_issues(
                     or normalized in _CHAT_SLANG
                     or normalized in _COMMON_FIXES
                     or normalized in _AMBIGUOUS_ACCENT_WORDS
-                    or (normalized == "ola" and start == len(visible) - len(visible.lstrip()))
+                    or (normalized == "ola" and start == first_token_start)
                     or any(old == word for _a, _b, _c, old in replacements)
                     or (word.isupper() and len(word) <= 8)
                 ):
