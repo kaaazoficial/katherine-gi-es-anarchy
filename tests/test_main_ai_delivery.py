@@ -468,10 +468,6 @@ async def test_reply_to_katherine_routes_plain_text_to_assistant(monkeypatch):
     async def no_speech(*_args, **_kwargs):
         return None
     monkeypatch.setattr(bot_main, "enqueue_message_for_speech", no_speech)
-    async def no_spelling(*_args, **_kwargs):
-        return False
-    monkeypatch.setattr(bot_main, "maybe_send_spelling_feedback", no_spelling)
-    monkeypatch.setattr(bot_main, "detect_spanish_spelling_issues", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(bot_main, "interpret_natural_request", lambda _text: None)
     captured = []
 
@@ -867,3 +863,59 @@ async def test_calling_katherine_without_a_question_gets_a_short_prompt(monkeypa
     }, "developer")
 
     assert sent == [("name-call-room", "Aquí estoy. ¿Qué necesitas?", "developer")]
+
+
+@pytest.mark.asyncio
+async def test_unaddressed_typos_do_not_trigger_spelling_corrections(monkeypatch):
+    monkeypatch.setattr(bot_main, "check_antispam_message", lambda *_: (False, None))
+
+    async def no_speech(*_args, **_kwargs):
+        return None
+    monkeypatch.setattr(bot_main, "enqueue_message_for_speech", no_speech)
+    monkeypatch.setattr(bot_main, "maybe_send_auto_reply", lambda *_args, **_kwargs: asyncio.sleep(0, result=False))
+    sent = []
+
+    async def capture_send(*args, **kwargs):
+        sent.append((args, kwargs))
+    monkeypatch.setattr(bot_main, "send_message", capture_send)
+
+    await bot_main.dispatch({
+        "type": "message", "threadId": "unaddressed-typo-room",
+        "message": {
+            "messageId": "ordinary-typo",
+            "content": "ola k ase, nesesito alluda con esto",
+            "author": {"uid": "user-typo", "nickname": "Usuario"},
+        },
+    }, "developer")
+
+    assert sent == []
+    assert bot_main.metrics["unaddressed_messages_ignored"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_spelling_errors_in_direct_katherine_request_are_preserved_for_ai(monkeypatch):
+    monkeypatch.setattr(bot_main, "check_antispam_message", lambda *_: (False, None))
+
+    async def no_speech(*_args, **_kwargs):
+        return None
+    monkeypatch.setattr(bot_main, "enqueue_message_for_speech", no_speech)
+    monkeypatch.setattr(bot_main, "interpret_natural_request", lambda _text: None)
+    captured = []
+
+    async def capture_command(event, source):
+        captured.append((event, source))
+    monkeypatch.setattr(bot_main, "handle_command", capture_command)
+
+    await bot_main.dispatch({
+        "type": "message", "threadId": "direct-typo-room",
+        "message": {
+            "messageId": "direct-typo",
+            "content": "Katherin, me podes alludar con esta pregunta?",
+            "author": {"uid": "user-typo", "nickname": "Usuario"},
+        },
+    }, "developer")
+
+    assert len(captured) == 1
+    routed_event, source = captured[0]
+    assert source == "developer"
+    assert routed_event["message"]["content"] == "!asistente me podes alludar con esta pregunta?"

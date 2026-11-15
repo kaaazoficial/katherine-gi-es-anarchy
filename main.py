@@ -63,7 +63,6 @@ from katherine_research import (
 from katherine_utilities import calculate_expression, format_calculation_result
 from katherine_images import validate_avatar_image_bytes
 from katherine_identity import detect_affectionate_expression, extract_katherine_call
-from katherine_language import detect_spanish_spelling_issues
 from katherine_link_analysis import (
     inspect_message_links,
     extract_message_urls,
@@ -845,8 +844,6 @@ cache: dict[str, tuple[float, Any]] = {}
 polls: dict[str, dict] = {}
 AUTO_REPLY_CHAT_COOLDOWN: dict[str, float] = {}
 AUTO_REPLY_USER_COOLDOWN: dict[tuple[str, str], float] = {}
-SPELLING_CHAT_COOLDOWN: dict[str, float] = {}
-SPELLING_USER_COOLDOWN: dict[tuple[str, str], float] = {}
 
 EXTERNAL_GLOBAL_LIMIT = asyncio.Semaphore(10)
 EXTERNAL_HOST_LIMITS = {}
@@ -957,6 +954,8 @@ DJ_TRANSITION_FADE_SECONDS = 0.5
 DJ_TTS_DUCK_GAIN = 0.28
 DJ_MIXER_FRAME_SAMPLES = 480
 DJ_MIXER_PREBUFFER_FRAMES = 5
+DJ_MIXER_MAX_PENDING_FRAMES = 8
+DJ_AUDIO_SOURCE_QUEUE_MS = 100
 DJ_AUDIO_ENQUEUE_TIMEOUT_SECONDS = 3.0
 JAMENDO_CLIENT_ID = os.getenv("JAMENDO_CLIENT_ID", "").strip()
 IA_BASE = "https://archive.org"
@@ -3387,13 +3386,14 @@ def split_complete_audio_frames(
 
 
 async def audio_mixer_loop(thread_id: str) -> None:
-    """Publish DJ music only; TTS has a separate LiveKit source and clock."""
+    """Publish DJ music from a bounded PCM buffer on its own LiveKit source."""
     state = DJ_ROOMS.get(str(thread_id))
     if not state:
         return
 
     music_queue = state.get("music_audio_queue")
     pending_music = np.empty(0, dtype=np.int16)
+    max_pending_samples = DJ_MIXER_MAX_PENDING_FRAMES * DJ_MIXER_FRAME_SAMPLES
     frame_seconds = DJ_MIXER_FRAME_SAMPLES / 48000.0
     loop = asyncio.get_running_loop()
     next_frame_at = loop.time()
@@ -3404,17 +3404,24 @@ async def audio_mixer_loop(thread_id: str) -> None:
             if DJ_ROOMS.get(str(thread_id)) is not state:
                 return
 
-            if music_queue is not None:
-                while True:
-                    try:
-                        incoming = music_queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
-                    if incoming is not None and len(incoming):
-                        pending_music = np.concatenate((
-                            pending_music,
-                            np.asarray(incoming, dtype=np.int16).reshape(-1),
-                        ))
+            # Pull at most one 10 ms frame per tick. Draining the whole queue
+            # here used to move an unbounded amount of audio into this local
+            # buffer, defeating asyncio.Queue(maxsize=...) backpressure.
+            if (
+                music_queue is not None
+                and len(pending_music) < max_pending_samples
+            ):
+                try:
+                    incoming = music_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    incoming = None
+                if incoming is not None and len(incoming):
+                    pending_music = np.concatenate((
+                        pending_music,
+                        np.asarray(incoming, dtype=np.int16).reshape(-1),
+                    ))
+
+            state["music_pending_samples"] = len(pending_music)
 
             if (
                 len(pending_music)
@@ -3428,6 +3435,8 @@ async def audio_mixer_loop(thread_id: str) -> None:
                 state["music_buffer_started"] = True
 
             if not len(pending_music):
+                if state.get("task") is not None and not state["task"].done():
+                    metrics["dj_music_buffer_underrun_ticks"] += 1
                 next_frame_at = loop.time()
                 await asyncio.sleep(0.005)
                 continue
@@ -3445,6 +3454,7 @@ async def audio_mixer_loop(thread_id: str) -> None:
             state["music_duck_gain"] = current_gain
 
             music_frame, pending_music = take_audio_frame(pending_music, None)
+            state["music_pending_samples"] = len(pending_music)
             mixed = np.clip(
                 music_frame.astype(np.float32)
                 * max(0.0, min(1.0, float(state.get("volume", 0.75))))
@@ -3461,6 +3471,15 @@ async def audio_mixer_loop(thread_id: str) -> None:
                 await state["audio_source"].capture_frame(audio_frame)
                 consecutive_failures = 0
                 metrics["audio_mixer_frames_sent"] += 1
+                queued_duration = float(
+                    getattr(state["audio_source"], "queued_duration", 0.0) or 0.0
+                )
+                metrics["dj_audio_queue_high_water_ms"] = max(
+                    float(metrics["dj_audio_queue_high_water_ms"]),
+                    queued_duration * 1000.0,
+                )
+                if queued_duration > 0.25:
+                    metrics["dj_audio_queue_over_250ms_ticks"] += 1
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -3495,6 +3514,7 @@ async def audio_mixer_loop(thread_id: str) -> None:
                 # Do not burst stale frames after an event-loop stall.
                 next_frame_at = loop.time()
     finally:
+        state["music_pending_samples"] = 0
         current = asyncio.current_task()
         if state.get("mixer_task") is current:
             state["mixer_task"] = None
@@ -3758,7 +3778,7 @@ async def ensure_voice_room(thread_id: str):
 
             # Extra bounded headroom absorbs short scheduler/network stalls.
             audio_source = livekit_rtc.AudioSource(
-                48000, 1, queue_size_ms=500
+                48000, 1, queue_size_ms=DJ_AUDIO_SOURCE_QUEUE_MS
             )
             audio_track = livekit_rtc.LocalAudioTrack.create_audio_track(
                 "katherine-voice",
@@ -3773,7 +3793,7 @@ async def ensure_voice_room(thread_id: str):
 
             # A second LiveKit source isolates TTS backpressure from DJ music.
             speech_audio_source = livekit_rtc.AudioSource(
-                48000, 1, queue_size_ms=500
+                48000, 1, queue_size_ms=DJ_AUDIO_SOURCE_QUEUE_MS
             )
             speech_audio_track = livekit_rtc.LocalAudioTrack.create_audio_track(
                 "katherine-tts",
@@ -3798,7 +3818,8 @@ async def ensure_voice_room(thread_id: str):
                 "speech_task": None,
                 "speech_queue": asyncio.Queue(maxsize=20),
                 "speech_priority_queue": asyncio.Queue(maxsize=5),
-                "music_audio_queue": asyncio.Queue(maxsize=8),
+                "music_audio_queue": asyncio.Queue(maxsize=16),
+                "music_pending_samples": 0,
                 "speech_audio_queue": asyncio.Queue(maxsize=8),
                 "mixer_task": None,
                 "duck_enabled": True,
@@ -3938,13 +3959,67 @@ async def stop_dj_room(
         await api("POST", f"/live-rooms/{thread_id}/leave", "community")
 
 
+async def reset_music_output(state: dict) -> None:
+    """Discard every layer of queued music without disconnecting the voice room."""
+    mixer_task = state.get("mixer_task")
+    current_task = asyncio.current_task()
+    if mixer_task and mixer_task is not current_task and not mixer_task.done():
+        mixer_task.cancel()
+        try:
+            await mixer_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logging.exception("[DJ] Error deteniendo el emisor musical")
+
+    source = state.get("audio_source")
+    clear_queue = getattr(source, "clear_queue", None)
+    if callable(clear_queue):
+        try:
+            clear_queue()
+        except Exception:
+            logging.exception("[DJ] No se pudo limpiar el búfer interno de LiveKit")
+
+    await drain_audio_queue(state.get("music_audio_queue"))
+    state["music_pending_samples"] = 0
+    state["music_buffer_started"] = False
+    state["music_decoder_finished"] = False
+    state["music_duck_gain"] = 1.0
+    if state.get("mixer_task") is mixer_task:
+        state["mixer_task"] = None
+
+
+async def wait_for_music_playout(state: dict, timeout: float = 4.0) -> bool:
+    """Wait until queued PCM and LiveKit's native audio buffer have played."""
+    queue = state.get("music_audio_queue")
+    source = state.get("audio_source")
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.1, float(timeout))
+    while queue is not None and (not queue.empty() or state.get("music_pending_samples", 0)):
+        if loop.time() >= deadline:
+            metrics["dj_music_playout_wait_timeouts"] += 1
+            logging.warning("[DJ] La cola musical no se vació antes del siguiente cambio.")
+            return False
+        await asyncio.sleep(0.01)
+
+    wait_for_playout = getattr(source, "wait_for_playout", None)
+    if callable(wait_for_playout):
+        remaining = max(0.1, deadline - loop.time())
+        try:
+            await asyncio.wait_for(wait_for_playout(), timeout=remaining)
+        except asyncio.TimeoutError:
+            metrics["dj_music_playout_wait_timeouts"] += 1
+            logging.warning("[DJ] LiveKit aún tenía audio pendiente al cerrar la pista.")
+            return False
+    return True
+
+
 async def stop_dj_playback(thread_id: str) -> bool:
-    """Stop music and clear its queue without disconnecting Katherine from LiveKit."""
+    """Stop music and clear all buffers without disconnecting Katherine from LiveKit."""
     key = str(thread_id)
     state = DJ_ROOMS.get(key)
     if not state:
         return False
-    await drain_audio_queue(state.get("music_audio_queue"))
     playback_stop = state.get("playback_stop_event")
     if playback_stop is not None:
         playback_stop.set()
@@ -3958,6 +4033,7 @@ async def stop_dj_playback(thread_id: str) -> bool:
             pass
         except Exception:
             logging.exception("[DJ] Error deteniendo la reproducción en %s", key)
+    await reset_music_output(state)
     for queued in list(state.get("queue") or []):
         temporary = queued.get("temporary") if isinstance(queued, dict) else None
         if temporary:
@@ -4698,6 +4774,9 @@ async def dj_playback_loop(
                     "developer"
                 )
 
+            if played_ok:
+                await wait_for_music_playout(state)
+
             repeat_mode = str(state.get("repeat_mode") or "off")
             if played_ok and repeat_mode == "one" and not state["skip_event"].is_set():
                 continue
@@ -4720,13 +4799,15 @@ async def dj_playback_loop(
             await cleanup_temporary(current_temporary)
             current_temporary = None
             state["temporary_audio_path"] = None
-            await drain_audio_queue(state.get("music_audio_queue"))
 
             if state["stop_event"].is_set() or state["playback_stop_event"].is_set():
                 break
             if state["skip_event"].is_set():
                 state["skip_event"].clear()
                 metrics["dj_tracks_skipped"] += 1
+                await reset_music_output(state)
+            elif not played_ok:
+                await reset_music_output(state)
 
             next_item = None
             while state["queue"] and not state["stop_event"].is_set():
@@ -4912,6 +4993,8 @@ async def start_dj_room(
         except Exception:
             logging.exception("[DJ] Error reemplazando la pista anterior")
 
+    await reset_music_output(state)
+
     for queued in list(state.get("queue", [])):
         temporary = queued.get("temporary")
         if temporary:
@@ -4920,7 +5003,6 @@ async def start_dj_room(
             except OSError:
                 pass
     state["queue"].clear()
-    await drain_audio_queue(state.get("music_audio_queue"))
 
     old_temporary = state.get("temporary_audio_path")
     if old_temporary:
@@ -8444,49 +8526,6 @@ async def maybe_send_auto_reply(thread_id: str, uid: str, nickname: str, content
             return True
     return False
 
-
-async def maybe_send_spelling_feedback(
-    thread_id: str, uid: str, nickname: str, content: str
-) -> bool:
-    """Offer gentle spelling feedback with bounded in-memory cooldowns only."""
-    thread_key = str(thread_id or "")
-    user_key = (thread_key, str(uid or nickname or "unknown"))
-    now = time.time()
-    if (
-        not thread_key
-        or SPELLING_CHAT_COOLDOWN.get(thread_key, 0) > now
-        or SPELLING_USER_COOLDOWN.get(user_key, 0) > now
-    ):
-        return False
-    try:
-        correction = await asyncio.to_thread(
-            detect_spanish_spelling_issues, str(content or "")
-        )
-    except Exception as exc:
-        logging.debug("[SPELLING] Detección omitida por error local: %s", type(exc).__name__)
-        return False
-    if not correction:
-        return False
-
-    safe_name = re.sub(r"[\r\n]+", " ", str(nickname or "")).strip()[:48]
-    greeting = f"{safe_name}, " if safe_name else ""
-    response = (
-        f"{greeting}creo que quisiste escribir: «{correction.corrected_text}». "
-        "Te entendí perfectamente; te lo comento por si te sirve. 😊"
-    )
-    SPELLING_CHAT_COOLDOWN[thread_key] = now + 12
-    SPELLING_USER_COOLDOWN[user_key] = now + 180
-    if len(SPELLING_CHAT_COOLDOWN) > 512:
-        SPELLING_CHAT_COOLDOWN.clear()
-    if len(SPELLING_USER_COOLDOWN) > 2048:
-        SPELLING_USER_COOLDOWN.clear()
-    metrics["spelling_corrections_sent"] += 1
-    logging.info(
-        "[SPELLING] Sugerencia enviada en %s (%s correcciones).",
-        thread_key, len(correction.corrections),
-    )
-    await send_message(thread_key, response, "developer")
-    return True
 
 
 def format_poll_results(poll: dict) -> str:
@@ -12979,19 +13018,6 @@ async def dispatch(event: dict, source: str):
                 return
             name_call = extract_katherine_call(incoming_text)
             if name_call is not None:
-                raw_uid = str(author_data.get("uid") or author_data.get("nickname") or "unknown")
-                if name_call:
-                    await maybe_send_spelling_feedback(
-                        str(event.get("threadId") or ""),
-                        raw_uid,
-                        str(author_data.get("nickname") or "Viajero"),
-                        incoming_text,
-                    )
-                    corrected_call = await asyncio.to_thread(
-                        detect_spanish_spelling_issues, name_call
-                    )
-                    if corrected_call:
-                        name_call = corrected_call.corrected_text
                 affection = detect_affectionate_expression(name_call)
                 if affection:
                     affectionate_replies = {
@@ -13080,13 +13106,9 @@ async def dispatch(event: dict, source: str):
                 scoped_user = scoped_uid(scope_key, raw_uid)
                 record_chat_activity(str(event.get("threadId") or ""), scoped_user, nickname)
                 metrics["unaddressed_messages_ignored"] += 1
-                auto_replied = await maybe_send_auto_reply(
+                await maybe_send_auto_reply(
                     str(event.get("threadId") or ""), raw_uid, nickname, incoming_text
                 )
-                if not auto_replied:
-                    await maybe_send_spelling_feedback(
-                        str(event.get("threadId") or ""), raw_uid, nickname, incoming_text
-                    )
         else:
             # Los comandos clásicos con prefijo siguen funcionando.
             await handle_command(event, source)
