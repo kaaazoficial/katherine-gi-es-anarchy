@@ -135,7 +135,10 @@ def test_audio_decoder_batch_preserves_frame_order():
     second = ("frame", np.array([3, 4], dtype=np.int16), 2)
     iterator = iter((first, second))
     batch = katherine._next_audio_decode_batch(iterator, batch_size=6)
-    assert batch[:2] == [first, second]
+    assert batch[0][0] == "frame"
+    assert batch[0][1].tolist() == [1, 2]
+    assert batch[1][0] == "frame"
+    assert batch[1][1].tolist() == [3, 4]
     assert batch[-1] is katherine._AUDIO_DECODE_EOF
     assert len(batch) == 3
 
