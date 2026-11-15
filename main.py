@@ -4005,46 +4005,42 @@ def clean_speech_text(content: str, include_links: bool = False, include_mention
 
 
 async def stream_speech_file(thread_id: str, file_path: str):
-    """Decode TTS and preserve sample continuity across PyAV decoder frames."""
+    """Stream TTS from its own LiveKit source; decode/resample off the event loop."""
     state = DJ_ROOMS.get(str(thread_id))
     if not state or not await asyncio.to_thread(load_audio_dependencies):
         return
-    container = pyav.open(file_path, mode="r")
-    pending = np.empty(0, dtype=np.int16)
+    speech_source = state.get("speech_audio_source")
+    if speech_source is None:
+        raise RuntimeError("La pista independiente de TTS no está publicada.")
 
-    async def send_full_frames(final: bool = False) -> None:
-        nonlocal pending
-        frames, pending = split_complete_audio_frames(pending)
-        if final and len(pending):
-            final_frame = np.pad(
-                pending,
-                (0, DJ_MIXER_FRAME_SAMPLES - len(pending)),
-                mode="constant",
-            )
-            frames.append(final_frame.astype(np.int16, copy=False))
-            pending = np.empty(0, dtype=np.int16)
-
-        loop = asyncio.get_running_loop()
-        next_frame_at = loop.time()
-        for frame in frames:
+    iterator = _iter_audio_decode_frames(file_path)
+    loop = asyncio.get_running_loop()
+    next_frame_at = loop.time()
+    try:
+        while True:
             if (
                 DJ_ROOMS.get(str(thread_id)) is not state
                 or state["stop_event"].is_set()
                 or not state.get("reading_enabled")
             ):
                 return
+
+            item = await _next_audio_decode_item_async(iterator)
+            if item is _AUDIO_DECODE_EOF:
+                break
+            kind, frame, sample_count = item
+            if kind != "frame":
+                continue
+
             tts_volume = max(0.0, min(1.0, float(state.get("tts_volume", 0.75))))
             if tts_volume <= 0:
                 frame = np.zeros_like(frame)
             elif tts_volume < 1:
                 frame = np.clip(
                     frame.astype(np.float32) * tts_volume,
-                    -32768, 32767
+                    -32768, 32767,
                 ).astype(np.int16)
 
-            speech_source = state.get("speech_audio_source")
-            if speech_source is None:
-                raise RuntimeError("La pista independiente de TTS no está publicada.")
             speech_frame = livekit_rtc.AudioFrame.create(
                 48000, 1, DJ_MIXER_FRAME_SAMPLES
             )
@@ -4056,53 +4052,23 @@ async def stream_speech_file(thread_id: str, file_path: str):
                     timeout=0.5,
                 )
             except asyncio.TimeoutError as exc:
-                raise RuntimeError("LiveKit no consumió el frame de voz a tiempo.") from exc
+                raise RuntimeError(
+                    "LiveKit no consumió el frame de voz a tiempo."
+                ) from exc
+
             metrics["tts_audio_frames_enqueued"] += 1
             next_frame_at += DJ_MIXER_FRAME_SAMPLES / 48000.0
             delay = next_frame_at - loop.time()
             if delay > 0:
                 await asyncio.sleep(delay)
             else:
+                # Do not burst stale TTS frames after a decode or scheduler stall.
                 next_frame_at = loop.time()
-
-    try:
-        audio_stream = next(
-            (stream for stream in container.streams if stream.type == "audio"),
-            None
-        )
-        if audio_stream is None:
-            raise ValueError("El audio TTS no contiene una pista de sonido.")
-        resampler = pyav.AudioResampler(
-            format="s16",
-            layout="mono",
-            rate=48000
-        )
-        for decoded in container.decode(audio_stream):
-            if (
-                DJ_ROOMS.get(str(thread_id)) is not state
-                or state["stop_event"].is_set()
-                or not state.get("reading_enabled")
-            ):
-                return
-            for frame in resampler.resample(decoded):
-                samples = np.asarray(frame.to_ndarray(), dtype=np.int16).reshape(-1)
-                if len(samples):
-                    pending = np.concatenate((pending, samples))
-                    await send_full_frames()
-
-        # Flush any samples retained by the resampler before padding the single
-        # final partial 10 ms frame, rather than padding at every decoder boundary.
-        try:
-            for frame in resampler.resample(None):
-                samples = np.asarray(frame.to_ndarray(), dtype=np.int16).reshape(-1)
-                if len(samples):
-                    pending = np.concatenate((pending, samples))
-                    await send_full_frames()
-        except (TypeError, ValueError, AttributeError):
-            pass
-        await send_full_frames(final=True)
     finally:
-        container.close()
+        try:
+            await asyncio.to_thread(iterator.close)
+        except Exception:
+            logging.debug("[TTS] No se pudo cerrar el iterador de decodificación.", exc_info=True)
 
 
 async def speech_queue_worker(thread_id: str):
