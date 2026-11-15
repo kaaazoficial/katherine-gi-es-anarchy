@@ -59,3 +59,25 @@ def test_does_not_trigger_for_casual_mentions_or_unrelated_names(message):
 )
 def test_detects_affectionate_expressions_without_explicit_negation(message, expected):
     assert detect_affectionate_expression(message) == expected
+
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("te adoro", "love"),
+        ("Katherine, te aprecio", "care"),
+        ("Katherine, mil gracias por escucharme", "gratitude"),
+        ("Katherine, eres muy linda", "compliment"),
+        ("Eres genial, Katherine", "compliment"),
+        ("Me caes muy bien, Katherine", "care"),
+        ("Katherine, holi", "greeting"),
+        ("Katherine, te extrañé", "miss_you"),
+        ("Katherine, no eres linda", None),
+        ("Katherine, no te adoro", None),
+    ],
+)
+def test_warm_messages_cover_gratitude_compliments_and_greetings(message, expected):
+    call = extract_katherine_call(message)
+    assert call is not None
+    assert detect_affectionate_expression(call) == expected
