@@ -4230,9 +4230,11 @@ async def enqueue_message_for_speech(event: dict, source: str):
         return
     recent[digest] = now
     is_directed = bool(re.match(r"^(?:oye[, ]+)?katherine\b", content, flags=re.I))
+    priority_queue = state.get("speech_priority_queue")
     queue = (
-        state.get("speech_priority_queue") or state["speech_queue"]
-        if is_directed else state["speech_queue"]
+        priority_queue
+        if is_directed and priority_queue is not None
+        else state["speech_queue"]
     )
     if queue.full():
         try:
@@ -4242,9 +4244,9 @@ async def enqueue_message_for_speech(event: dict, source: str):
             pass
     try:
         queue.put_nowait(speech_text)
-        logging.debug(
-            "[TTS] Mensaje agregado a lectura en %s (%s caracteres).",
-            thread_id, len(speech_text),
+        logging.info(
+            "[TTS] Mensaje encolado en %s (%s caracteres; prioridad=%s).",
+            thread_id, len(speech_text), is_directed,
         )
         metrics["tts_messages_enqueued"] += 1
         metrics["tts_priority_enqueued" if is_directed else "tts_regular_enqueued"] += 1
