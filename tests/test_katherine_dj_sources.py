@@ -30,6 +30,15 @@ def test_dj_audio_hosts_are_exact_and_https_only():
     assert katherine.dj_audio_url_allowed(
         "https://content-node.audius.co/audio/123.mp3"
     )
+    assert katherine.dj_audio_url_allowed(
+        "https://freesound.org/data/previews/12/12345_67890-hq.mp3"
+    )
+    assert katherine.dj_audio_url_allowed(
+        "https://cdn.freesound.org/previews/12/12345_67890-hq.mp3"
+    )
+    assert katherine.dj_audio_url_allowed(
+        "https://media.uncommonear.com/p/fp-0000000001.mp3"
+    )
     assert not katherine.dj_audio_url_allowed(
         "https://user:pass@archive.org/download/item/song.mp3"
     )
@@ -45,6 +54,8 @@ def test_dj_audio_hosts_are_exact_and_https_only():
     assert not katherine.dj_audio_url_allowed(
         "https://ccmixter.org.evil.example/song.mp3"
     )
+    assert not katherine.dj_audio_url_allowed("https://[broken-host/audio.mp3")
+    assert not katherine.dj_audio_url_allowed("https://media.uncommonear.com.evil.test/song.mp3")
 
 
 
@@ -127,10 +138,20 @@ def test_music_catalog_combines_sources_and_survives_one_failure(monkeypatch):
     async def audius(query, limit):
         return []
 
+    async def freesound(query, limit):
+        return []
+
+    async def uncommon_ear(query, limit):
+        return []
+
     monkeypatch.setattr(katherine, "search_archive_audio", archive)
     monkeypatch.setattr(katherine, "search_wikimedia_audio", commons)
     monkeypatch.setattr(katherine, "search_ccmixter_audio", ccmixter)
     monkeypatch.setattr(katherine, "search_audius_audio", audius)
+    monkeypatch.setattr(katherine, "search_freesound_audio", freesound)
+    monkeypatch.setattr(katherine, "search_uncommon_ear_audio", uncommon_ear)
+    monkeypatch.setattr(katherine, "FREESOUND_API_KEY", "test-freesound-key")
+    monkeypatch.setattr(katherine, "UNCOMMON_EAR_API_KEY", "test-uncommon-ear-key")
     monkeypatch.setattr(katherine, "search_jamendo_audio", jamendo)
     monkeypatch.setattr(katherine, "JAMENDO_CLIENT_ID", "test-client")
 
@@ -148,6 +169,10 @@ def test_music_catalog_raises_only_when_every_source_fails(monkeypatch):
     monkeypatch.setattr(katherine, "search_wikimedia_audio", fail)
     monkeypatch.setattr(katherine, "search_ccmixter_audio", fail)
     monkeypatch.setattr(katherine, "search_audius_audio", fail)
+    monkeypatch.setattr(katherine, "search_freesound_audio", fail)
+    monkeypatch.setattr(katherine, "search_uncommon_ear_audio", fail)
+    monkeypatch.setattr(katherine, "FREESOUND_API_KEY", "test-freesound-key")
+    monkeypatch.setattr(katherine, "UNCOMMON_EAR_API_KEY", "test-uncommon-ear-key")
     monkeypatch.setattr(katherine, "JAMENDO_CLIENT_ID", "")
 
     try:
@@ -878,6 +903,7 @@ def test_enable_room_reading_starts_tts_without_starting_music_mixer(monkeypatch
 
 def test_music_enqueue_restarts_a_stopped_mixer_and_delivers_frames(monkeypatch):
     monkeypatch.setattr(katherine, "np", np)
+    monkeypatch.setattr(katherine, "livekit_rtc", object())
     thread_id = "dj-mixer-recovery-test"
     consumed = []
     finished = asyncio.Event()
@@ -979,6 +1005,7 @@ def test_dj_playback_flushes_samples_retained_by_pyav_resampler(monkeypatch):
         "music_audio_queue": asyncio.Queue(maxsize=2),
         "transition_ms": 0,
     }})
+    katherine.DJ_ROOMS[thread_id]["pause_event"].set()
 
     result = asyncio.run(
         katherine._dj_play_single(
@@ -1070,6 +1097,7 @@ def test_dj_decoder_pads_only_the_final_partial_pcm_frame(monkeypatch):
         "music_audio_queue": asyncio.Queue(maxsize=2),
         "transition_ms": 0,
     }
+    state["pause_event"].set()
     monkeypatch.setattr(katherine, "DJ_ROOMS", {thread_id: state})
 
     result = asyncio.run(
@@ -1284,3 +1312,133 @@ def test_dj_mixer_drains_full_prebuffer_before_first_livekit_frame(monkeypatch):
             katherine.DJ_ROOMS.pop(thread_id, None)
 
     asyncio.run(scenario())
+
+
+
+def test_freesound_search_uses_preview_and_excludes_noncommercial_license(monkeypatch):
+    class FakeResponse:
+        is_success = True
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "results": [
+                    {
+                        "id": 12345,
+                        "name": "Ambient Piano",
+                        "username": "ArtistOne",
+                        "license": "Attribution",
+                        "duration": 120.0,
+                        "filesize": 1024,
+                        "url": "https://freesound.org/people/ArtistOne/sounds/12345/",
+                        "previews": {
+                            "preview-hq-mp3": "https://cdn.freesound.org/previews/12/12345_67890-hq.mp3"
+                        },
+                    },
+                    {
+                        "id": 12346,
+                        "name": "Noncommercial track",
+                        "username": "ArtistTwo",
+                        "license": "Attribution NonCommercial",
+                        "duration": 180.0,
+                        "filesize": 1024,
+                        "url": "https://freesound.org/people/ArtistTwo/sounds/12346/",
+                        "previews": {
+                            "preview-hq-mp3": "https://cdn.freesound.org/previews/12/12346_67890-hq.mp3"
+                        },
+                    },
+                ]
+            }
+
+    calls = []
+
+    async def fake_request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return FakeResponse()
+
+    monkeypatch.setattr(katherine, "FREESOUND_API_KEY", "test-freesound-key")
+    monkeypatch.setattr(katherine, "external_request", fake_request)
+    katherine.DJ_SOURCE_CACHE.pop("freesound:ambient piano", None)
+
+    tracks = asyncio.run(katherine.search_freesound_audio("ambient piano", limit=5))
+
+    assert len(tracks) == 1
+    assert tracks[0]["source"] == "Freesound"
+    assert tracks[0]["license"] == "CC BY 4.0 · Requiere atribución"
+    assert tracks[0]["url"].endswith("12345_67890-hq.mp3")
+    assert tracks[0]["credit_line"]
+    assert calls[0][2]["headers"]["Authorization"] == "Token test-freesound-key"
+    assert calls[0][2]["params"]["fields"].count("previews") == 1
+
+
+def test_uncommon_ear_search_uses_verified_commercial_cc_music_only(monkeypatch):
+    class FakeResponse:
+        is_success = True
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "tracks": [
+                    {
+                        "id": "fp-0000000001",
+                        "title": "Sunrise Walk",
+                        "artist": "Kevin MacLeod",
+                        "kind": "music",
+                        "duration_s": 90,
+                        "license": {
+                            "id": "cc0", "name": "CC0 1.0",
+                            "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                            "status": "verified",
+                        },
+                        "terms": {"commercial": True, "credit": "none", "share_alike": False},
+                        "credit_line": "Sunrise Walk by Kevin MacLeod",
+                        "preview_url": "https://media.uncommonear.com/p/fp-0000000001.mp3",
+                        "page_url": "https://uncommonear.com/browse?t=fp-0000000001",
+                    },
+                    {
+                        "id": "fp-0000000002",
+                        "title": "Unverified",
+                        "artist": "Artist",
+                        "kind": "music",
+                        "duration_s": 80,
+                        "license": {
+                            "id": "cc0",
+                            "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                            "status": "listed",
+                        },
+                        "terms": {"commercial": True, "share_alike": False},
+                        "preview_url": "https://media.uncommonear.com/p/fp-0000000002.mp3",
+                    },
+                ]
+            }
+
+    calls = []
+
+    async def fake_request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return FakeResponse()
+
+    monkeypatch.setattr(katherine, "UNCOMMON_EAR_API_KEY", "ue_test_key")
+    monkeypatch.setattr(katherine, "external_request", fake_request)
+    katherine.DJ_SOURCE_CACHE.pop("uncommon-ear:cinematic", None)
+
+    tracks = asyncio.run(katherine.search_uncommon_ear_audio("cinematic", limit=5))
+
+    assert len(tracks) == 1
+    assert tracks[0]["source"] == "Uncommon Ear"
+    assert tracks[0]["license"] == "CC0 · Dominio público"
+    assert tracks[0]["credit_line"] == "Sunrise Walk by Kevin MacLeod"
+    assert calls[0][2]["headers"]["Authorization"] == "Bearer ue_test_key"
+    assert calls[0][2]["params"]["commercial"] == "true"
+    assert calls[0][2]["params"]["share_alike"] == "false"
+
+
+def test_recoverable_dj_failure_includes_track_valueerror_and_runtimeerror_markers():
+    from katherine_astra import is_recoverable_dj_failure
+
+    assert is_recoverable_dj_failure("El enlace de audio está mal formado.")
+    assert is_recoverable_dj_failure("El archivo descargado no se puede decodificar (ValueError).")
+    assert is_recoverable_dj_failure("La descarga redirigió a un dominio no autorizado.")
+    assert not is_recoverable_dj_failure("No pude conectarme a la llamada (RuntimeError).")
