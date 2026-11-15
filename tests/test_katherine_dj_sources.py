@@ -1429,6 +1429,102 @@ def test_recoverable_dj_failure_includes_track_valueerror_and_runtimeerror_marke
 
 
 
+
+
+def test_uncommon_ear_search_uses_verified_commercial_tracks_and_preserves_credit(monkeypatch):
+    class FakeResponse:
+        is_success = True
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "tracks": [
+                    {
+                        "id": "ue-cc0", "title": "Quiet Dawn", "artist": "Artist One",
+                        "kind": "music", "duration_s": 95,
+                        "license": {"id": "cc0", "url": "https://creativecommons.org/publicdomain/zero/1.0/", "status": "verified"},
+                        "terms": {"commercial": True, "credit": "none", "share_alike": False},
+                        "attribution": "optional", "credit_line": "",
+                        "preview_url": "https://media.uncommonear.com/p/ue-cc0.mp3",
+                        "page_url": "https://uncommonear.com/browse?t=ue-cc0",
+                    },
+                    {
+                        "id": "ue-by", "title": "Ambient Piano", "artist": "Artist Two",
+                        "kind": "music", "duration_s": 120,
+                        "license": {"id": "cc-by-4.0", "url": "https://creativecommons.org/licenses/by/4.0/", "status": "verified"},
+                        "terms": {"commercial": True, "credit": "required", "share_alike": False},
+                        "attribution": "required", "credit_line": '"Ambient Piano" by Artist Two (CC BY 4.0)',
+                        "preview_url": "https://media.uncommonear.com/p/ue-by.mp3",
+                        "page_url": "https://uncommonear.com/browse?t=ue-by",
+                    },
+                    {
+                        "id": "ue-nc", "title": "Noncommercial", "artist": "Artist Three",
+                        "kind": "music", "duration_s": 100,
+                        "license": {"id": "cc-by-nc-4.0", "url": "https://creativecommons.org/licenses/by-nc/4.0/", "status": "verified"},
+                        "terms": {"commercial": False, "credit": "required", "share_alike": False},
+                        "attribution": "required", "credit_line": "Do not use",
+                        "preview_url": "https://media.uncommonear.com/p/ue-nc.mp3",
+                        "page_url": "https://uncommonear.com/browse?t=ue-nc",
+                    },
+                    {
+                        "id": "ue-unverified", "title": "Unverified", "artist": "Artist Four",
+                        "kind": "music", "duration_s": 100,
+                        "license": {"id": "cc0", "url": "https://creativecommons.org/publicdomain/zero/1.0/", "status": "listed"},
+                        "terms": {"commercial": True, "credit": "none", "share_alike": False},
+                        "attribution": "optional", "credit_line": "",
+                        "preview_url": "https://media.uncommonear.com/p/ue-unverified.mp3",
+                        "page_url": "https://uncommonear.com/browse?t=ue-unverified",
+                    },
+                    {
+                        "id": "ue-evil", "title": "Untrusted host", "artist": "Artist Five",
+                        "kind": "music", "duration_s": 100,
+                        "license": {"id": "cc0", "url": "https://creativecommons.org/publicdomain/zero/1.0/", "status": "verified"},
+                        "terms": {"commercial": True, "credit": "none", "share_alike": False},
+                        "attribution": "optional", "credit_line": "",
+                        "preview_url": "https://evil.example/ue-evil.mp3",
+                        "page_url": "https://uncommonear.com/browse?t=ue-evil",
+                    },
+                ]
+            }
+
+    calls = []
+
+    async def fake_request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return FakeResponse()
+
+    monkeypatch.setattr(katherine, "UNCOMMON_EAR_API_KEY", "test-uncommon-ear-key")
+    monkeypatch.setattr(katherine, "external_request", fake_request)
+    katherine.DJ_SOURCE_CACHE.pop("uncommon_ear:ambient piano", None)
+
+    tracks = asyncio.run(katherine.search_uncommon_ear_audio("ambient piano", limit=5))
+
+    assert [track["identifier"] for track in tracks] == ["ue-cc0", "ue-by"]
+    assert tracks[0]["license"].startswith("CC0")
+    assert tracks[0]["credit_line"] == ""
+    assert tracks[1]["license"].startswith("CC BY 4.0")
+    assert tracks[1]["credit_line"] == '"Ambient Piano" by Artist Two (CC BY 4.0)'
+    method, url, request = calls[0]
+    assert method == "GET"
+    assert url == "https://api.uncommonear.com/v1/search"
+    assert request["headers"]["Authorization"] == "Bearer test-uncommon-ear-key"
+    assert request["params"]["kind"] == "music"
+    assert request["params"]["commercial"] == "true"
+    assert request["params"]["share_alike"] == "false"
+
+
+def test_uncommon_ear_search_is_disabled_without_an_api_key(monkeypatch):
+    async def unexpected_request(*args, **kwargs):
+        raise AssertionError("Uncommon Ear must not be called without its API key")
+
+    monkeypatch.setattr(katherine, "UNCOMMON_EAR_API_KEY", "")
+    monkeypatch.setattr(katherine, "external_request", unexpected_request)
+    assert asyncio.run(katherine.search_uncommon_ear_audio("ambient piano")) == []
+    assert asyncio.run(katherine.search_uncommon_ear_audio("   ")) == []
+
+
+
 def test_openverse_search_filters_licenses_and_preserves_attribution(monkeypatch):
     class FakeResponse:
         is_success = True
