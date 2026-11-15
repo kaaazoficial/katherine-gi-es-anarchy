@@ -571,7 +571,7 @@ def test_message_user_and_activity_updates_share_one_transaction(database, monke
     assert hourly["message_count"] == 1
 
 
-def test_game_data_coalesces_concurrent_identical_requests(monkeypatch):
+async def test_game_data_coalesces_concurrent_identical_requests(monkeypatch):
     calls = 0
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -608,7 +608,7 @@ def test_game_data_coalesces_concurrent_identical_requests(monkeypatch):
     assert katherine.metrics["game_api_singleflight_waits"] >= 1
 
 
-def test_game_data_does_not_coalesce_different_queries(monkeypatch):
+async def test_game_data_does_not_coalesce_different_queries(monkeypatch):
     calls = []
 
     class Response:
