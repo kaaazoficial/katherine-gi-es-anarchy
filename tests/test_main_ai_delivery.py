@@ -570,7 +570,7 @@ async def test_send_message_keeps_at_name_literal_without_undocumented_mentions(
     )
 
     assert result["ok"] is True
-    assert captured == [{"content": "Hola @Ana, aquí tienes tu respuesta."}]
+    assert captured == [{"content": "[C] Hola @Ana, aquí tienes tu respuesta."}]
 
 
 @pytest.mark.asyncio
