@@ -20,14 +20,18 @@ La ayuda del chat (`!ayuda`) muestra el catálogo completo en siete secciones o 
 - Todos los comandos del catálogo y las acciones sociales (por ejemplo, `Katherine investigar comparar: ...`, `Katherine dj pausa`, `Katherine abrazo @usuario` o `Katherine perfil`) pueden invocarse directamente después de «Katherine». Se conservan los permisos originales y la mención aislada no activa el bot.
 - La síntesis cita las fuentes por número y dominio; páginas bloqueadas, no HTML o sin texto suficiente pueden omitirse. Los metadatos de Crossref/OpenAlex no garantizan acceso al texto completo y los derechos de Internet Archive/Jamendo dependen de cada ítem. La búsqueda no garantiza exhaustividad.
 
-## Administración por UID
+## Identidad del creador y administración por UID
 
-Los comandos marcados como `[ADMIN]` solo aceptan el UID entregado por Anarchy Apps en `message.author.uid`. No se usa el nickname como sustituto para otorgar permisos.
+Katherine separa la identidad del creador de los administradores:
+- `SINNER_UID`: un único UID exacto, reservado al creador. Habilita `!sinner`, respuestas personalizadas e interacciones exclusivas.
+- `ADMIN_UIDS`: lista independiente de UID administrativos, separada por comas, punto y coma o saltos de línea. No convierte a esos usuarios en el creador.
+- El creador también puede usar las herramientas administrativas, sin tener que incluir su UID en `ADMIN_UIDS`.
 
-En Render, configura la variable `ADMIN_UIDS` con uno o más UID. Se aceptan separadores de coma, punto y coma o salto de línea. Para conocer tu identificador ejecuta `!miuid` y copia el valor recibido. Tras modificar la variable, aplica los cambios y reinicia/despliega el servicio.
+Ambas identidades se validan exclusivamente contra `message.author.uid`; el nickname nunca concede privilegios. Ejecuta `!miuid` para consultar el UID de Anarchy Apps. En Render configura tu UID únicamente en `SINNER_UID`; conserva los demás UID en `ADMIN_UIDS`.
 
 ## Comandos privilegiados
 
+- `!sinner` [SOLO CREADOR]: centro privado, estado y acciones exclusivas.
 - `!estado`, `!fuentes`, `!saludfuentes`, `!metricas`, `!autotest`
 - `!centro`, `!nexus`
 - `!admin`, `!paneladmin`, `!guardian`
