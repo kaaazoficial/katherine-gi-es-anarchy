@@ -2131,3 +2131,112 @@ def test_dj_audio_cache_expiry_never_deletes_a_track_in_active_playback(monkeypa
     finally:
         katherine.DJ_AUDIO_FILE_CACHE.clear()
         cached_path.unlink(missing_ok=True)
+
+
+def test_audius_search_requests_json_stream_url_without_redirect(monkeypatch):
+    class FakeResponse:
+        is_success = True
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"data": [{
+                "id": "track_123",
+                "title": "Ambient Lights",
+                "isStreamable": True,
+                "user": {"name": "Independent Artist"},
+                "permalink": "https://audius.co/artist/ambient-lights",
+            }]}
+
+    calls = []
+
+    async def fake_request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return FakeResponse()
+
+    monkeypatch.setattr(katherine, "external_request", fake_request)
+    katherine.DJ_SOURCE_CACHE.pop("audius:ambient lights", None)
+    try:
+        tracks = asyncio.run(katherine.search_audius_audio("ambient lights", limit=5))
+        assert len(tracks) == 1
+        assert "no_redirect=true" in tracks[0]["url"]
+        assert calls[0][2]["params"]["query"] == "ambient lights"
+    finally:
+        katherine.DJ_SOURCE_CACHE.pop("audius:ambient lights", None)
+
+
+def test_resolve_audius_stream_url_uses_allowlisted_json_response(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        is_success = True
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"data": {"url": "https://media.uncommonear.com/audius-track.mp3"}}
+
+    async def fake_request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return FakeResponse()
+
+    monkeypatch.setattr(katherine, "external_request", fake_request)
+    resolved = asyncio.run(katherine.resolve_audius_stream_url(
+        "https://api.audius.co/v1/tracks/track_123/stream?app_name=KatherineAnarchy&no_redirect=true"
+    ))
+
+    assert resolved == "https://media.uncommonear.com/audius-track.mp3"
+    assert calls[0][2]["params"]["no_redirect"] == "true"
+    assert calls[0][2]["safe_public"] is True
+    assert calls[0][2]["max_response_bytes"] == 256 * 1024
+
+
+def test_resolve_audius_stream_url_rejects_untrusted_redirect_target(monkeypatch):
+    class FakeResponse:
+        is_success = True
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"data": {"url": "https://evil.example/track.mp3"}}
+
+    async def fake_request(*_args, **_kwargs):
+        return FakeResponse()
+
+    monkeypatch.setattr(katherine, "external_request", fake_request)
+    try:
+        asyncio.run(katherine.resolve_audius_stream_url(
+            "https://api.audius.co/v1/tracks/track_123/stream?app_name=KatherineAnarchy"
+        ))
+    except ValueError as exc:
+        assert "autorizada" in str(exc)
+    else:
+        raise AssertionError("Untrusted Audius stream URL must be rejected")
+
+
+def test_selected_music_does_not_silently_play_another_search_result(monkeypatch):
+    thread = "exact-selection-test"
+    selected = {"url": "https://archive.org/selected.mp3", "title": "Selected"}
+    alternative = {"url": "https://archive.org/alternative.mp3", "title": "Alternative"}
+    katherine.DJ_SEARCH_RESULTS[thread] = {
+        "search_id": "search-exact",
+        "tracks": [selected, alternative],
+        "query": "selected",
+        "expires": katherine.time.time() + 60,
+    }
+    calls = []
+
+    async def fake_start(thread_id, url, looping, track_metadata=None, enqueue=False):
+        calls.append((thread_id, url, track_metadata, enqueue))
+        return False, "No pude descargar o validar la canción (ValueError: prueba)."
+
+    monkeypatch.setattr(katherine, "start_dj_room", fake_start)
+    try:
+        ok, message, track = asyncio.run(katherine.select_dj_search_result(thread, "1"))
+        assert not ok
+        assert track is None
+        assert len(calls) == 1
+        assert calls[0][1] == selected["url"]
+        assert "No cambié a otra canción" in message
+    finally:
+        katherine.DJ_SEARCH_RESULTS.pop(thread, None)
