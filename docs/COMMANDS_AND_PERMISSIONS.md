@@ -23,7 +23,7 @@ La ayuda del chat (`!ayuda`) muestra el catálogo completo en siete secciones o 
 ## Identidad del creador y administración por UID
 
 Katherine separa la identidad del creador de los administradores:
-- `SINNER_UID`: un único UID exacto, reservado al creador. Habilita `!sinner`, respuestas personalizadas e interacciones exclusivas.
+- `SINNER_UID`: un único UID exacto, reservado al creador. Habilita respuestas personalizadas e interacciones exclusivas, además de la consola privada del creador.
 - `ADMIN_UIDS`: lista independiente de UID administrativos, separada por comas, punto y coma o saltos de línea. No convierte a esos usuarios en el creador.
 - El creador también puede usar las herramientas administrativas, sin tener que incluir su UID en `ADMIN_UIDS`.
 
@@ -31,7 +31,7 @@ Ambas identidades se validan exclusivamente contra `message.author.uid`; el nick
 
 ## Comandos privilegiados
 
-- `!sinner` [SOLO CREADOR]: centro privado, estado y acciones exclusivas.
+- `!sistema`, `!diagnostico`, `!rendimiento` y `!laboratorio` [SOLO CREADOR]: consola privada del creador.
 - `!estado`, `!fuentes`, `!saludfuentes`, `!metricas`, `!autotest`
 - `!centro`, `!nexus`
 - `!admin`, `!paneladmin`, `!guardian`
@@ -104,3 +104,13 @@ Katherine inspecciona automáticamente enlaces en mensajes entrantes y en edicio
 ## Retención de actividad
 
 `!actividad` utiliza agregados diarios por usuario con un máximo de siete días de retención automática. No se guardan textos de mensajes. Los mensajes ordinarios ya no actualizan el registro general de usuarios ni un contador acumulado de por vida; los datos necesarios para funciones explícitas (por ejemplo, puntos, afinidad o recompensas) siguen sujetos a sus plazos de expiración.
+
+
+### Consola privada del creador
+
+Los comandos siguientes se validan contra el UID exacto de `SINNER_UID`, no contra `ADMIN_UIDS`, y no se muestran en la ayuda pública:
+
+- `!sistema`: estado operativo, conexión con Anarchy, uptime, commit si Render lo expone, tareas activas y cantidad de administradores adicionales.
+- `!diagnostico`: integridad de SQLite, persistencia, tamaño de la base y estado de los proveedores.
+- `!rendimiento`: CPU no bloqueante, RSS y pico de RAM, memoria del contenedor, hilos, tareas, latencia y contadores de IA/audio.
+- `!laboratorio`: menú privado con `pruebas`, `ia` y `audio`. Las pruebas son deterministas y locales; las comprobaciones de IA/audio son pasivas, no llaman a proveedores, no consumen tokens y no cargan dependencias ni inician reproducción.
