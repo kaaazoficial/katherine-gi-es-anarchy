@@ -96,7 +96,7 @@ jobs:
                   continue
               try:
                   # Format: self-us | cumulative-us | module.
-              cumulative_us = float(fields[1].strip())
+                  cumulative_us = float(fields[1].strip())
               except (IndexError, ValueError):
                   continue
               module = fields[2].strip() if len(fields) > 2 else "unknown"
