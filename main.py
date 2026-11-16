@@ -31,9 +31,7 @@ from collections import defaultdict, deque
 from typing import Any
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urljoin, quote, urlparse, urlsplit, urlunsplit
-
-# Measure application-module import cost separately from startup I/O.
-MODULE_IMPORT_STARTED = time.perf_counter()
+from katherine_boot import IMPORT_STARTED_AT
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
@@ -15508,7 +15506,7 @@ async def startup():
     startup_started_at = time.perf_counter()
     logging.info(
         "[STARTUP_TIMING] python_import_to_lifespan=%.3fs",
-        time.perf_counter() - MODULE_IMPORT_STARTED,
+        time.perf_counter() - IMPORT_STARTED_AT,
     )
     phase_started_at = time.perf_counter()
     HTTP_CLIENT = httpx.AsyncClient(
