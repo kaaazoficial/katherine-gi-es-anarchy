@@ -136,7 +136,6 @@ def _command_help_sections(prefix: str):
             (True, "▸ Identidad y Estado"),
             (False, f"• {prefix}miuid — Consulta tu UID."),
             (False, f"• {prefix}estado — Estado general del bot [ADMIN]."),
-            (False, f"• {prefix}diagnostico — Almacenamiento, SQLite y proveedores [ADMIN]."),
             (True, "▸ Fuentes y Paneles"),
             (False, f"• {prefix}fuentes — Estado de proveedores [ADMIN]."),
             (False, f"• {prefix}metricas — Métricas agregadas del sistema [ADMIN]."),
