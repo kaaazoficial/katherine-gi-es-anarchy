@@ -36,8 +36,6 @@ import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, Response
 from katherine_config import SETTINGS
-from katherine_metrics import render_prometheus_metrics
-from katherine_matching import suggest_command
 from katherine_nexus import (
     cleanup_community_events,
     extract_message_id,
@@ -57,12 +55,7 @@ from katherine_ai import (
     KatherineAI, build_ai_session_key, build_ai_rate_key, is_bot_author, sanitize_ai_trace_text,
     validate_ai_tool_call
 )
-from katherine_research import (
-    search_web, fetch_public_page, build_source_context, parse_research_mode,
-    is_safe_public_url,
- )
 from katherine_utilities import calculate_expression, format_calculation_result
-from katherine_images import validate_avatar_image_bytes
 from katherine_identity import detect_affectionate_expression, extract_katherine_call
 from katherine_link_analysis import (
     inspect_message_links,
@@ -93,10 +86,79 @@ from katherine_help import (
 )
 from katherine_text import format_katherine_text
 
-try:
-    import psutil
-except ImportError:
-    psutil = None
+# Rarely used facilities are imported on their first actual request, not when
+# the webhook server starts. This keeps research, avatar decoding, metrics and
+# typo-suggestion libraries out of the critical cold-start path.
+_LAZY_MODULES: dict[str, Any] = {}
+_LAZY_MODULE_LOCK = threading.Lock()
+
+
+def _lazy_module(module_name: str):
+    module = _LAZY_MODULES.get(module_name)
+    if module is not None:
+        return module
+    with _LAZY_MODULE_LOCK:
+        module = _LAZY_MODULES.get(module_name)
+        if module is None:
+            module = importlib.import_module(module_name)
+            _LAZY_MODULES[module_name] = module
+    return module
+
+
+def render_prometheus_metrics(*args, **kwargs):
+    return _lazy_module("katherine_metrics").render_prometheus_metrics(*args, **kwargs)
+
+
+def suggest_command(*args, **kwargs):
+    return _lazy_module("katherine_matching").suggest_command(*args, **kwargs)
+
+
+def search_web(*args, **kwargs):
+    return _lazy_module("katherine_research").search_web(*args, **kwargs)
+
+
+def fetch_public_page(*args, **kwargs):
+    return _lazy_module("katherine_research").fetch_public_page(*args, **kwargs)
+
+
+def build_source_context(*args, **kwargs):
+    return _lazy_module("katherine_research").build_source_context(*args, **kwargs)
+
+
+def parse_research_mode(*args, **kwargs):
+    return _lazy_module("katherine_research").parse_research_mode(*args, **kwargs)
+
+
+def is_safe_public_url(*args, **kwargs):
+    return _lazy_module("katherine_research").is_safe_public_url(*args, **kwargs)
+
+
+def validate_avatar_image_bytes(*args, **kwargs):
+    return _lazy_module("katherine_images").validate_avatar_image_bytes(*args, **kwargs)
+
+
+psutil = None
+PROCESS = None
+_PSUTIL_IMPORT_ATTEMPTED = False
+
+
+def load_process_monitor() -> bool:
+    """Load psutil only for explicit diagnostics or metrics requests."""
+    global psutil, PROCESS, _PSUTIL_IMPORT_ATTEMPTED
+    if psutil is None and not _PSUTIL_IMPORT_ATTEMPTED:
+        _PSUTIL_IMPORT_ATTEMPTED = True
+        try:
+            psutil = importlib.import_module("psutil")
+        except ImportError:
+            return False
+    if psutil is None:
+        return False
+    if PROCESS is None:
+        try:
+            PROCESS = psutil.Process(os.getpid())
+        except (psutil.Error, OSError):
+            return False
+    return True
 
 # Optional media dependencies are intentionally loaded only when a voice or DJ
 # feature is requested. Keeping them out of the module import path shortens
@@ -242,7 +304,7 @@ ADMIN_ONLY_COMMANDS = frozenset({
 STARTED = time.time()
 STARTED_MONOTONIC = time.monotonic()
 HTTP_CLIENT: httpx.AsyncClient | None = None
-PROCESS = psutil.Process(os.getpid()) if psutil else None
+PROCESS = None
 LAST_EVENT_AT = None
 LAST_COMMAND_AT = None
 LAST_COMMAND_NAME = None
@@ -1459,6 +1521,7 @@ async def build_status_message(source: str, nickname: str, thread_id: str | None
     cpu_line = "No disponible (instala psutil)"
     system_memory_line = "No disponible"
     container_memory_line = get_container_memory_usage()
+    load_process_monitor()
     if psutil and PROCESS:
         try:
             cpu_line = f"{PROCESS.cpu_percent(interval=None):.1f}% del proceso"
@@ -12926,6 +12989,7 @@ Uso: !enciclopedia <nombre>""",
     if command == "!rendimiento":
         current_ram, peak_ram = get_process_memory()
         cpu_line = "No disponible"
+        load_process_monitor()
         if psutil and PROCESS:
             try:
                 # interval=None evita bloquear el worker del webhook.
@@ -15405,6 +15469,7 @@ async def prometheus_metrics_endpoint(request: Request):
             raise HTTPException(status_code=401, detail="Unauthorized")
     memory_bytes = None
     cpu_percent = None
+    load_process_monitor()
     if PROCESS is not None:
         try:
             memory_bytes = PROCESS.memory_info().rss
