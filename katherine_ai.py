@@ -2194,6 +2194,17 @@ class KatherineAI:
                     raise RuntimeError("IA_CUOTA_DIARIA_AGOTADA")
                 status_code = getattr(response, "status_code", None)
                 if status_code in {408, 500, 502, 503, 504}:
+                    # Skip another slow generation when a secondary provider is ready.
+                    fallback_ready = bool(self._fallback_provider_config()) and (
+                        self.provider_name == self._primary_provider_config()["name"]
+                    )
+                    if fallback_ready:
+                        logging.warning(
+                            "[AI] %s HTTP %s transitorio; se activa el respaldo sin reintento.",
+                            self.provider_name,
+                            status_code,
+                        )
+                        break
                     if attempt + 1 >= max_attempts:
                         break
                     delay = self._transient_retry_delay(response, attempt)
@@ -2227,6 +2238,15 @@ class KatherineAI:
                         self.provider_name,
                     )
                     raise RuntimeError("IA_CUOTA_DIARIA_AGOTADA")
+                fallback_ready = bool(self._fallback_provider_config()) and (
+                    self.provider_name == self._primary_provider_config()["name"]
+                )
+                if fallback_ready:
+                    logging.warning(
+                        "[AI] %s HTTP 429 sin cuota diaria agotada; se activa el respaldo.",
+                        self.provider_name,
+                    )
+                    break
                 if attempt + 1 >= max_attempts:
                     break
                 delay = self._provider_retry_delay(response, attempt)
