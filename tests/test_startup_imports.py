@@ -14,6 +14,11 @@ blocked = {
     "prometheus_client",
     "rapidfuzz",
     "defusedxml",
+    "psutil",
+    "katherine_metrics",
+    "katherine_matching",
+    "katherine_research",
+    "katherine_images",
 }
 loaded = sorted(name for name in blocked if name in sys.modules)
 assert not loaded, f"Optional modules loaded during normal import: {loaded}"
