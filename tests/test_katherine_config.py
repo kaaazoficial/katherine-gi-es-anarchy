@@ -28,7 +28,6 @@ def test_settings_validate_and_normalize_values():
         DATA_DIR="/tmp/katherine-test",
         TTS_VOICE=" es-ES-ElviraNeural ",
         SINNER_UID="creator-uid",
-        SINNER_UID="creator-uid",
         ADMIN_UIDS="uid-1,uid-2",
     )
     assert settings.port == 4567
@@ -37,7 +36,6 @@ def test_settings_validate_and_normalize_values():
     assert settings.admin_uids == "uid-1,uid-2"
     assert settings.data_dir == Path("/tmp/katherine-test")
     assert settings.tts_voice == "es-ES-ElviraNeural"
-    assert settings.admin_uids == "uid-1,uid-2"
 
 
 def test_settings_reject_invalid_port_and_prefix():
