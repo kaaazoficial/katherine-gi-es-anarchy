@@ -227,8 +227,12 @@ def is_privileged_uid(uid: str) -> bool:
     return is_sinner_uid(uid) or is_admin_uid(uid)
 
 
+CREATOR_ONLY_COMMANDS = frozenset({
+    "!sistema", "!diagnostico", "!rendimiento", "!laboratorio",
+})
+
 ADMIN_ONLY_COMMANDS = frozenset({
-    "!estado", "!fuentes", "!saludfuentes", "!metricas", "!autotest", "!diagnostico",
+    "!estado", "!fuentes", "!saludfuentes", "!metricas", "!autotest",
     "!centro", "!nexus",
     "!admin", "!paneladmin", "!guardian",
     "!respuestas", "!respuesta", "!advertir", "!advertencias",
@@ -10566,21 +10570,13 @@ async def _handle_command_impl(event: dict, source: str):
     LAST_COMMAND_NAME = command
     LAST_COMMAND_USER = nickname
 
-    if command == "!sinner":
-        if not is_sinner_uid(admin_uid):
-            await send_message(thread, "Este espacio está reservado para el creador de Katherine.", source, reply)
-            return
-        options = query.casefold().strip()
-        creator_actions = {
-            "": "✦ SINNER · CENTRO DEL CREADOR\nSoy toda oídos. Este espacio es solo tuyo.\n\n"
-                "Comandos: !sinner estado | !sinner saludo | !sinner cariño | !sinner celebrar",
-            "estado": "✦ CENTRO DEL CREADOR\nIdentidad verificada. Katherine reconoce al creador por su UID, no por su apodo.\n"
-                f"Administradores adicionales configurados: {len(ADMIN_UIDS)}.",
-            "saludo": "¡Sinner! Qué alegría que hayas venido. ¿Qué hacemos hoy? ✦",
-            "cariño": "Ven aquí, Sinner. Te mando un abrazo enorme. Gracias por darme vida y seguir construyéndome. ♡",
-            "celebrar": "¡Sinner, lo conseguimos! Cada mejora de Katherine también lleva un poquito de tu esfuerzo. ✨",
-        }
-        await send_message(thread, creator_actions.get(options, "No reconozco esa opción. Usa !sinner para ver tus accesos exclusivos."), source, reply)
+    if command in CREATOR_ONLY_COMMANDS and not is_sinner_uid(admin_uid):
+        await send_message(
+            thread,
+            "Acceso exclusivo del creador. Este comando requiere el UID configurado en SINNER_UID.",
+            source,
+            reply,
+        )
         return
 
     if command in ADMIN_ONLY_COMMANDS and not is_privileged_uid(admin_uid):
@@ -12809,6 +12805,155 @@ Uso: !enciclopedia <nombre>""",
             ]),
             source,
             reply
+        )
+        return
+
+    # -----------------------------------------------------------------------
+    # CONSOLA PRIVADA DEL CREADOR
+    # -----------------------------------------------------------------------
+    if command == "!sistema":
+        started_check = time.perf_counter()
+        result = await api("GET", "/me", source)
+        api_latency_ms = (time.perf_counter() - started_check) * 1000
+        response_data = result.get("data") or {}
+        bot_info = response_data.get("bot") if isinstance(response_data, dict) else {}
+        bot_name = bot_info.get("name") if isinstance(bot_info, dict) else None
+        thread_ids = response_data.get("threadIds") if isinstance(response_data, dict) else []
+        thread_count = len(thread_ids) if isinstance(thread_ids, list) else 0
+        active_background = sum(1 for task in background_tasks if not task.done())
+        active_webhooks = sum(1 for task in webhook_tasks if not task.done())
+        commit = os.getenv("RENDER_GIT_COMMIT", "").strip()
+        system_lines = [
+            "✦ KATHERINE · SISTEMA DEL CREADOR ✦",
+            f"Proceso: {'operativo' if result.get('ok') else 'activo, API no disponible'}",
+            f"Anarchy API: {'conectada' if result.get('ok') else 'sin conexión'} · "
+            f"{api_latency_ms:.0f} ms · HTTP {result.get('status', '?')}",
+            f"Bot: {bot_name or 'identidad no informada'}",
+            f"Uptime: {format_duration(time.monotonic() - STARTED_MONOTONIC)}",
+            f"Commit: {commit[:7] if commit else 'no informado por el entorno'}",
+            f"Salas visibles para la API: {thread_count}",
+            f"Tareas activas: {active_background} de fondo · {active_webhooks} webhooks",
+            f"Limpieza automática: {'activa' if CLEANUP_TASK is not None and not CLEANUP_TASK.done() else 'inactiva'}",
+            f"Administradores adicionales: {len(ADMIN_UIDS)}",
+            "",
+            "Comandos privados: !diagnostico · !rendimiento · !laboratorio",
+        ]
+        await send_message(thread, "\n".join(system_lines), source, reply)
+        return
+
+    if command == "!rendimiento":
+        current_ram, peak_ram = get_process_memory()
+        cpu_line = "No disponible"
+        if psutil and PROCESS:
+            try:
+                # interval=None evita bloquear el worker del webhook.
+                cpu_line = f"{PROCESS.cpu_percent(interval=None):.1f}% (muestra no bloqueante)"
+            except (psutil.Error, OSError):
+                pass
+        ram_line = f"{current_ram:.1f} MB RSS" if current_ram is not None else "No disponible"
+        if peak_ram is not None:
+            ram_line += f" · pico {peak_ram:.1f} MB"
+        api_requests = int(metrics["api_requests"])
+        avg_latency = (
+            float(metrics["api_latency_total_ms"]) / api_requests
+            if api_requests else 0.0
+        )
+        active_background = sum(1 for task in background_tasks if not task.done())
+        active_webhooks = sum(1 for task in webhook_tasks if not task.done())
+        performance_lines = [
+            "✦ KATHERINE · RENDIMIENTO ✦",
+            f"CPU del proceso: {cpu_line}",
+            f"RAM del proceso: {ram_line}",
+            f"RAM del contenedor: {get_container_memory_usage()}",
+            f"Hilos activos: {threading.active_count()}",
+            f"Tareas activas: {active_background} de fondo · {active_webhooks} webhooks",
+            f"Uptime: {format_duration(time.monotonic() - STARTED_MONOTONIC)}",
+            f"API: {api_requests} solicitudes · {metrics['api_errors']} errores",
+            f"Latencia API: última {float(metrics['api_latency_last_ms']):.0f} ms · "
+            f"media {avg_latency:.0f} ms · máxima {float(metrics['api_latency_max_ms']):.0f} ms",
+            f"IA: {metrics['ai_requests']} solicitudes · {metrics['ai_errors']} fallos/respaldo",
+            f"Audio: {metrics['dj_tracks_started']} pistas · "
+            f"{metrics['dj_playback_errors']} errores · "
+            f"{metrics['tts_priority_enqueued'] + metrics['tts_regular_enqueued']} lecturas encoladas",
+            "Las métricas son del proceso actual y se reinician tras un reinicio o despliegue.",
+        ]
+        await send_message(thread, "\n".join(performance_lines), source, reply)
+        return
+
+    if command == "!laboratorio":
+        option = query.casefold().strip()
+        if option in {"", "ayuda", "menu", "menú"}:
+            lab_lines = [
+                "✦ KATHERINE · LABORATORIO PRIVADO ✦",
+                "Herramientas de comprobación seguras; no modifican la configuración de producción.",
+                "",
+                "!laboratorio pruebas — Ejecuta pruebas internas deterministas sin llamadas a IA.",
+                "!laboratorio ia — Revisa el estado del proveedor y sus contadores, sin consumir tokens.",
+                "!laboratorio audio — Revisa dependencias de voz y audio sin cargarlas ni iniciar reproducción.",
+            ]
+            await send_message(thread, "\n".join(lab_lines), source, reply)
+            return
+
+        if option in {"pruebas", "test", "tests"}:
+            results = await asyncio.to_thread(run_katherine_self_tests)
+            lab_lines = [
+                "✦ LABORATORIO · PRUEBAS LOCALES ✦",
+                f"Pruebas ejecutadas: {results['checks']}",
+                f"Correctas: {results['passed']}",
+                f"Fallidas: {results['failed']}",
+            ]
+            if results["failures"]:
+                lab_lines.append("Fallos:")
+                lab_lines.extend("• " + value for value in results["failures"][:10])
+            else:
+                lab_lines.append("Todas las pruebas internas finalizaron correctamente.")
+            lab_lines.append("No se realizaron llamadas a proveedores externos ni cambios de configuración.")
+            await send_message(thread, "\n".join(lab_lines), source, reply)
+            return
+
+        if option in {"ia", "inteligencia", "inteligencia artificial"}:
+            provider_metrics = AI_CORE.metrics
+            provider_state = "disponible" if AI_CORE.is_enabled else "sin credenciales"
+            lab_lines = [
+                "✦ LABORATORIO · IA ✦",
+                f"Estado: {provider_state}",
+                f"Proveedor: {AI_CORE.provider_name if AI_CORE.is_enabled else 'no configurado'}",
+                f"Modelo: {AI_CORE.model if AI_CORE.is_enabled else '—'}",
+                f"Solicitudes registradas: {int(provider_metrics.get('ai_provider_requests', 0))}",
+                f"Límites 429: {int(provider_metrics.get('ai_provider_429', 0))}",
+                f"Reintentos: {int(provider_metrics.get('ai_provider_retries', 0))}",
+                f"Tokens de entrada/salida: {int(provider_metrics.get('ai_provider_input_tokens', 0))} / "
+                f"{int(provider_metrics.get('ai_provider_output_tokens', 0))}",
+                "Comprobación pasiva: no se envió ninguna consulta ni se consumieron tokens.",
+            ]
+            await send_message(thread, "\n".join(lab_lines), source, reply)
+            return
+
+        if option in {"audio", "voz", "dj"}:
+            def dependency_state(loaded: bool, attempted: bool) -> str:
+                if loaded:
+                    return "cargada"
+                return "falló al cargar" if attempted else "inactiva (carga bajo demanda)"
+
+            lab_lines = [
+                "✦ LABORATORIO · AUDIO Y VOZ ✦",
+                f"LiveKit: {dependency_state(livekit_rtc is not None, _LIVEKIT_IMPORT_ATTEMPTED)}",
+                f"PyAV: {dependency_state(pyav is not None, _AUDIO_IMPORT_ATTEMPTED)}",
+                f"NumPy: {dependency_state(np is not None, _AUDIO_IMPORT_ATTEMPTED)}",
+                f"Edge TTS: {dependency_state(edge_tts is not None, _TTS_IMPORT_ATTEMPTED)}",
+                f"Reproducciones iniciadas: {metrics['dj_tracks_started']}",
+                f"Errores de reproducción: {metrics['dj_playback_errors']}",
+                f"Mensajes de TTS encolados: {metrics['tts_priority_enqueued'] + metrics['tts_regular_enqueued']}",
+                "Comprobación pasiva: no se cargaron dependencias ni se inició audio.",
+            ]
+            await send_message(thread, "\n".join(lab_lines), source, reply)
+            return
+
+        await send_message(
+            thread,
+            "Opción desconocida. Usa !laboratorio para consultar: pruebas, ia o audio.",
+            source,
+            reply,
         )
         return
 
