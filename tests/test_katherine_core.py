@@ -635,8 +635,8 @@ async def test_game_data_does_not_coalesce_different_queries(monkeypatch):
     )
 
     assert calls == ["cyno", "nahida"]
-    assert cyno["name"] == "Cyno"
-    assert nahida["name"] == "Nahida"
+    assert cyno["name"] == "cyno"
+    assert nahida["name"] == "nahida"
 
 
 def test_profile_query_returns_viewer_affinity_in_one_read(database):
