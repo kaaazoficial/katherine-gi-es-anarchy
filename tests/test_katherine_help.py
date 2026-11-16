@@ -8,7 +8,7 @@ from katherine_help import (
 def test_full_help_matches_the_supplied_anarchy_layout():
     text = build_commands_help_text()
     assert text.startswith("[CB] ✦ KATHERINE · GUÍA DE COMANDOS ✦\n[C] Prefijos aceptados: ! / -")
-    assert "[C] Usa !ayuda [categoría] para consultar todo o filtrar una sección." in text
+    assert "[C] Usa !menu para consultar la guía completa por secciones." in text
     expected = [
         "1. AYUDA E INTELIGENCIA ARTIFICIAL",
         "2. GENSHIN IMPACT",
