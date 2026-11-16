@@ -5,7 +5,6 @@ import math
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, Gauge, generate_latest
 
 
 _COUNTERS = (
@@ -68,6 +67,16 @@ def render_prometheus_metrics(
     provider_usage: Iterable[Mapping[str, Any]] | None = None,
 ) -> tuple[bytes, str]:
     """Render aggregate-only metrics; never attach user, room or message labels."""
+    # Prometheus is only needed for explicit /metrics scrapes. Keep it out of
+    # the normal bot import path so a cold start loads fewer third-party modules.
+    from prometheus_client import (
+        CONTENT_TYPE_LATEST,
+        CollectorRegistry,
+        Counter,
+        Gauge,
+        generate_latest,
+    )
+
     registry = CollectorRegistry()
     for metric_name, key, description in _COUNTERS:
         metric = Counter(metric_name, description, registry=registry)
