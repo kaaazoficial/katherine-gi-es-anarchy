@@ -928,6 +928,49 @@ async def test_provider_does_not_retry_non_429_errors(monkeypatch):
     assert len(calls) == 1
 
 
+
+@pytest.mark.asyncio
+async def test_same_provider_requests_can_overlap_without_holding_pacing_lock(monkeypatch):
+    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+    monkeypatch.setenv("KATHERINE_AI_API_URL", "https://api.groq.com/openai/v1/responses")
+    ai = KatherineAI()
+    ai.provider_default_min_interval = {"Groq": 0.0}
+    both_started = asyncio.Event()
+    active = 0
+    maximum_active = 0
+
+    async def fake_request(method, url, **kwargs):
+        nonlocal active, maximum_active
+        active += 1
+        maximum_active = max(maximum_active, active)
+        if active >= 2:
+            both_started.set()
+        try:
+            await asyncio.wait_for(both_started.wait(), timeout=1.0)
+            return FakeResponse(response_payload({
+                "kind": "answer", "answer": "Respuesta rápida.",
+                "command": "", "args": "",
+            }))
+        finally:
+            active -= 1
+
+    request = (
+        "Devuelve una respuesta breve.",
+        [{"role": "user", "content": "Hola"}],
+        fake_request,
+    )
+    first, second = await asyncio.gather(
+        ai._request_json(*request),
+        ai._request_json(*request),
+    )
+
+    assert first["answer"] == "Respuesta rápida."
+    assert second["answer"] == "Respuesta rápida."
+    assert maximum_active == 2
+    assert ai.metrics["ai_provider_queue_wait_observations"] == 2
+
+
+
 def test_provider_adapts_request_and_token_pacing_from_headers(monkeypatch):
     monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
     monkeypatch.setenv("KATHERINE_AI_API_URL", "https://api.groq.com/openai/v1/responses")
