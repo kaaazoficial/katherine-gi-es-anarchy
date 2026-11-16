@@ -21,6 +21,7 @@ class KatherineSettings(BaseSettings):
     command_prefix: str = Field(
         default="!", min_length=1, max_length=3, validation_alias="COMMAND_PREFIX"
     )
+    sinner_uid: str = Field(default="", validation_alias="SINNER_UID")
     admin_uids: str = Field(
         default="",
         validation_alias=AliasChoices("ADMIN_UIDS", "ADMINUIDS"),
