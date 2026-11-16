@@ -28,6 +28,7 @@ def test_settings_validate_and_normalize_values():
         DATA_DIR="/tmp/katherine-test",
         TTS_VOICE=" es-ES-ElviraNeural ",
         SINNER_UID="creator-uid",
+        SINNER_UID="creator-uid",
         ADMIN_UIDS="uid-1,uid-2",
     )
     assert settings.port == 4567
