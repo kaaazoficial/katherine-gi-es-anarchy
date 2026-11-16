@@ -95,10 +95,11 @@ jobs:
               if len(fields) < 3:
                   continue
               try:
-                  cumulative_us = float(fields[2].strip())
-              except ValueError:
+                  # Format: self-us | cumulative-us | module.
+              cumulative_us = float(fields[1].strip())
+              except (IndexError, ValueError):
                   continue
-              module = fields[3].strip() if len(fields) > 3 else "unknown"
+              module = fields[2].strip() if len(fields) > 2 else "unknown"
               entries.append((cumulative_us, module))
 
           print("Top cumulative import costs (Python importtime; milliseconds):")
