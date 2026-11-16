@@ -634,7 +634,7 @@ async def test_game_data_does_not_coalesce_different_queries(monkeypatch):
         katherine.game_data("characters", "Nahida"),
     )
 
-    assert calls == ["Cyno", "Nahida"]
+    assert calls == ["cyno", "nahida"]
     assert cyno["name"] == "Cyno"
     assert nahida["name"] == "Nahida"
 
