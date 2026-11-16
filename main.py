@@ -32,6 +32,9 @@ from typing import Any
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urljoin, quote, urlparse, urlsplit, urlunsplit
 
+# Measure application-module import cost separately from startup I/O.
+MODULE_IMPORT_STARTED = time.perf_counter()
+
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, Response
@@ -15503,6 +15506,10 @@ async def health_head():
 async def startup():
     global HTTP_CLIENT, CLEANUP_TASK
     startup_started_at = time.perf_counter()
+    logging.info(
+        "[STARTUP_TIMING] python_import_to_lifespan=%.3fs",
+        time.perf_counter() - MODULE_IMPORT_STARTED,
+    )
     phase_started_at = time.perf_counter()
     HTTP_CLIENT = httpx.AsyncClient(
         timeout=httpx.Timeout(20.0, connect=8.0),
