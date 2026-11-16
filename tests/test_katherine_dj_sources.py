@@ -36,11 +36,11 @@ def test_dj_numeric_selection_uses_one_based_result_numbers(monkeypatch):
     }
     calls = []
 
-    async def fake_start(thread_id, tracks, index):
-        calls.append((thread_id, tracks, index))
-        return True, "Reproducción iniciada.", tracks[index], index
+    async def fake_start(thread_id, url, looping, track_metadata=None, enqueue=False):
+        calls.append((thread_id, url, looping, track_metadata, enqueue))
+        return True, "Reproducción iniciada."
 
-    monkeypatch.setattr(katherine, "start_dj_search_with_fallback", fake_start)
+    monkeypatch.setattr(katherine, "start_dj_room", fake_start)
     try:
         ok, message, selected = asyncio.run(
             katherine.select_dj_search_result(thread, "1")
@@ -48,7 +48,7 @@ def test_dj_numeric_selection_uses_one_based_result_numbers(monkeypatch):
         assert ok is True
         assert message == "Reproducción iniciada."
         assert selected == track
-        assert calls == [(thread, [track], 0)]
+        assert calls == [(thread, track["url"], False, track, False)]
 
         ok, message, selected = asyncio.run(
             katherine.select_dj_search_result(thread, "0")
@@ -1300,7 +1300,7 @@ def test_audius_search_uses_official_stream_endpoint_and_ignores_unstreamable_tr
     assert tracks[0]["creator"] == "Independent Artist"
     assert tracks[0]["url"] == (
         "https://api.audius.co/v1/tracks/track_123/stream"
-        "?app_name=KatherineAnarchy"
+        "?app_name=KatherineAnarchy&no_redirect=true"
     )
     assert calls[0][1].endswith("/tracks/search")
     assert calls[0][2]["params"]["query"] == "ambient lights"
