@@ -1132,16 +1132,16 @@ async def test_gemini_failure_falls_back_to_groq(monkeypatch):
     assert result["answer"] == "Groq respondió."
     assert [item[0] for item in calls] == [
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
-    ] * 2 + [
+    ,
         "https://api.groq.com/openai/v1/responses",
     ]
     assert calls[0][1]["headers"]["x-goog-api-key"] == "gemini-test-key"
-    assert calls[2][1]["headers"]["Authorization"] == "Bearer groq-test-key"
+    assert calls[1][1]["headers"]["Authorization"] == "Bearer groq-test-key"
     assert calls[0][1]["json"]["systemInstruction"]["parts"][0]["text"]
     assert ai.last_provider_name == "Groq"
     assert ai.last_model == "openai/gpt-oss-20b"
     assert ai.metrics["ai_provider_failovers"] == 1
-    assert ai.metrics["ai_provider_retries"] == 1
+    assert ai.metrics["ai_provider_retries"] == 0
 
 
 @pytest.mark.asyncio
@@ -1195,7 +1195,7 @@ async def test_direct_gemini_probe_does_not_fall_back_to_groq(monkeypatch):
         await ai.test_provider_connection("gemini", fake_request)
     assert calls == [
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent"
-    ] * 2
+    ]
 
 
 @pytest.mark.asyncio
