@@ -7,11 +7,25 @@ from difflib import SequenceMatcher
 from functools import lru_cache
 from typing import Iterable
 
-try:
-    from rapidfuzz import fuzz, process
-except ImportError:  # Keep local test environments usable without production extras.
-    fuzz = None
-    process = None
+_FUZZ = None
+_PROCESS = None
+_RAPIDFUZZ_ATTEMPTED = False
+
+
+def _load_rapidfuzz():
+    """Load the optional accelerator only when a typo suggestion is requested."""
+    global _FUZZ, _PROCESS, _RAPIDFUZZ_ATTEMPTED
+    if not _RAPIDFUZZ_ATTEMPTED:
+        _RAPIDFUZZ_ATTEMPTED = True
+        try:
+            from rapidfuzz import fuzz, process
+        except ImportError:  # Keep local test environments usable without production extras.
+            _FUZZ = None
+            _PROCESS = None
+        else:
+            _FUZZ = fuzz
+            _PROCESS = process
+    return _FUZZ, _PROCESS
 
 
 def normalize_command_name(value: str) -> str:
@@ -48,6 +62,7 @@ def suggest_command(
         return None
 
     cutoff = max(80, min(100, int(score_cutoff)))
+    fuzz, process = _load_rapidfuzz()
     if process is not None and fuzz is not None:
         match = process.extractOne(query, choices, scorer=fuzz.ratio, score_cutoff=cutoff)
         if not match:
