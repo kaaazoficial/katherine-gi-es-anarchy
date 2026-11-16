@@ -1132,7 +1132,6 @@ async def test_gemini_failure_falls_back_to_groq(monkeypatch):
     assert result["answer"] == "Groq respondió."
     assert [item[0] for item in calls] == [
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
-    ,
         "https://api.groq.com/openai/v1/responses",
     ]
     assert calls[0][1]["headers"]["x-goog-api-key"] == "gemini-test-key"
