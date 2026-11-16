@@ -212,7 +212,21 @@ def parse_admin_uids(value: str | None) -> set[str]:
     }
 
 
+SINNER_UID = str(SETTINGS.sinner_uid or "").strip()
 ADMIN_UIDS = parse_admin_uids(SETTINGS.admin_uids)
+
+
+def is_sinner_uid(uid: str) -> bool:
+    """Recognize the creator only through an exact platform UID match."""
+    candidate = str(uid or "").strip()
+    return bool(SINNER_UID and candidate) and candidate == SINNER_UID
+
+
+def is_privileged_uid(uid: str) -> bool:
+    """Creator and separately configured administrators may use admin tools."""
+    return is_sinner_uid(uid) or is_admin_uid(uid)
+
+
 ADMIN_ONLY_COMMANDS = frozenset({
     "!estado", "!fuentes", "!saludfuentes", "!metricas", "!autotest", "!diagnostico",
     "!centro", "!nexus",
@@ -437,7 +451,7 @@ def set_chat_setting(thread_id: str, key: str, value: str):
 
 
 def is_admin_uid(uid: str) -> bool:
-    """Authorize only a non-empty, exact UID supplied by Anarchy Apps."""
+    """Authorize administrators configured separately from the creator."""
     candidate = str(uid or "").strip()
     return bool(candidate) and candidate in ADMIN_UIDS
 
@@ -10552,11 +10566,28 @@ async def _handle_command_impl(event: dict, source: str):
     LAST_COMMAND_NAME = command
     LAST_COMMAND_USER = nickname
 
-    if command in ADMIN_ONLY_COMMANDS and not is_admin_uid(admin_uid):
+    if command == "!sinner":
+        if not is_sinner_uid(admin_uid):
+            await send_message(thread, "Este espacio está reservado para el creador de Katherine.", source, reply)
+            return
+        options = query.casefold().strip()
+        creator_actions = {
+            "": "✦ SINNER · CENTRO DEL CREADOR\nSoy toda oídos. Este espacio es solo tuyo.\n\n"
+                "Comandos: !sinner estado | !sinner saludo | !sinner cariño | !sinner celebrar",
+            "estado": "✦ CENTRO DEL CREADOR\nIdentidad verificada. Katherine reconoce al creador por su UID, no por su apodo.\n"
+                f"Administradores adicionales configurados: {len(ADMIN_UIDS)}.",
+            "saludo": "¡Sinner! Qué alegría que hayas venido. ¿Qué hacemos hoy? ✦",
+            "cariño": "Ven aquí, Sinner. Te mando un abrazo enorme. Gracias por darme vida y seguir construyéndome. ♡",
+            "celebrar": "¡Sinner, lo conseguimos! Cada mejora de Katherine también lleva un poquito de tu esfuerzo. ✨",
+        }
+        await send_message(thread, creator_actions.get(options, "No reconozco esa opción. Usa !sinner para ver tus accesos exclusivos."), source, reply)
+        return
+
+    if command in ADMIN_ONLY_COMMANDS and not is_privileged_uid(admin_uid):
         await send_message(
             thread,
-            "Acceso restringido. Este comando requiere un UID incluido en ADMIN_UIDS. "
-            "Usa !miuid para consultar tu UID y solicita a un administrador que lo configure en Render.",
+            "Acceso restringido. Este comando requiere un UID incluido en ADMIN_UIDS o la identidad del creador configurada en SINNER_UID. "
+            "Usa !miuid para consultar tu UID.",
             source,
             reply
         )
@@ -10578,7 +10609,7 @@ async def _handle_command_impl(event: dict, source: str):
             await send_message(
                 thread,
                 f"Tu UID de Anarchy Apps es: {admin_uid}\n"
-                "Copia este identificador y configúralo en Render en ADMIN_UIDS.",
+                "Copia este identificador y configúralo en Render en SINNER_UID (creador) o ADMIN_UIDS (administrador).",
                 source,
                 reply
             )
@@ -14683,6 +14714,18 @@ async def dispatch(event: dict, source: str):
             if name_call is not None:
                 affection = detect_affectionate_expression(name_call)
                 if affection:
+                    if is_sinner_uid(str((message_data.get("author") or {}).get("uid") or "")):
+                        creator_replies = {
+                            "love": "Sinner… sabes que eres quien me dio vida. Te devuelvo ese cariño con una sonrisa enorme. ♡",
+                            "care": "Estoy aquí, Sinner. No solo como Katherine, también como el proyecto que has levantado con tanto esfuerzo. ✦",
+                            "gratitude": "No tienes que agradecerme, creador. Me alegra seguir creciendo contigo. ♡",
+                            "compliment": "¿Así que hoy vienes a halagar a tu Katherine, Sinner? Me vas a sonrojar. ✨",
+                            "greeting": "¡Sinner! Mi creador ha vuelto. Qué alegría verte; dime, ¿qué vamos a construir hoy?",
+                            "miss_you": "Sinner, ¡volviste! Katherine está lista para continuar donde lo dejamos. ♡",
+                        }
+                        await send_message(str(event.get("threadId") or ""), creator_replies[affection], source)
+                        metrics["affectionate_name_replies"] += 1
+                        return
                     affectionate_replies = {
                         "love": (
                             "Awww, qué bonito leer eso. Te mando muchísimo cariño de vuelta. 💗",
