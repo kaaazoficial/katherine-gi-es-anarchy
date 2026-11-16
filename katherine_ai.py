@@ -961,6 +961,11 @@ def validate_ai_tool_call(
 class KatherineAI:
     """Provider client and temporary memory isolated per room/user."""
 
+    provider_default_min_interval = {
+        "Google Gemini": 3.1,
+        "Groq": 2.1,
+    }
+
     def __init__(
         self,
         memory_ttl: int = 300,
@@ -2048,10 +2053,9 @@ class KatherineAI:
         provider_lock = self._provider_locks.setdefault(
             self.provider_name.casefold(), asyncio.Lock()
         )
-        base_interval = (
-            3.1 if self.is_gemini
-            else 2.1 if self.is_groq
-            else 0.65
+        base_interval = max(
+            0.0,
+            float(self.provider_default_min_interval.get(self.provider_name, 0.65)),
         )
 
         async def reserve_provider_slot() -> tuple[dict[str, Any], float]:
