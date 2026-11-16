@@ -247,7 +247,6 @@ def _normalize(value: str) -> str:
     return "".join(char for char in decomposed if not unicodedata.combining(char)).strip()
 
 
-@lru_cache(maxsize=64)
 def _help_prefix(help_text: str) -> str:
     for line in str(help_text).splitlines():
         if line.startswith('[C] Prefijos aceptados: '):
@@ -256,6 +255,7 @@ def _help_prefix(help_text: str) -> str:
             return line.removeprefix('[C] Prefijo principal: ').split(' (', 1)[0].strip() or '!'
     return '!'
 
+@lru_cache(maxsize=64)
 def filter_commands_help_text(help_text: str, topic: str | None = None) -> str:
     """Cache immutable full/category help text for frequently requested topics."""
     requested = _normalize(topic or "")
