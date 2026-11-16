@@ -13,7 +13,7 @@ CATEGORY_TITLES = (
     "4. JUEGOS, ECONOMÍA Y COMUNIDAD",
     "5. MÚSICA Y VOZ",
     "6. UTILIDADES Y MULTIMEDIA",
-    "7. ADMINISTRACIÓN (UID AUTORIZADO)",
+    "7. ADMINISTRACIÓN Y ESTADO",
 )
 
 
@@ -23,8 +23,7 @@ def _command_help_sections(prefix: str):
     sections = [
         (CATEGORY_TITLES[0], [
             (True, "▸ Ayuda y Navegación"),
-            (False, f"• {prefix}ayuda <categoría> — Muestra una sección concreta (sin categoría muestra toda la guía)."),
-            (False, f"• {prefix}ayuda — Muestra el catálogo completo; añade una categoría para filtrar."),
+            (False, f"• {prefix}ayuda [categoría] — Muestra todo el catálogo o una sección concreta."),
             (True, "▸ Asistente IA"),
             (False, f"• {prefix}asistente <consulta> — Conversación y solicitudes en lenguaje natural."),
             (False, f"• {prefix}ia ayuda — Guía de IA."),
@@ -70,12 +69,11 @@ def _command_help_sections(prefix: str):
             (False, f"• {prefix}actividad [hoy|semana] — Consulta la actividad."),
             (True, "▸ Interacciones (@usuario)"),
             (False, f"• {prefix}interaccion @usuario — Guía de acciones sociales."),
-            (False, f"• Afecto: {prefix}abrazo | {prefix}abrazar | {prefix}beso | {prefix}besar | {prefix}acariciar | {prefix}mimar"),
+            (False, f"• Afecto: {prefix}abrazo | {prefix}beso | {prefix}acariciar | {prefix}mimar"),
             (False, f"• Físicas: {prefix}patada | {prefix}golpe | {prefix}cachetada | {prefix}morder | {prefix}empujar"),
             (False, f"• Apoyo: {prefix}consolar | {prefix}felicitar | {prefix}saludar | {prefix}proteger | {prefix}ayudar | {prefix}apoyar"),
-            (False, f"• Sociales: {prefix}bailar | {prefix}cosquillas | {prefix}chocar | {prefix}highfive | {prefix}acompañar"),
-            (False, f"• Otras: {prefix}asustar | {prefix}curar | {prefix}cargar | {prefix}regañar | {prefix}admirar | {prefix}dormir"),
-            (False, f"• Adicionales: {prefix}ignorar | {prefix}mirar | {prefix}invitar"),
+            (False, f"• Sociales: {prefix}bailar | {prefix}cosquillas | {prefix}chocar | {prefix}acompañar"),
+            (False, f"• Otras: {prefix}asustar | {prefix}curar | {prefix}cargar | {prefix}regañar | {prefix}admirar | {prefix}dormir | {prefix}ignorar | {prefix}mirar | {prefix}invitar | {prefix}regalar"),
             (True, "▸ Vínculos y Regalos"),
             (False, f"• {prefix}roast @usuario — Lanza una broma."),
             (False, f"• {prefix}afinidad @usuario — Mide el vínculo con alguien."),
@@ -88,7 +86,7 @@ def _command_help_sections(prefix: str):
             (False, f"• {prefix}adivina — Inicia adivinanza | {prefix}intento <número> — Prueba tu respuesta."),
             (False, f"• {prefix}duelo @usuario — Reta a alguien."),
             (False, f"• {prefix}ship <usuario1> <usuario2> — Calcula compatibilidad."),
-            (False, f"• {prefix}azar <mín> <máx> | dado | moneda — Número aleatorio, dado o moneda."),
+            (False, f"• {prefix}azar <mín> <máx> | {prefix}azar dado | {prefix}azar moneda — Número aleatorio, dado o moneda."),
             (False, f"• {prefix}verdad | {prefix}8ball <pregunta> — Preguntas al azar."),
             (False, f"• {prefix}elige <opciones> — Elección aleatoria."),
             (False, f"• {prefix}chiste | {prefix}frase | {prefix}reto — Entretenimiento rápido."),
@@ -117,11 +115,11 @@ def _command_help_sections(prefix: str):
             (False, f"• {prefix}dj favorito | {prefix}dj probar <tema> — Favoritos y diagnóstico [ADMIN]."),
             (False, f"• {prefix}reproducir <archivo> — Reproduce un archivo local."),
             (True, "▸ Listas, Volumen y Lectura"),
-            (False, f"• {prefix}playlist <acción> | {prefix}volumen <0-100> — Listas y volumen."),
-            (False, f"• {prefix}subirvolumen | {prefix}bajarvolumen | {prefix}silencio — Controles rápidos."),
+            (False, f"• {prefix}playlist crear|agregar|ver|reproducir|borrar — Gestiona tus listas."),
+            (False, f"• {prefix}volumen <0-100> | {prefix}subirvolumen | {prefix}bajarvolumen | {prefix}silencio — Controles de música."),
             (False, f"• {prefix}leer | {prefix}noleer — Activa o desactiva la lectura."),
-            (False, f"• {prefix}tts voces|voz|velocidad|volumen | {prefix}volumenlectura <0-100> — Ajustes TTS."),
-            (False, f"• {prefix}subirvolumenlectura | {prefix}bajarvolumenlectura | {prefix}silenciolectura — Volumen de lectura."),
+            (False, f"• {prefix}tts voces|voz|velocidad|volumen|enlaces|menciones — Configura la lectura."),
+            (False, f"• {prefix}volumenlectura <0-100> | {prefix}subirvolumenlectura | {prefix}bajarvolumenlectura | {prefix}silenciolectura — Controles de voz."),
         ]),
         (CATEGORY_TITLES[5], [
             (True, "▸ Fecha, Hora e Idiomas"),
@@ -137,20 +135,20 @@ def _command_help_sections(prefix: str):
         (CATEGORY_TITLES[6], [
             (True, "▸ Identidad y Estado"),
             (False, f"• {prefix}miuid — Consulta tu UID."),
-            (False, f"• {prefix}estado — Estado general del bot."),
+            (False, f"• {prefix}estado — Estado general del bot [ADMIN]."),
             (False, f"• {prefix}diagnostico — Almacenamiento, SQLite y proveedores [ADMIN]."),
             (True, "▸ Fuentes y Paneles"),
-            (False, f"• {prefix}fuentes — Estado de proveedores."),
-            (False, f"• {prefix}metricas — Métricas del sistema."),
-            (False, f"• {prefix}autotest — Pruebas internas."),
-            (False, f"• {prefix}centro — Panel de investigación."),
-            (False, f"• {prefix}admin — Panel de control."),
+            (False, f"• {prefix}fuentes — Estado de proveedores [ADMIN]."),
+            (False, f"• {prefix}metricas — Métricas agregadas del sistema [ADMIN]."),
+            (False, f"• {prefix}autotest — Ejecuta pruebas internas [ADMIN]."),
+            (False, f"• {prefix}centro — Panel de investigación [ADMIN]."),
+            (False, f"• {prefix}admin [resumen|actividad|antispam|avisos|historial] — Panel de control [ADMIN]."),
             (True, "▸ Moderación y Configuración"),
-            (False, f"• {prefix}antispam — Protección contra spam."),
-            (False, f"• {prefix}advertir | {prefix}advertencias | {prefix}quitaradvertencia — Sistema de moderación."),
-            (False, f"• {prefix}respuestas | {prefix}respuesta — Reglas automáticas."),
-            (False, f"• {prefix}perfilbot | {prefix}avatarbot — Edita perfil e icono del bot."),
-            (False, f"• {prefix}eliminarmensajes — Elimina mensajes propios de esta ejecución."),
+            (False, f"• {prefix}antispam estado|on|off|límite N|ventana N|repeticiones N|enlaces N|menciones N [ADMIN]."),
+            (False, f"• {prefix}advertir @usuario [motivo] | {prefix}advertencias [@usuario] | {prefix}quitaradvertencia ID [ADMIN]."),
+            (False, f"• {prefix}respuestas estado|on|off | {prefix}respuesta añadir|lista|eliminar ID [ADMIN]."),
+            (False, f"• {prefix}perfilbot ... | {prefix}avatarbot ... — Edita identidad e icono [ADMIN]."),
+            (False, f"• {prefix}eliminarmensajes — Elimina mensajes propios identificados en esta ejecución [ADMIN]."),
             (False, "Nota: Los comandos ADMIN requieren un UID autorizado en ADMIN_UIDS (el nickname no concede permisos)."),
         ]),
     ]
@@ -165,10 +163,11 @@ def _format_section(title: str, entries: list[tuple[bool, str]]) -> list[str]:
 
 
 def _intro_lines(prefix: str) -> list[str]:
+    accepted_prefixes = " / ".join(dict.fromkeys((prefix, "!", "-")))
     return [
         "[CB] ✦ KATHERINE · GUÍA DE COMANDOS ✦",
-        f"[C] Prefijo principal: {prefix} (También acepta ! y -)",
-        f"[C] Usa {prefix}ayuda <categoría> para consultar una sola sección.",
+        f"[C] Prefijos aceptados: {accepted_prefixes}",
+        f"[C] Usa {prefix}ayuda [categoría] para consultar todo o filtrar una sección.",
         "[C] Catálogo de comandos · Accesos y funciones.",
         "[C]",
     ]
