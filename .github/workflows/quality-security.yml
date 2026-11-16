@@ -8,6 +8,7 @@ on:
       - "requirements*.txt"
       - ".github/workflows/quality-security.yml"
       - "ruff.toml"
+      - ".python-version"
   pull_request:
     branches: [main]
     paths:
