@@ -50,6 +50,7 @@ COMMAND_ALIASES = {
 NATURAL_COMMAND_ALIASES = {
     "menu": "menu",
     "menú": "menu",
+    "suerte": "frase",
     "mi-id": "mi-id",
     "mi_uid": "mi_uid",
     "guardian": "admin",
