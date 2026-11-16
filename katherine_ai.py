@@ -87,7 +87,7 @@ AI_DIRECT_ACTION_COMMANDS = frozenset({
 AI_COMMAND_CATALOG = {
     "ayuda": "sin argumentos: muestra categorías y usos.",
     "comandos": "alias de ayuda.",
-    "menu": "sin argumentos: abre el menú interactivo.",
+    "menu": "alias de ayuda: muestra el catálogo completo de comandos.",
     "centro": "sin argumentos: panel de administración (solo administradores).",
     "nexus": "sin argumentos: panel Nexus (solo administradores).",
     "estado": "sin argumentos: estado técnico (solo administradores).",
@@ -132,7 +132,7 @@ AI_COMMAND_CATALOG = {
     "elige": "opción 1 | opción 2 [| otras]: crea una elección interactiva.",
     "duelo": "@usuario: reta a otra persona.",
     "ship": "@usuario1 @usuario2: juego social.",
-    "azar": "mínimo máximo: elige un número dentro del rango.",
+    "azar": "mínimo máximo | dado | moneda: número aleatorio, dado de seis caras o moneda (cara/cruz).",
     "verdad": "sin argumentos: juego de verdad.",
     "8ball": "pregunta: respuesta aleatoria.",
     "chiste": "sin argumentos: cuenta un chiste.",

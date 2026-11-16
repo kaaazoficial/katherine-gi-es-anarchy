@@ -1,6 +1,14 @@
 # Katherine · Catálogo y permisos de comandos
 
-La ayuda del chat (`!ayuda`, `!comandos` y `!menu`) muestra el catálogo completo en texto plano, agrupado por categorías y con descripciones breves. No crea botones ni abre un panel interactivo. Este documento conserva el detalle técnico y los permisos; la IA tiene ayuda separada mediante `!ia ayuda`.
+La ayuda del chat (`!ayuda`) muestra el catálogo completo en siete secciones o una categoría concreta. `!comandos`, `!menu` y `!menú` se conservan como accesos compatibles a la misma ayuda; no abren un panel interactivo. El menú publica nombres canónicos y evita duplicar alias. Este documento conserva el detalle técnico y los permisos; la IA tiene ayuda separada mediante `!ia ayuda`.
+
+## Ayuda pública y alias compatibles
+
+- `!ayuda` muestra las siete secciones; `!ayuda genshin`, `!ayuda juegos`, etc. filtran una categoría.
+- `!comandos`, `!menu` y `!menú` siguen funcionando como alias de `!ayuda`, pero no se repiten en el catálogo.
+- Los lanzamientos aleatorios se unifican en `!azar <mín> <máx>`, `!azar dado` y `!azar moneda`.
+- Por compatibilidad, `!dado`, `!moneda` y `!suerte` siguen redirigiendo a `!azar dado`, `!azar moneda` y `!frase`; no se muestran como comandos independientes.
+- `!economia` fue retirado porque solo repetía la información de puntos y recompensas, que ahora está en `!ayuda juegos`.
 
 ## Investigación y herramientas universales
 
@@ -28,7 +36,7 @@ En Render, configura la variable `ADMIN_UIDS` con uno o más UID. Se aceptan sep
 - `!respuestas`, `!respuesta`
 - `!ia probar [gemini|groq]`, `!ia guardian`, `!ia diagnostico`
 
-Los eventos se crean libremente; solo su creador o un UID administrador puede cerrarlos. Los comandos generales de fecha, zona horaria, menú, economía, traducción y multimedia siguen disponibles para todos.
+Los eventos se crean libremente; solo su creador o un UID administrador puede cerrarlos. Los comandos generales de fecha, zona horaria, ayuda, puntos y recompensas, traducción y multimedia siguen disponibles para todos.
 
 ### Métricas y sugerencias de comandos
 

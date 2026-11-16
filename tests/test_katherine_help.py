@@ -7,8 +7,8 @@ from katherine_help import (
 
 def test_full_help_matches_the_supplied_anarchy_layout():
     text = build_commands_help_text()
-    assert text.startswith("[CB] ✦ KATHERINE · GUÍA DE COMANDOS ✦\n[C] Prefijo principal: !")
-    assert "[C] Usa !ayuda <categoría> para consultar una sola sección." in text
+    assert text.startswith("[CB] ✦ KATHERINE · GUÍA DE COMANDOS ✦\n[C] Prefijos aceptados: ! / -")
+    assert "[C] Usa !ayuda [categoría] para consultar todo o filtrar una sección." in text
     expected = [
         "1. AYUDA E INTELIGENCIA ARTIFICIAL",
         "2. GENSHIN IMPACT",
@@ -16,7 +16,7 @@ def test_full_help_matches_the_supplied_anarchy_layout():
         "4. JUEGOS, ECONOMÍA Y COMUNIDAD",
         "5. MÚSICA Y VOZ",
         "6. UTILIDADES Y MULTIMEDIA",
-        "7. ADMINISTRACIÓN (UID AUTORIZADO)",
+        "7. ADMINISTRACIÓN Y ESTADO",
     ]
     positions = [text.index(f"[CB] ✦ {title} ✦") for title in expected]
     assert positions == sorted(positions)
@@ -26,13 +26,17 @@ def test_full_help_matches_the_supplied_anarchy_layout():
     assert "[CB] ▸ Moderación y Configuración" in text
     assert "!economia" not in text
     assert "!suerte" not in text
-    assert "!azar <mín> <máx> | dado | moneda" in text
+    assert "!azar <mín> <máx> | !azar dado | !azar moneda" in text
+    assert text.count("!ayuda [categoría]") == 1
+    assert "!dado" not in text and "!moneda" not in text and "!suerte" not in text
+    assert "!abrazar" not in text and "!besar" not in text and "!highfive" not in text
+    assert "!regalar" in text
 
 
 def test_help_prefix_and_aliases_are_preserved():
     text = build_commands_help_text("$")
-    assert "$ayuda <categoría>" in text
-    assert "$ayuda — Muestra el catálogo completo" in text
+    assert "$ayuda [categoría]" in text
+    assert "[C] Prefijos aceptados: $ / ! / -" in text
     assert "$dj probar <tema>" in text
 
 
@@ -74,7 +78,8 @@ def test_music_section_has_current_music_controls():
         "!dj buscar", "!dj pausa", "!dj reanudar", "!dj saltar",
         "!dj cola", "!dj actual", "!dj detener", "!dj fuentes",
         "!dj ambiente", "!dj favorito", "!dj probar", "!playlist",
-        "!volumen", "!leer", "!noleer", "!tts",
+        "!volumen", "!leer", "!noleer", "!tts", "!volumenlectura",
+        "!subirvolumenlectura", "!bajarvolumenlectura", "!silenciolectura",
     ):
         assert command in music
 
