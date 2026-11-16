@@ -28,6 +28,8 @@ def test_full_help_matches_the_supplied_anarchy_layout():
     assert "!suerte" not in text
     assert "!azar <mín> <máx> | !azar dado | !azar moneda" in text
     assert text.count("!ayuda [categoría]") == 1
+    assert "!menu" in text
+    assert "sin paneles ni botones" in text
     assert "!dado" not in text and "!moneda" not in text and "!suerte" not in text
     assert "!abrazar" not in text and "!besar" not in text and "!highfive" not in text
     assert "!regalar" in text
@@ -49,7 +51,7 @@ def test_category_help_uses_same_visual_format():
         ("juegos", "4. JUEGOS, ECONOMÍA Y COMUNIDAD"),
         ("musica", "5. MÚSICA Y VOZ"),
         ("multimedia", "6. UTILIDADES Y MULTIMEDIA"),
-        ("admin", "7. ADMINISTRACIÓN (UID AUTORIZADO)"),
+        ("admin", "7. ADMINISTRACIÓN Y ESTADO"),
     ]:
         section = filter_commands_help_text(full, alias)
         assert section.startswith("[CB] ✦ KATHERINE · GUÍA DE COMANDOS ✦")

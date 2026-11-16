@@ -23,7 +23,8 @@ def _command_help_sections(prefix: str):
     sections = [
         (CATEGORY_TITLES[0], [
             (True, "▸ Ayuda y Navegación"),
-            (False, f"• {prefix}ayuda [categoría] — Muestra todo el catálogo o una sección concreta."),
+            (False, f"• {prefix}ayuda [categoría] — Muestra una sección concreta."),
+            (False, f"• {prefix}menu — Muestra la guía completa por secciones."),
             (True, "▸ Asistente IA"),
             (False, f"• {prefix}asistente <consulta> — Conversación y solicitudes en lenguaje natural."),
             (False, f"• {prefix}ia ayuda — Guía de IA."),
@@ -166,8 +167,9 @@ def _intro_lines(prefix: str) -> list[str]:
     return [
         "[CB] ✦ KATHERINE · GUÍA DE COMANDOS ✦",
         f"[C] Prefijos aceptados: {accepted_prefixes}",
-        f"[C] Usa {prefix}ayuda [categoría] para consultar todo o filtrar una sección.",
+        f"[C] Usa {prefix}menu para consultar la guía completa por secciones.",
         "[C] Catálogo de comandos · Accesos y funciones.",
+        "[C] Guía en texto, sin paneles ni botones.",
         "[C]",
     ]
 
@@ -246,6 +248,14 @@ def _normalize(value: str) -> str:
 
 
 @lru_cache(maxsize=64)
+def _help_prefix(help_text: str) -> str:
+    for line in str(help_text).splitlines():
+        if line.startswith('[C] Prefijos aceptados: '):
+            return line.removeprefix('[C] Prefijos aceptados: ').split(' / ', 1)[0].strip() or '!'
+        if line.startswith('[C] Prefijo principal: '):
+            return line.removeprefix('[C] Prefijo principal: ').split(' (', 1)[0].strip() or '!'
+    return '!'
+
 def filter_commands_help_text(help_text: str, topic: str | None = None) -> str:
     """Cache immutable full/category help text for frequently requested topics."""
     requested = _normalize(topic or "")
@@ -254,22 +264,14 @@ def filter_commands_help_text(help_text: str, topic: str | None = None) -> str:
 
     category_index = _CATEGORY_ALIASES.get(requested)
     if category_index is None:
-        prefix = "!"
-        for line in str(help_text).splitlines():
-            if line.startswith("[C] Prefijo principal: "):
-                prefix = line.removeprefix("[C] Prefijo principal: ").split(" (", 1)[0].strip() or "!"
-                break
+        prefix = _help_prefix(help_text)
         return (
             "[CB] ✦ KATHERINE · GUÍA DE COMANDOS ✦\n"
             f"[C] Categoría no reconocida. Disponibles: ia, genshin, social, juegos, musica, multimedia, admin.\n"
             f"[C] Ejemplo: {prefix}ayuda genshin."
         )
 
-    prefix = "!"
-    for line in str(help_text).splitlines():
-        if line.startswith("[C] Prefijo principal: "):
-            prefix = line.removeprefix("[C] Prefijo principal: ").split(" (", 1)[0].strip() or "!"
-            break
+    prefix = _help_prefix(help_text)
 
     _, sections = _command_help_sections(prefix)
     title, entries = sections[category_index]
