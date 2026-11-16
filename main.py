@@ -12442,19 +12442,6 @@ Uso: !enciclopedia <nombre>""",
         await send_message(thread, answer, source, reply)
         return
 
-    if command == "!economia":
-        await send_message(
-            thread,
-            "ECONOMÍA DE KATHERINE\n"
-            "!puntos — consulta tu saldo.\n"
-            "!diario — reclama 25-50 puntos cada 24 horas.\n"
-            "!trabajar — gana 8-22 puntos cada hora.\n"
-            "!pagar @usuario cantidad — transfiere hasta 10.000 puntos.",
-            source,
-            reply
-        )
-        return
-
 
     if command == "!encuesta":
         sub = args[0].casefold() if args else ""
@@ -12701,15 +12688,23 @@ Uso: !enciclopedia <nombre>""",
 
     if command == "!azar":
         parts = query.replace(",", " ").split()
-        try:
-            if len(parts) != 2:
-                raise ValueError
-            low, high = map(int, parts)
-            if low > high or high - low > 1_000_000:
-                raise ValueError
-            answer = f"🎲 Resultado aleatorio: {random.randint(low, high)}"
-        except ValueError:
-            answer = "Uso: !azar mínimo máximo (rango máximo: 1.000.000)."
+        if len(parts) == 1 and parts[0].casefold() in {"dado", "moneda"}:
+            mode = parts[0].casefold()
+            answer = (
+                f"🎲 Resultado: {random.randint(1, 6)}"
+                if mode == "dado"
+                else random.choice(["🪙 Cara", "🪙 Cruz"])
+            )
+        else:
+            try:
+                if len(parts) != 2:
+                    raise ValueError
+                low, high = map(int, parts)
+                if low > high or high - low > 1_000_000:
+                    raise ValueError
+                answer = f"🎲 Resultado aleatorio: {random.randint(low, high)}"
+            except ValueError:
+                answer = "Uso: !azar mínimo máximo | !azar dado | !azar moneda."
         await send_message(thread, answer, source, reply)
         return
 
@@ -12722,24 +12717,6 @@ Uso: !enciclopedia <nombre>""",
             "¿Cuál es tu mayor manía cuando juegas?"
         ]
         await send_message(thread, "VERDAD\n" + random.choice(truths), source, reply)
-        return
-
-    if command == "!dado":
-        await send_message(
-            thread,
-            f"🎲 Resultado: {random.randint(1, 6)}",
-            source,
-            reply
-        )
-        return
-
-    if command == "!moneda":
-        await send_message(
-            thread,
-            random.choice(["🪙 Cara", "🪙 Cruz"]),
-            source,
-            reply
-        )
         return
 
     if command == "!8ball":
@@ -12788,19 +12765,6 @@ Uso: !enciclopedia <nombre>""",
                 "Usa un personaje que nunca incluyes en tu equipo.",
                 "Explora una zona sin teletransportarte.",
                 "Derrota un jefe sin usar la definitiva."
-            ]),
-            source,
-            reply
-        )
-        return
-
-    if command == "!suerte":
-        await send_message(
-            thread,
-            random.choice([
-                "Hoy tendrás buena suerte.",
-                "La paciencia será tu aliada.",
-                "Una oportunidad inesperada aparecerá."
             ]),
             source,
             reply
