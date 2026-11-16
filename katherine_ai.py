@@ -2048,104 +2048,124 @@ class KatherineAI:
         provider_lock = self._provider_locks.setdefault(
             self.provider_name.casefold(), asyncio.Lock()
         )
-        async with provider_lock:
-            async with self._semaphore:
-                self.metrics["ai_provider_queue_wait_seconds"] += max(
-                    0.0, time.monotonic() - queued_at
-                )
-                state = self._provider_state()
-                if state["daily_quota_reset_at"] > time.monotonic():
-                    raise RuntimeError("IA_CUOTA_DIARIA_AGOTADA")
-
-                base_interval = (
+        base_interval = (
             3.1 if self.is_gemini
             else 2.1 if self.is_groq
             else 0.65
         )
-                response = None
-                max_attempts = 2
-                for attempt in range(max_attempts):
-                    now = time.monotonic()
-                    min_interval = max(
-                        base_interval,
-                        state["min_interval"],
-                        state["token_interval"],
-                    )
-                    spacing = max(
-                        min_interval - (now - state["last_request"]),
-                        state["cooldown_until"] - now,
-                    )
-                    if spacing > 0:
-                        await asyncio.sleep(spacing)
-                    attempt_started = time.monotonic()
-                    try:
-                        response = await request_func(
-                            "POST",
-                            request_url,
-                            headers=request_headers,
-                            json=body,
-                            timeout=8,
-                        )
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:
-                        if (
-                            attempt + 1 >= max_attempts
-                            or not self._is_transient_network_error(exc)
-                            or "timeout" in type(exc).__name__.casefold()
-                        ):
-                            raise
-                        delay = self._transient_retry_delay(None, attempt)
-                        self.metrics["ai_provider_retries"] += 1
-                        logging.warning(
-                            "[AI] %s tuvo un fallo de red transitorio (%s); "
-                            "reintento %s/%s en %.2f s.",
-                            self.provider_name,
-                            type(exc).__name__,
-                            attempt + 1,
-                            max_attempts - 1,
-                            delay,
-                        )
-                        await asyncio.sleep(delay)
-                        continue
-                    finally:
-                        self._record_provider_latency(attempt_started, attempt + 1)
-                    state["last_request"] = time.monotonic()
-                    self._provider_last_request = state["last_request"]
-                    self.metrics["ai_provider_requests"] += 1
-                    self._update_provider_limits(response)
 
-                    # Retry once without strict schema only when Groq explicitly
-                    # rejects response_format/schema. Application validation below
-                    # still enforces the complete action contract and step limits.
+        async def reserve_provider_slot() -> tuple[dict[str, Any], float]:
+            """Reserve a rate-safe request start without holding the lock during HTTP."""
+            async with provider_lock:
+                state = self._provider_state()
+                if state["daily_quota_reset_at"] > time.monotonic():
+                    raise RuntimeError("IA_CUOTA_DIARIA_AGOTADA")
+                now = time.monotonic()
+                min_interval = max(
+                    base_interval,
+                    float(state.get("min_interval", 0) or 0),
+                    float(state.get("token_interval", 0) or 0),
+                )
+                spacing = max(
+                    min_interval - (now - float(state.get("last_request", 0) or 0)),
+                    float(state.get("cooldown_until", 0) or 0) - now,
+                )
+                if spacing > 0:
+                    await asyncio.sleep(spacing)
+                request_started = time.monotonic()
+                # Pace requests from their start time, not after the provider
+                # finishes generating. This preserves the quota interval while
+                # allowing up to the existing semaphore limit to run concurrently.
+                state["last_request"] = request_started
+                self._provider_last_request = request_started
+                return state, request_started
+
+        response = None
+        max_attempts = 2
+        queue_wait_recorded = False
+        async with self._semaphore:
+            for attempt in range(max_attempts):
+                state, attempt_started = await reserve_provider_slot()
+                if not queue_wait_recorded:
+                    queue_wait = max(0.0, attempt_started - queued_at)
+                    self.metrics["ai_provider_queue_wait_seconds"] += queue_wait
+                    self.metrics["ai_provider_queue_wait_observations"] += 1
+                    logging.info(
+                        "[AI_QUEUE] proveedor=%s espera_ms=%.0f",
+                        self.provider_name,
+                        queue_wait * 1000,
+                    )
+                    queue_wait_recorded = True
+
+                try:
+                    response = await request_func(
+                        "POST",
+                        request_url,
+                        headers=request_headers,
+                        json=body,
+                        timeout=8,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
                     if (
-                        (self.is_groq or self.is_gemini)
-                        and output_format.get("type") == "json_schema"
-                        and _is_structured_output_rejection(response)
+                        attempt + 1 >= max_attempts
+                        or not self._is_transient_network_error(exc)
+                        or "timeout" in type(exc).__name__.casefold()
                     ):
-                        fallback_body = dict(body)
-                        if self.is_gemini:
-                            fallback_generation_config = {
-                                "responseMimeType": "application/json",
-                                "thinkingConfig": {"thinkingLevel": "minimal"},
-                            }
-                            if output_limit is not None:
-                                fallback_generation_config["maxOutputTokens"] = output_limit
-                            fallback_body["generationConfig"] = fallback_generation_config
-                        else:
-                            fallback_body["text"] = {"format": {"type": "json_object"}}
-                            fallback_body["instructions"] = (
-                                prompt_instructions
-                                + "\n\nDevuelve solo JSON válido sin Markdown. "
-                                + "Incluye kind, answer, command, args y steps. "
-                                + "steps debe ser una lista de cero a tres objetos con command y args."
-                            )
-                        logging.warning(
-                            "[AI] %s rechazó el esquema estructurado (HTTP 400); "
-                            "se reintenta una vez con JSON object.",
-                            self.provider_name,
+                        raise
+                    delay = self._transient_retry_delay(None, attempt)
+                    self.metrics["ai_provider_retries"] += 1
+                    logging.warning(
+                        "[AI] %s tuvo un fallo de red transitorio (%s); "
+                        "reintento %s/%s en %.2f s.",
+                        self.provider_name,
+                        type(exc).__name__,
+                        attempt + 1,
+                        max_attempts - 1,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                finally:
+                    self._record_provider_latency(attempt_started, attempt + 1)
+
+                self.metrics["ai_provider_requests"] += 1
+                self._update_provider_limits(response)
+
+                # Retry once without strict schema only when Groq explicitly
+                # rejects response_format/schema. Application validation below
+                # still enforces the complete action contract and step limits.
+                if (
+                    (self.is_groq or self.is_gemini)
+                    and output_format.get("type") == "json_schema"
+                    and _is_structured_output_rejection(response)
+                ):
+                    fallback_body = dict(body)
+                    if self.is_gemini:
+                        fallback_generation_config = {
+                            "responseMimeType": "application/json",
+                            "thinkingConfig": {"thinkingLevel": "minimal"},
+                        }
+                        if output_limit is not None:
+                            fallback_generation_config["maxOutputTokens"] = output_limit
+                        fallback_body["generationConfig"] = fallback_generation_config
+                    else:
+                        fallback_body["text"] = {"format": {"type": "json_object"}}
+                        fallback_body["instructions"] = (
+                            prompt_instructions
+                            + "\n\nDevuelve solo JSON válido sin Markdown. "
+                            + "Incluye kind, answer, command, args y steps. "
+                            + "steps debe ser una lista de cero a tres objetos con command y args."
                         )
-                        self.metrics["ai_provider_schema_fallbacks"] += 1
+                    logging.warning(
+                        "[AI] %s rechazó el esquema estructurado (HTTP 400); "
+                        "se reintenta una vez con JSON object.",
+                        self.provider_name,
+                    )
+                    self.metrics["ai_provider_schema_fallbacks"] += 1
+                    state, fallback_started = await reserve_provider_slot()
+                    try:
                         response = await request_func(
                             "POST",
                             request_url,
@@ -2153,71 +2173,71 @@ class KatherineAI:
                             json=fallback_body,
                             timeout=8,
                         )
-                        state["last_request"] = time.monotonic()
-                        self._provider_last_request = state["last_request"]
-                        self.metrics["ai_provider_requests"] += 1
-                        self._update_provider_limits(response)
+                    finally:
+                        self._record_provider_latency(fallback_started, attempt + 1)
+                    self.metrics["ai_provider_requests"] += 1
+                    self._update_provider_limits(response)
 
-                    if (
-                        getattr(response, "status_code", None) == 429
-                        and state["daily_quota_reset_at"] > time.monotonic()
-                    ):
-                        self.metrics["ai_provider_daily_quota_hits"] += 1
-                        logging.warning(
-                            "[AI] %s agotó una cuota diaria; se pausa la IA hasta el reinicio indicado.",
-                            self.provider_name,
-                        )
-                        raise RuntimeError("IA_CUOTA_DIARIA_AGOTADA")
-                    status_code = getattr(response, "status_code", None)
-                    if status_code in {408, 500, 502, 503, 504}:
-                        if attempt + 1 >= max_attempts:
-                            break
-                        delay = self._transient_retry_delay(response, attempt)
-                        if delay > 2.0:
-                            logging.warning(
-                                "[AI] %s pidió esperar %.2f s; se omite el reintento y se activa el respaldo.",
-                                self.provider_name, delay,
-                            )
-                            break
-                        self.metrics["ai_provider_retries"] += 1
-                        logging.warning(
-                            "[AI] %s HTTP %s transitorio; reintento %s/%s en %.2f s.",
-                            self.provider_name,
-                            status_code,
-                            attempt + 1,
-                            max_attempts - 1,
-                            delay,
-                        )
-                        await asyncio.sleep(delay)
-                        continue
-                    if status_code != 429:
-                        break
-                    self.metrics["ai_provider_429"] += 1
-                    daily_reset = self._daily_quota_reset_delay(response)
-                    if daily_reset is not None:
-                        self._daily_quota_reset_at = time.monotonic() + daily_reset
-                        state["daily_quota_reset_at"] = self._daily_quota_reset_at
-                        self.metrics["ai_provider_daily_quota_hits"] += 1
-                        logging.warning(
-                            "[AI] %s alcanzó una cuota diaria; no se harán reintentos prematuros.",
-                            self.provider_name,
-                        )
-                        raise RuntimeError("IA_CUOTA_DIARIA_AGOTADA")
+                if (
+                    getattr(response, "status_code", None) == 429
+                    and state["daily_quota_reset_at"] > time.monotonic()
+                ):
+                    self.metrics["ai_provider_daily_quota_hits"] += 1
+                    logging.warning(
+                        "[AI] %s agotó una cuota diaria; se pausa la IA hasta el reinicio indicado.",
+                        self.provider_name,
+                    )
+                    raise RuntimeError("IA_CUOTA_DIARIA_AGOTADA")
+                status_code = getattr(response, "status_code", None)
+                if status_code in {408, 500, 502, 503, 504}:
                     if attempt + 1 >= max_attempts:
                         break
-                    delay = self._provider_retry_delay(response, attempt)
+                    delay = self._transient_retry_delay(response, attempt)
                     if delay > 2.0:
                         logging.warning(
-                            "[AI] %s pidió esperar %.2f s por límite de solicitudes; se omite la espera larga.",
+                            "[AI] %s pidió esperar %.2f s; se omite el reintento y se activa el respaldo.",
                             self.provider_name, delay,
                         )
                         break
                     self.metrics["ai_provider_retries"] += 1
                     logging.warning(
-                        "[AI] %s HTTP 429; reintento %s/%s en %.2f s.",
-                        self.provider_name, attempt + 1, max_attempts - 1, delay,
+                        "[AI] %s HTTP %s transitorio; reintento %s/%s en %.2f s.",
+                        self.provider_name,
+                        status_code,
+                        attempt + 1,
+                        max_attempts - 1,
+                        delay,
                     )
                     await asyncio.sleep(delay)
+                    continue
+                if status_code != 429:
+                    break
+                self.metrics["ai_provider_429"] += 1
+                daily_reset = self._daily_quota_reset_delay(response)
+                if daily_reset is not None:
+                    self._daily_quota_reset_at = time.monotonic() + daily_reset
+                    state["daily_quota_reset_at"] = self._daily_quota_reset_at
+                    self.metrics["ai_provider_daily_quota_hits"] += 1
+                    logging.warning(
+                        "[AI] %s alcanzó una cuota diaria; no se harán reintentos prematuros.",
+                        self.provider_name,
+                    )
+                    raise RuntimeError("IA_CUOTA_DIARIA_AGOTADA")
+                if attempt + 1 >= max_attempts:
+                    break
+                delay = self._provider_retry_delay(response, attempt)
+                if delay > 2.0:
+                    logging.warning(
+                        "[AI] %s pidió esperar %.2f s por límite de solicitudes; se omite la espera larga.",
+                        self.provider_name, delay,
+                    )
+                    break
+                self.metrics["ai_provider_retries"] += 1
+                logging.warning(
+                    "[AI] %s HTTP 429; reintento %s/%s en %.2f s.",
+                    self.provider_name, attempt + 1, max_attempts - 1, delay,
+                )
+                await asyncio.sleep(delay)
         if not getattr(response, "is_success", False):
             status = getattr(response, "status_code", "desconocido")
             # Preserve only the provider's safe diagnostic fields; never log headers
