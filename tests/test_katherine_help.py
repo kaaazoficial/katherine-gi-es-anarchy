@@ -24,12 +24,15 @@ def test_full_help_matches_the_supplied_anarchy_layout():
     assert "[CB] ▸ Ayuda y Navegación" in text
     assert "[CB] ▸ Reproductor DJ" in text
     assert "[CB] ▸ Moderación y Configuración" in text
+    assert "!economia" not in text
+    assert "!suerte" not in text
+    assert "!azar <mín> <máx> | dado | moneda" in text
 
 
 def test_help_prefix_and_aliases_are_preserved():
     text = build_commands_help_text("$")
     assert "$ayuda <categoría>" in text
-    assert "$comandos / $menu / $menú" in text
+    assert "$ayuda — Muestra el catálogo completo" in text
     assert "$dj probar <tema>" in text
 
 

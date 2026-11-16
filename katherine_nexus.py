@@ -39,6 +39,9 @@ def _normalize(value: str) -> str:
 COMMAND_ALIASES = {
     "!buscar": ("!dj", ("buscar",)),
     "!guardian": ("!admin", ()),
+    "!dado": ("!azar", ("dado",)),
+    "!moneda": ("!azar", ("moneda",)),
+    "!suerte": ("!frase", ()),
 }
 
 
@@ -47,6 +50,7 @@ COMMAND_ALIASES = {
 NATURAL_COMMAND_ALIASES = {
     "menu": "menu",
     "menú": "menu",
+    "suerte": "frase",
     "mi-id": "mi-id",
     "mi_uid": "mi_uid",
     "guardian": "admin",
@@ -243,8 +247,8 @@ def interpret_natural_request(value: str) -> str | None:
         (r"^(?:abre|muestra|consulta) (?:el )?(?:panel de administracion|guardian)$", "guardian"),
         (r"^(?:dime|cuentame) (?:un )?chiste$", "chiste"),
         (r"^(?:dame|di) (?:una )?frase$", "frase"),
-        (r"^(?:lanza|tira) (?:un )?dado$", "dado"),
-        (r"^(?:lanza|tira) (?:una )?moneda$", "moneda"),
+        (r"^(?:lanza|tira) (?:un )?dado$", "azar dado"),
+        (r"^(?:lanza|tira) (?:una )?moneda$", "azar moneda"),
         (r"^(?:consulta|muestra|dime) (?:mis )?puntos$", "puntos"),
         (r"^(?:muestra|abre|consulta) (?:el )?ranking$", "ranking"),
         (r"^(?:muestra|consulta) (?:mi )?perfil$", "perfil"),

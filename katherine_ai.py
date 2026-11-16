@@ -23,7 +23,7 @@ RequestFunc = Callable[..., Awaitable[Any]]
 AI_PUBLIC_COMMANDS = frozenset({
     # Ayuda, consulta e investigación
     "ayuda", "comandos", "menu",
-    "fecha", "zona", "miuid", "perfil", "puntos", "ranking", "actividad", "economia",
+    "fecha", "zona", "miuid", "perfil", "puntos", "ranking", "actividad",
     "investigar", "calcular", "traducir", "multimedia", "media", "imagen",
     "video", "audio",
     # Comunidad y perfiles propios
@@ -37,7 +37,7 @@ AI_PUBLIC_COMMANDS = frozenset({
     # Juegos y economía personal
     "trivia", "responder", "adivina", "intento", "diario", "daily", "trabajar",
     "pagar", "transferir", "encuesta", "elige", "duelo", "ship", "azar",
-    "verdad", "dado", "moneda", "8ball", "chiste", "frase", "reto", "suerte",
+    "verdad", "8ball", "chiste", "frase", "reto",
     # Música, voz y sala
     "dj", "reproducir", "pausa", "pausar", "reanudar", "continuar", "saltar",
     "cola", "join", "salirsala", "djdetener", "djstop", "salas", "playlist",
@@ -69,7 +69,7 @@ GENSHIN_ONLY_TOOL_COMMANDS = frozenset({
 # as individual explicit actions only.
 AI_PLAN_SAFE_COMMANDS = frozenset({
     "ayuda", "comandos", "estado", "fuentes", "saludfuentes", "fecha", "zona",
-    "perfil", "puntos", "ranking", "actividad", "economia", "enciclopedia",
+    "perfil", "puntos", "ranking", "actividad", "enciclopedia",
     "archivo", "teyvat", "guia", "equipos", "rotacion", "materiales",
     "reacciones", "buscargenshin", "banner", "calendario", "cobertura",
     "sinergia", "jefes", "lista", "enemigo", "geografia", "elemento",
@@ -123,7 +123,6 @@ AI_COMMAND_CATALOG = {
     "muro": "sin argumentos: consulta regalos recibidos.",
     "evento": "crear título | estado | cerrar: gestiona eventos temporales de la sala.",
     "roast": "@usuario: broma amistosa.",
-    "economia": "sin argumentos: explica puntos y recompensas.",
     "diario": "sin argumentos: reclama recompensa diaria (acción personal con espera).",
     "daily": "alias de diario.",
     "trabajar": "sin argumentos: gana puntos respetando el enfriamiento.",
@@ -135,13 +134,10 @@ AI_COMMAND_CATALOG = {
     "ship": "@usuario1 @usuario2: juego social.",
     "azar": "mínimo máximo: elige un número dentro del rango.",
     "verdad": "sin argumentos: juego de verdad.",
-    "dado": "sin argumentos: lanza un dado.",
-    "moneda": "sin argumentos: lanza una moneda.",
     "8ball": "pregunta: respuesta aleatoria.",
     "chiste": "sin argumentos: cuenta un chiste.",
     "frase": "sin argumentos: frase aleatoria.",
     "reto": "sin argumentos: propone un reto.",
-    "suerte": "sin argumentos: consulta la suerte.",
     "trivia": "sin argumentos: inicia trivia interactiva.",
     "responder": "1-4: responde la trivia activa.",
     "adivina": "sin argumentos: inicia juego de adivinar un número.",
@@ -675,7 +671,6 @@ AI_TOOL_REQUEST_HINTS = (
     ({"puntos"}, ("mi saldo", "mis puntos", "cuantos puntos", "saldo de puntos")),
     ({"ranking"}, ("ranking", "clasificacion de puntos", "tabla de puntos")),
     ({"actividad"}, ("actividad de la sala", "actividad del chat")),
-    ({"economia"}, ("economia", "como funcionan los puntos", "recompensas")),
     ({"diario", "daily"}, ("recompensa diaria", "reclama el diario", "diario", "daily")),
     ({"trabajar"}, ("trabajar", "ganar puntos")),
     ({"pagar", "transferir"}, ("pagar", "transfiere", "transferir puntos", "envia puntos")),
@@ -689,13 +684,10 @@ AI_TOOL_REQUEST_HINTS = (
     ({"ship"}, ("ship", "compatibilidad entre")),
     ({"azar"}, ("numero aleatorio", "elige un numero", "al azar")),
     ({"verdad"}, ("verdad", "juego de verdad")),
-    ({"dado"}, ("lanza un dado", "tirar un dado", "dado")),
-    ({"moneda"}, ("lanza una moneda", "tirar una moneda", "moneda")),
     ({"8ball"}, ("8ball", "bola magica")),
     ({"chiste"}, ("chiste", "cuenta un chiste")),
     ({"frase"}, ("frase del dia", "frase aleatoria")),
     ({"reto"}, ("reto", "desafio")),
-    ({"suerte"}, ("suerte", "fortuna")),
     ({"dj"}, ("busca musica", "buscar musica", "pon musica", "musica ambiente", "cancion para", "que suene")),
     ({"dj", "reproducir"}, ("reproduce musica", "reproducir musica", "escuchar musica")),
     ({"reproducir"}, ("reproduce", "reproducir", "pon la cancion", "escuchar la cancion")),
