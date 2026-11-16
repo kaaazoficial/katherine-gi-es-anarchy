@@ -10791,10 +10791,19 @@ async def _handle_command_impl(event: dict, source: str):
         allowed_ai_commands = (AI_COMMANDS_ADMIN if is_privileged_uid(admin_uid) else AI_COMMANDS_PUBLIC)
         metrics["ai_requests"] += 1
         ai_rate_key = build_ai_rate_key(source, thread, author)
+        ai_started_at = time.perf_counter()
         ai_result = await AI_CORE.assist(
             request_text, session_key, external_request,
             allowed_commands=allowed_ai_commands,
             rate_key=ai_rate_key,
+        )
+        ai_elapsed = max(0.0, time.perf_counter() - ai_started_at)
+        metrics["ai_assist_latency_seconds_total"] += ai_elapsed
+        metrics["ai_assist_latency_observations"] += 1
+        logging.info(
+            "[AI_TOTAL_LATENCY] tiempo_ms=%.0f tipo=%s",
+            ai_elapsed * 1000,
+            str(ai_result.get("kind") or "unknown"),
         )
         fallback_command = str(event.get("_nexus_fallback_command") or "").strip()
         provider_failed = bool(ai_result.get("fallback"))
