@@ -4,7 +4,19 @@ from __future__ import annotations
 import re
 import unicodedata
 
-from rapidfuzz.fuzz import ratio
+
+
+_NAME_RATIO = None
+
+
+def _name_similarity(left: str, right: str) -> float:
+    """Resolve fuzzy matching only when a non-exact Katherine alias is tested."""
+    global _NAME_RATIO
+    if _NAME_RATIO is None:
+        from rapidfuzz.fuzz import ratio
+
+        _NAME_RATIO = ratio
+    return _NAME_RATIO(left, right)
 
 
 NAME_ALIASES = frozenset({
@@ -81,7 +93,7 @@ def _is_katherine_name(value: str) -> bool:
         return True
     if not 7 <= len(candidate) <= 10:
         return False
-    return ratio(candidate, "katherine") >= 82
+    return _name_similarity(candidate, "katherine") >= 82
 
 
 def _is_direct_vocative(text: str, match: re.Match) -> bool:
