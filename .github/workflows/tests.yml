@@ -81,6 +81,31 @@ jobs:
       - name: Compile bot source
         run: python -m compileall -q .
 
+      - name: Report top startup import costs
+        run: |
+          python -X importtime -c "import main" 2> /tmp/katherine-importtime.log
+          python - <<'PY'
+          from pathlib import Path
+
+          entries = []
+          for line in Path("/tmp/katherine-importtime.log").read_text().splitlines():
+              if not line.startswith("import time:"):
+                  continue
+              fields = line.split("|")
+              if len(fields) < 3:
+                  continue
+              try:
+                  cumulative_us = float(fields[2].strip())
+              except ValueError:
+                  continue
+              module = fields[3].strip() if len(fields) > 3 else "unknown"
+              entries.append((cumulative_us, module))
+
+          print("Top cumulative import costs (Python importtime; milliseconds):")
+          for elapsed, module in sorted(entries, reverse=True)[:20]:
+              print(f"{elapsed / 1000:8.2f} ms  {module}")
+          PY
+
       - name: Run automated tests with coverage
         run: python -m pytest -q --ignore=tests/integration --cov=main --cov=katherine_language --cov=katherine_identity --cov=katherine_ai --cov=katherine_nexus --cov=katherine_astra --cov=katherine_research --cov=katherine_retention --cov=katherine_help --cov=katherine_storage --cov=katherine_images --cov-report=term-missing --timeout=120
 
