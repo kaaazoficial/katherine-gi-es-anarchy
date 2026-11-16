@@ -7,6 +7,15 @@ import pytest
 import main as bot_main
 
 
+def test_ai_transport_has_reserved_capacity_separate_from_background_requests():
+    assert bot_main.external_request_semaphore() is bot_main.EXTERNAL_GLOBAL_LIMIT
+    token = bot_main.AI_PRIORITY_REQUEST.set(True)
+    try:
+        assert bot_main.external_request_semaphore() is bot_main.EXTERNAL_AI_LIMIT
+    finally:
+        bot_main.AI_PRIORITY_REQUEST.reset(token)
+
+
 def test_ai_plan_executor_has_one_safe_definition():
     parameters = inspect.signature(bot_main.execute_ai_plan).parameters
     assert "request_text" in parameters

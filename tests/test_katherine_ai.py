@@ -930,6 +930,37 @@ async def test_provider_does_not_retry_non_429_errors(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_transient_primary_failure_fails_over_without_second_generation(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
+    ai = KatherineAI()
+    ai.provider_default_min_interval = {"Google Gemini": 0.0, "Groq": 0.0}
+    calls = []
+
+    async def fake_request(method, url, **kwargs):
+        calls.append(url)
+        if "generativelanguage.googleapis.com" in url:
+            return FakeResponse({"error": {"message": "temporarily unavailable"}}, status_code=503)
+        return FakeResponse(response_payload({
+            "kind": "answer", "answer": "Respuesta de respaldo.",
+            "command": "", "args": "", "steps": [],
+        }))
+
+    result = await ai._request_json(
+        "Responde en JSON.",
+        [{"role": "user", "content": "Hola"}],
+        fake_request,
+    )
+
+    assert result["answer"] == "Respuesta de respaldo."
+    assert len(calls) == 2
+    assert "generativelanguage.googleapis.com" in calls[0]
+    assert "api.groq.com" in calls[1]
+    assert ai.metrics["ai_provider_failovers"] == 1
+    assert ai.metrics["ai_provider_retries"] == 0
+
+
+@pytest.mark.asyncio
 async def test_same_provider_requests_can_overlap_without_holding_pacing_lock(monkeypatch):
     monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
     monkeypatch.setenv("KATHERINE_AI_API_URL", "https://api.groq.com/openai/v1/responses")
