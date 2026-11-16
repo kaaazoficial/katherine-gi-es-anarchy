@@ -30,7 +30,7 @@ from pathlib import Path
 from collections import defaultdict, deque
 from typing import Any
 from html.parser import HTMLParser
-from urllib.parse import urljoin, quote, urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urljoin, quote, urlparse, urlsplit, urlunsplit
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
