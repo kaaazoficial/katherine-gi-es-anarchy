@@ -1060,6 +1060,9 @@ _CHAT_ACTIVITY_CLOCK_MINUTE = -1
 _CHAT_ACTIVITY_CLOCK_VALUE = ("", 0)
 
 EXTERNAL_GLOBAL_LIMIT = asyncio.Semaphore(10)
+# Keep interactive AI traffic from queuing behind research, media and DJ downloads.
+EXTERNAL_AI_LIMIT = asyncio.Semaphore(6)
+AI_PRIORITY_REQUEST = ContextVar("katherine_ai_priority_request", default=False)
 EXTERNAL_HOST_LIMITS = {}
 SOURCE_HEALTH = {}
 poll_button_map: dict[str, str] = {}
@@ -1753,7 +1756,8 @@ async def external_request(method: str, url: str, **kwargs):
     attempts = 3 if safe_retry else 1
     last_error = None
 
-    async with EXTERNAL_GLOBAL_LIMIT:
+    global_limit = EXTERNAL_AI_LIMIT if AI_PRIORITY_REQUEST.get() else EXTERNAL_GLOBAL_LIMIT
+    async with global_limit:
         async with host_semaphore:
             for attempt in range(attempts):
                 started = time.perf_counter()
@@ -10792,11 +10796,15 @@ async def _handle_command_impl(event: dict, source: str):
         metrics["ai_requests"] += 1
         ai_rate_key = build_ai_rate_key(source, thread, author)
         ai_started_at = time.perf_counter()
-        ai_result = await AI_CORE.assist(
-            request_text, session_key, external_request,
-            allowed_commands=allowed_ai_commands,
-            rate_key=ai_rate_key,
-        )
+        ai_priority_token = AI_PRIORITY_REQUEST.set(True)
+        try:
+            ai_result = await AI_CORE.assist(
+                request_text, session_key, external_request,
+                allowed_commands=allowed_ai_commands,
+                rate_key=ai_rate_key,
+            )
+        finally:
+            AI_PRIORITY_REQUEST.reset(ai_priority_token)
         ai_elapsed = max(0.0, time.perf_counter() - ai_started_at)
         metrics["ai_assist_latency_seconds_total"] += ai_elapsed
         metrics["ai_assist_latency_observations"] += 1
