@@ -3633,7 +3633,7 @@ async def search_audius_audio(query: str, limit: int = 5) -> list[dict]:
         user = item.get("user") if isinstance(item.get("user"), dict) else {}
         stream_url = (
             f"{AUDIUS_API}/tracks/{quote(track_id, safe='')}/stream"
-            f"?app_name={quote(AUDIUS_APP_NAME, safe='')}"
+            f"?app_name={quote(AUDIUS_APP_NAME, safe='')}&no_redirect=true"
         )
         if not dj_audio_url_allowed(stream_url):
             continue
@@ -5587,13 +5587,82 @@ async def enqueue_message_for_speech(event: dict, source: str):
         )
 
 
+async def resolve_audius_stream_url(url: str) -> str:
+    """Resolve Audius' stream endpoint through its documented JSON no-redirect mode."""
+    try:
+        parsed = urlsplit(str(url or "").strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError("El enlace de Audius está mal formado.") from exc
+
+    match = re.fullmatch(r"/v1/tracks/([A-Za-z0-9_-]{1,128})/stream/?", parsed.path)
+    if (
+        parsed.scheme != "https"
+        or not dj_audio_host_allowed(parsed.hostname or "")
+        or parsed.port not in (None, 443)
+        or parsed.username
+        or parsed.password
+        or not match
+    ):
+        raise ValueError("El endpoint de streaming no pertenece a Audius.")
+
+    query_values = parse_qs(parsed.query)
+    app_name = str((query_values.get("app_name") or [AUDIUS_APP_NAME])[0]).strip()
+    if not app_name or len(app_name) > 80:
+        raise ValueError("La identificación de la aplicación Audius no es válida.")
+
+    endpoint = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    response = await external_request(
+        "GET",
+        endpoint,
+        params={
+            "app_name": app_name,
+            "no_redirect": "true",
+            "skip_play_count": "true",
+        },
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Katherine-AnarchyBot/3.3",
+        },
+        timeout=20,
+        safe_public=True,
+        max_response_bytes=256 * 1024,
+    )
+    if not response.is_success:
+        raise RuntimeError(f"Audius no pudo resolver la pista (HTTP {response.status_code}).")
+
+    try:
+        payload = response.json()
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("Audius devolvió una respuesta de streaming no válida.") from exc
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    stream_url = data.get("url") if isinstance(data, dict) else None
+    stream_url = str(stream_url or "").strip()
+    if not stream_url or not dj_audio_url_allowed(stream_url):
+        raise ValueError("Audius no devolvió una URL de audio HTTPS autorizada.")
+    return stream_url
+
+
 async def _download_dj_audio_uncached(url: str, file_extension: str | None = None) -> Path:
     """Stream a catalog track to disk with allowlist, DNS pinning and strict byte caps."""
+    source_url = str(url or "").strip()
     try:
-        parsed = urlparse(str(url))
+        parsed_source = urlsplit(source_url)
     except (TypeError, ValueError) as exc:
         raise ValueError("El enlace de audio está mal formado.") from exc
-    if not dj_audio_url_allowed(url):
+
+    if (
+        parsed_source.scheme == "https"
+        and dj_audio_host_allowed(parsed_source.hostname or "")
+        and re.fullmatch(r"/v1/tracks/[A-Za-z0-9_-]{1,128}/stream/?", parsed_source.path)
+    ):
+        source_url = await resolve_audius_stream_url(source_url)
+
+    try:
+        parsed = urlsplit(source_url)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("El enlace de audio está mal formado.") from exc
+    if not dj_audio_url_allowed(source_url):
         raise ValueError("El enlace no pertenece a una fuente musical autorizada.")
 
     suffix = Path(parsed.path).suffix.lower()
@@ -5619,7 +5688,7 @@ async def _download_dj_audio_uncached(url: str, file_extension: str | None = Non
                     timeout=timeout, follow_redirects=False,
                     headers=headers, trust_env=False,
                 ) as client:
-                    current_url = str(url)
+                    current_url = source_url
                     locked_hosts = set()
                     response = None
                     for redirect_count in range(4):
@@ -5682,9 +5751,22 @@ async def _download_dj_audio_uncached(url: str, file_extension: str | None = Non
                         await response.aclose()
                         if not location or redirect_count >= 3:
                             raise RuntimeError("La fuente musical excedió el límite de redirecciones.")
-                        current_url = urljoin(current_url, location)
-                        if not dj_audio_url_allowed(current_url):
+                        redirect_url = urljoin(current_url, location)
+                        if not dj_audio_url_allowed(redirect_url):
+                            try:
+                                blocked = urlsplit(redirect_url)
+                                blocked_host = (blocked.hostname or "desconocido").lower()[:120]
+                                blocked_scheme = blocked.scheme.lower()[:12] or "desconocido"
+                            except (TypeError, ValueError):
+                                blocked_host, blocked_scheme = "desconocido", "desconocido"
+                            logging.warning(
+                                "[DJ] Redirección bloqueada | origen=%s | destino=%s://%s",
+                                current_host,
+                                blocked_scheme,
+                                blocked_host,
+                            )
                             raise ValueError("La descarga redirigió a un dominio no autorizado.")
+                        current_url = redirect_url
 
                     if response is None:
                         raise RuntimeError("No se pudo iniciar la descarga musical.")
@@ -14420,12 +14502,18 @@ async def select_dj_search_result(
         ok, message = await start_dj_room(
             str(thread_id), track["url"], False, track_metadata=track, enqueue=True
         )
+        if not ok:
+            metrics["dj_selected_track_failures"] += 1
         return ok, message, track if ok else None
 
-    ok, message, selected, _ = await start_dj_search_with_fallback(
-        str(thread_id), tracks, index
+    # A button is an explicit choice: never silently play a different search result.
+    ok, message = await start_dj_room(
+        str(thread_id), track["url"], False, track_metadata=track
     )
-    return ok, message, selected
+    if not ok:
+        metrics["dj_selected_track_failures"] += 1
+        return False, f"No pude reproducir «{track.get('title') or 'la pista seleccionada'}». No cambié a otra canción. {message}", None
+    return True, message, track
 
 
 def is_button_source_allowed(action: dict, source: str) -> bool:
