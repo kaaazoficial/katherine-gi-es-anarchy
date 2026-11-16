@@ -12,10 +12,30 @@ import logging
 import os
 import re
 import time
-from defusedxml import ElementTree as ET
 from html.parser import HTMLParser
 from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, quote, urljoin, urlsplit, urlunsplit
+
+
+class _LazyElementTree:
+    """Import the hardened XML parser only for the arXiv feature."""
+
+    def __init__(self) -> None:
+        self._module = None
+
+    def __getattr__(self, name: str):
+        module = self._module
+        if module is None:
+            from defusedxml import ElementTree
+
+            module = ElementTree
+            self._module = module
+        return getattr(module, name)
+
+
+# Preserve the small ET surface used by this module and its tests while making
+# importing web-research helpers cheap for ordinary message handling.
+ET = _LazyElementTree()
 
 RequestFunc = Callable[..., Awaitable[Any]]
 SEARCH_URL = "https://html.duckduckgo.com/html/"
