@@ -671,3 +671,22 @@ def test_active_moderation_warning_count_uses_active_only(database):
     assert database.count_active_moderation_warnings("room", "target") == 1
     assert database.revoke_moderation_warning("room", warning_id, "admin")
     assert database.count_active_moderation_warnings("room", "target") == 0
+
+
+def test_creator_uid_is_exact_and_separate_from_admins(monkeypatch):
+    monkeypatch.setattr(katherine, "SINNER_UID", "creator-uid")
+    monkeypatch.setattr(katherine, "ADMIN_UIDS", {"admin-uid"})
+
+    assert katherine.is_sinner_uid("creator-uid")
+    assert not katherine.is_sinner_uid("Creator-UID")
+    assert not katherine.is_sinner_uid("admin-uid")
+    assert katherine.is_privileged_uid("creator-uid")
+    assert katherine.is_privileged_uid("admin-uid")
+    assert not katherine.is_privileged_uid("")
+
+
+def test_creator_console_commands_are_not_admin_commands():
+    assert katherine.CREATOR_ONLY_COMMANDS == {
+        "!sistema", "!diagnostico", "!rendimiento", "!laboratorio"
+    }
+    assert not (katherine.CREATOR_ONLY_COMMANDS & katherine.ADMIN_ONLY_COMMANDS)
