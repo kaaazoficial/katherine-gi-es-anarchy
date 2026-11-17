@@ -7,6 +7,12 @@ import pytest
 import main as bot_main
 
 
+def test_all_api_source_labels_resolve_to_the_community_token(monkeypatch):
+    monkeypatch.setattr(bot_main, "COMMUNITY_TOKEN", "community-token-for-test")
+    assert bot_main.token_for("community") == "community-token-for-test"
+    assert bot_main.token_for("developer") == "community-token-for-test"
+
+
 def test_ai_transport_has_reserved_capacity_separate_from_background_requests():
     assert bot_main.external_request_semaphore() is bot_main.EXTERNAL_GLOBAL_LIMIT
     token = bot_main.AI_PRIORITY_REQUEST.set(True)
