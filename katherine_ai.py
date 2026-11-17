@@ -347,7 +347,7 @@ def resolve_community_faq(question: str) -> str | None:
         "quien te desarrollo", "quien te programo", "quien es tu desarrollador",
     )
     if any(x in text for x in creator):
-        return ("En mi historia, mi origen está ligado a las marionetas biónicas de Snezhnaya y a la tecnología asociada a los Fatui y Sandrone. En esta comunidad, Sinner creó y desarrolla esta versión de mí.")
+        return "Mi creador es Sinner."
 
     if (
         ("anarchy apps" in text and any(
@@ -456,7 +456,7 @@ def is_contextual_genshin_followup(
 def build_domain_drift_recovery() -> str:
     """User-facing recovery when the model keeps drifting after a guarded retry."""
     return (
-        "Disculpa, me he apartado de lo que me preguntaste y no quiero darte información incorrecta. "
+        "Me desvié de tu pregunta y no quiero darte información incorrecta. "
         "¿Podrías concretar qué necesitas saber o qué aspecto del tema te interesa? Con gusto te orientaré."
     )
 
@@ -2429,7 +2429,7 @@ class KatherineAI:
             return {
                 "kind": "answer",
                 "answer": (
-                    "Por ahora no tengo conectada la conversación inteligente, pero mis "
+                    "La conversación inteligente todavía no está conectada, pero mis "
                     "funciones habituales siguen disponibles. Cuéntame qué necesitas y te "
                     "orientaré con mucho gusto dentro de las herramientas que tengo activas."
                 ),
