@@ -1,10 +1,10 @@
-# Katherine — Genshin Impact ES en Anarchy
+# Katheryne — Genshin Impact ES en Anarchy
 
-Katherine es el bot comunitario de Genshin Impact ES en Anarchy, desarrollado en Python con FastAPI. Anarchy Apps es su plataforma anfitriona. Integra comandos de Genshin, moderación, herramientas sociales, asistencia conversacional, investigación web, música y voz.
+Katheryne es el bot comunitario de Genshin Impact ES en Anarchy, desarrollado en Python con FastAPI. Anarchy Apps es su plataforma anfitriona. Integra comandos de Genshin, moderación, herramientas sociales, asistencia conversacional, investigación web, música y voz.
 
 ## Identidad y credenciales
 
-Katherine utiliza una sola identidad: el bot comunitario. Configura `COMMUNITY_BOT_TOKEN` y `COMMUNITY_WEBHOOK_SECRET` en el proveedor. Las credenciales heredadas `BOT_TOKEN` y `WEBHOOK_SECRET` ya no forman parte del runtime. Los endpoints `/`, `/webhook` y `/community` validan el mismo secreto comunitario.
+Katheryne utiliza una sola identidad: el bot comunitario. Configura `COMMUNITY_BOT_TOKEN` y `COMMUNITY_WEBHOOK_SECRET` en el proveedor. Las credenciales heredadas `BOT_TOKEN` y `WEBHOOK_SECRET` ya no forman parte del runtime. Los endpoints `/`, `/webhook` y `/community` validan el mismo secreto comunitario.
 
 ## Arquitectura
 - `main.py`: orquestación de webhooks, despacho y compatibilidad con los comandos de Anarchy.
@@ -17,7 +17,7 @@ Katherine utiliza una sola identidad: el bot comunitario. Configura `COMMUNITY_B
 - `tests/`: pruebas unitarias y de regresión.
 
 ## Privacidad
-Katherine no crea memoria personal permanente ni almacena conversaciones como historial a largo plazo. El contexto de IA es temporal y en memoria; no se recopilan mensajes de sala para resúmenes ni se registran preguntas y respuestas de IA. Los registros operativos deben evitar secretos y minimizar datos personales.
+Katheryne no crea memoria personal permanente ni almacena conversaciones como historial a largo plazo. El contexto de IA es temporal y en memoria; no se recopilan mensajes de sala para resúmenes ni se registran preguntas y respuestas de IA. Los registros operativos deben evitar secretos y minimizar datos personales.
 
 ## Desarrollo y pruebas
 Requiere Python 3.11 o posterior.
