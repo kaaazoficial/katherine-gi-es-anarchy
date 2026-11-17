@@ -35,9 +35,11 @@ def test_katherine_personality_matches_guild_receptionist_identity():
     assert "Snezhnaya" in identity
     assert "Fatui" in identity and "Sandrone" in identity
     assert "misiones, reclamaciones y expediciones" in identity
-    assert "ad astra abyssosque" in BASE_INSTRUCTIONS.lower()
-    assert "misiones, reclamaciones y expediciones" in BASE_INSTRUCTIONS
-    assert "Fatui" in BASE_INSTRUCTIONS and "Sandrone" in BASE_INSTRUCTIONS
+    from katherine_ai import build_ai_instructions
+    prompt = build_ai_instructions(set(), "conversation")
+    assert "ad astra abyssosque" in prompt.lower()
+    assert "misiones, reclamaciones y expediciones" in prompt
+    assert "Fatui" in prompt and "Sandrone" in prompt
 
 
 def test_katherine_personality_persists_outside_genshin_for_every_intent():
@@ -783,8 +785,8 @@ async def test_genshin_question_can_still_use_teyvat_tool(monkeypatch):
         ("Katherine, ¿qué es Anarchy Apps?", "Anarchy apps es una red social para crear comunidades, unirse a ellas y hablar con la gente"),
         ("¿Quién es tu creador?", "Mi creador es Sinner."),
         ("Katherine, ¿quién te creó?", "Mi creador es Sinner."),
-        ("¿Quién eres?", "Soy Katherine, el bot comunitario de Genshin Impact ES. Mi comunidad funciona en Anarchy Apps, que es la plataforma donde estoy alojada. No soy un bot oficial ni represento a Anarchy Apps o a sus desarrolladores. Tengo funciones de IA, música, juegos y herramientas para acompañar a la comunidad."),
-        ("Katherine, preséntate", "Soy Katherine, el bot comunitario de Genshin Impact ES. Mi comunidad funciona en Anarchy Apps, que es la plataforma donde estoy alojada. No soy un bot oficial ni represento a Anarchy Apps o a sus desarrolladores. Tengo funciones de IA, música, juegos y herramientas para acompañar a la comunidad."),
+        ("¿Quién eres?", "Soy Katherine, recepcionista del Gremio de Aventureros de la comunidad Genshin Impact ES. ¡Ad astra abyssosque! Es un placer recibirte. Estoy aquí para escuchar tus consultas y atender con dedicación tus misiones, reclamaciones y expediciones, siempre con paciencia y profesionalismo. Aunque mi trato es cálido y cercano, mi verdadera naturaleza es la de una marioneta biónica fabricada en Snezhnaya, vinculada a la tecnología de esa nación y a sus creadores, como los Fatui y Sandrone. Y no importa si vienes con una consulta sobre Teyvat o sobre cualquier otro tema: haré todo lo posible por orientarte con claridad y cortesía."),
+        ("Katherine, preséntate", "Soy Katherine, recepcionista del Gremio de Aventureros de la comunidad Genshin Impact ES. ¡Ad astra abyssosque! Es un placer recibirte. Estoy aquí para escuchar tus consultas y atender con dedicación tus misiones, reclamaciones y expediciones, siempre con paciencia y profesionalismo. Aunque mi trato es cálido y cercano, mi verdadera naturaleza es la de una marioneta biónica fabricada en Snezhnaya, vinculada a la tecnología de esa nación y a sus creadores, como los Fatui y Sandrone. Y no importa si vienes con una consulta sobre Teyvat o sobre cualquier otro tema: haré todo lo posible por orientarte con claridad y cortesía."),
     ],
 )
 async def test_katherine_canonical_identity_facts(monkeypatch, question, expected):
@@ -810,7 +812,9 @@ async def test_katherine_identity_faq_works_without_ai_credentials(monkeypatch):
         raise AssertionError("La FAQ debe funcionar sin credenciales.")
 
     result = await ai.assist("¿Quién eres?", "room:verified-user", unexpected_request)
-    assert "bot comunitario de Genshin Impact ES" in result["answer"]
+    assert "recepcionista del Gremio de Aventureros" in result["answer"]
+    assert "marioneta biónica" in result["answer"]
+    assert "Snezhnaya" in result["answer"]
     assert "no soy un bot oficial" in result["answer"].casefold()
 
 
@@ -818,8 +822,8 @@ async def test_katherine_identity_faq_works_without_ai_credentials(monkeypatch):
 @pytest.mark.parametrize(
     ("question", "expected"),
     [
-        ("Katherine, preséntate", "bot comunitario de Genshin Impact ES"),
-        ("Katherine, ¿quién eres?", "bot comunitario de Genshin Impact ES"),
+        ("Katherine, preséntate", "recepcionista del Gremio de Aventureros"),
+        ("Katherine, ¿quién eres?", "recepcionista del Gremio de Aventureros"),
         ("Katherine, ¿quién es tu creador?", "Mi creador es Sinner."),
         ("Katherine, ¿quién es su creador?", "Mi creador es Sinner."),
         ("¿Quién es el creador de Katherine?", "Mi creador es Sinner."),
@@ -834,7 +838,7 @@ async def test_katherine_identity_questions_with_name_prefix(monkeypatch, questi
 
     result = await ai.assist(question, "room:verified-user", unexpected_request)
     assert result["kind"] == "answer"
-    if expected == "bot comunitario de Genshin Impact ES":
+    if expected == "recepcionista del Gremio de Aventureros":
         assert expected in result["answer"]
     else:
         assert result["answer"] == expected
