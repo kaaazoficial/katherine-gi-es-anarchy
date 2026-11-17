@@ -112,7 +112,7 @@ async def test_signed_community_webhook_is_accepted_and_dispatched(
     }
 
     async with asgi_client as client:
-        response = await post_signed(client, "/webhook", event, "obsolete-developer-secret")
+        response = await post_signed(client, "/webhook", event, COMMUNITY_SECRET)
         await drain_webhook_tasks()
 
     assert response.status_code == 200
@@ -188,9 +188,9 @@ async def test_duplicate_event_id_is_accepted_once(
     }
 
     async with asgi_client as client:
-        first = await post_signed(client, "/webhook", event, "obsolete-developer-secret")
+        first = await post_signed(client, "/webhook", event, COMMUNITY_SECRET)
         await drain_webhook_tasks()
-        second = await post_signed(client, "/webhook", event, "obsolete-developer-secret")
+        second = await post_signed(client, "/webhook", event, COMMUNITY_SECRET)
         await drain_webhook_tasks()
 
     assert first.status_code == 200
@@ -216,7 +216,7 @@ async def test_invalid_and_expired_signatures_are_rejected(
         "type": "thread.added",
         "threadId": "signature-room",
     }
-    raw, headers = signed_request(event, "obsolete-developer-secret")
+    raw, headers = signed_request(event, COMMUNITY_SECRET)
     headers["X-Anarchy-Bot-Signature"] = "v1=" + ("0" * 64)
 
     async with asgi_client as client:
@@ -225,7 +225,7 @@ async def test_invalid_and_expired_signatures_are_rejected(
             client,
             "/webhook",
             {**event, "eventId": "integration-expired-001"},
-            "obsolete-developer-secret",
+            COMMUNITY_SECRET,
             timestamp=int(time.time()) - 301,
         )
         await drain_webhook_tasks()
@@ -244,7 +244,7 @@ async def test_signed_malformed_json_is_rejected(
     raw = b"{not valid json"
     timestamp = str(int(time.time()))
     signature = hmac.new(
-        "obsolete-developer-secret".encode(),
+        COMMUNITY_SECRET.encode(),
         timestamp.encode("ascii") + b"." + raw,
         hashlib.sha256,
     ).hexdigest()
@@ -325,7 +325,7 @@ async def test_webhook_dispatches_signed_command_through_real_dispatch_pipeline(
     }
 
     async with asgi_client as client:
-        response = await post_signed(client, "/webhook", event, "obsolete-developer-secret")
+        response = await post_signed(client, "/webhook", event, COMMUNITY_SECRET)
         await drain_webhook_tasks()
 
     assert response.status_code == 200
@@ -346,11 +346,11 @@ async def test_webhook_returns_503_when_no_secret_is_configured(
     }
 
     async with asgi_client as client:
-        response = await post_signed(client, "/webhook", event, "obsolete-developer-secret")
+        response = await post_signed(client, "/webhook", event, COMMUNITY_SECRET)
         await drain_webhook_tasks()
 
     assert response.status_code == 503
-    assert response.json()["detail"] == "Ningún secreto de webhook está configurado."
+    assert response.json()["detail"] == "El secreto del webhook comunitario no está configurado."
 
 
 @pytest.mark.asyncio
