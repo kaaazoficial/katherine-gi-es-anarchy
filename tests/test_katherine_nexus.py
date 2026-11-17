@@ -73,7 +73,7 @@ def test_ambiguous_or_ordinary_chat_is_not_routed(utterance):
 
 @pytest.mark.parametrize(("utterance", "expected"), [
     ("Katherine ayuda", "ayuda"),
-    ("Katherine, comandos", "comandos"),
+    ("Katherine, ayuda", "ayuda"),
     ("Katherine !guia Cyno", "guia cyno"),
     ("Katherine -estado", "estado"),
     ("Oye Katherine, admin resumen", "admin resumen"),
