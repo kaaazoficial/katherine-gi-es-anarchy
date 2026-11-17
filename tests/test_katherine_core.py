@@ -293,6 +293,46 @@ def test_guardian_warns_for_link_bursts_and_records_reason(database, monkeypatch
     assert "Exceso de enlaces" in warnings[0]["reason"]
 
 
+def test_external_host_registry_is_bounded_and_uses_shared_overflow(monkeypatch):
+    from collections import OrderedDict
+
+    monkeypatch.setattr(katherine, "EXTERNAL_HOST_STATE_MAX", 2)
+    monkeypatch.setattr(katherine, "SOURCE_HEALTH", OrderedDict())
+    monkeypatch.setattr(katherine, "EXTERNAL_HOST_LIMITS", OrderedDict())
+    overflow = asyncio.Semaphore(3)
+    monkeypatch.setattr(katherine, "EXTERNAL_HOST_OVERFLOW_LIMIT", overflow)
+
+    _, first_limit = katherine.external_host_resources("one.example")
+    _, second_limit = katherine.external_host_resources("two.example")
+    third_state, third_limit = katherine.external_host_resources("three.example")
+
+    assert first_limit is not second_limit
+    assert third_limit is overflow
+    assert len(katherine.SOURCE_HEALTH) == 2
+    assert len(katherine.EXTERNAL_HOST_LIMITS) == 2
+    assert third_state["last_seen_at"] > 0
+
+    # New arbitrary hosts cannot grow either registry beyond its configured cap.
+    for index in range(20):
+        katherine.external_host_resources(f"host-{index}.example")
+    assert len(katherine.SOURCE_HEALTH) == 2
+    assert len(katherine.EXTERNAL_HOST_LIMITS) == 2
+
+
+def test_external_host_resources_reuses_existing_semaphore(monkeypatch):
+    from collections import OrderedDict
+
+    monkeypatch.setattr(katherine, "SOURCE_HEALTH", OrderedDict())
+    monkeypatch.setattr(katherine, "EXTERNAL_HOST_LIMITS", OrderedDict())
+    state_a, semaphore_a = katherine.external_host_resources("reuse.example")
+    state_b, semaphore_b = katherine.external_host_resources("reuse.example")
+
+    assert state_a is state_b
+    assert semaphore_a is semaphore_b
+    assert len(katherine.SOURCE_HEALTH) == 1
+    assert len(katherine.EXTERNAL_HOST_LIMITS) == 1
+
+
 def test_external_circuit_breaker_skips_open_host_without_network(monkeypatch):
     host = "astra-circuit.test"
     monkeypatch.setitem(
