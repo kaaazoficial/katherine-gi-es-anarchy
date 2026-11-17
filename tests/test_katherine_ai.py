@@ -26,14 +26,77 @@ def response_payload(result):
 def test_katherine_personality_matches_guild_receptionist_identity():
     from katherine_ai import resolve_community_faq
 
-    assert "¡Ad astra abyssosque!" in resolve_community_faq("hola")
+    greeting = resolve_community_faq("hola")
     identity = resolve_community_faq("¿quién eres?")
+    assert "¡Ad astra abyssosque!" in greeting
     assert "recepcionista" in identity.lower()
+    assert "Gremio de Aventureros" in identity
     assert "marioneta biónica" in identity.lower()
     assert "Snezhnaya" in identity
+    assert "Fatui" in identity and "Sandrone" in identity
+    assert "misiones, reclamaciones y expediciones" in identity
     assert "ad astra abyssosque" in BASE_INSTRUCTIONS.lower()
     assert "misiones, reclamaciones y expediciones" in BASE_INSTRUCTIONS
     assert "Fatui" in BASE_INSTRUCTIONS and "Sandrone" in BASE_INSTRUCTIONS
+
+
+def test_katherine_personality_persists_outside_genshin_for_every_intent():
+    from katherine_ai import build_ai_instructions
+
+    for intent in ("conversation", "research", "action", "multi_action", "genshin"):
+        prompt = build_ai_instructions(set(), intent)
+        assert "Esta identidad es constante en TODAS tus conversaciones" in prompt
+        assert "CONTINUIDAD FUERA DE TEYVAT" in prompt
+        assert "Snezhnaya" in prompt
+        assert "No cambies a la personalidad de un asistente genérico" in prompt
+
+
+def test_creator_faq_separates_katherine_lore_from_community_developer():
+    from katherine_ai import resolve_community_faq
+
+    answer = resolve_community_faq("¿Quién es tu creador?")
+    assert "Snezhnaya" in answer
+    assert "Sandrone" in answer
+    assert "Sinner" in answer
+
+
+@pytest.mark.asyncio
+async def test_specialist_analytical_tasks_keep_katherines_personality():
+    ai = KatherineAI()
+    captured = {}
+
+    async def fake_request(instructions, messages, request_func, **kwargs):
+        captured["instructions"] = instructions
+        return {"kind": "answer", "answer": "Diagnóstico revisado.", "command": "", "args": ""}
+
+    ai._request_json = fake_request
+    await ai.task_response("diagnostics", "CPU elevada", lambda *args, **kwargs: None)
+    assert "IDENTIDAD TRANSVERSAL Y VOZ" in captured["instructions"]
+    assert "recepcionista" in captured["instructions"]
+    assert "Snezhnaya" in captured["instructions"]
+
+
+@pytest.mark.asyncio
+async def test_tool_and_research_summaries_keep_katherines_personality():
+    ai = KatherineAI()
+    captured = []
+
+    async def fake_request(instructions, messages, request_func, **kwargs):
+        captured.append(instructions)
+        return {"kind": "answer", "answer": "Resultado presentado.", "command": "", "args": ""}
+
+    ai._request_json = fake_request
+    await ai.synthesize_tool_results(
+        "consulta", [{"command": "estado", "output": "Servicio operativo"}],
+        lambda *args, **kwargs: None,
+    )
+    await ai.summarize_research(
+        "tema", "Fuente [1]: información verificada.",
+        lambda *args, **kwargs: None,
+    )
+    assert len(captured) == 2
+    assert all("IDENTIDAD TRANSVERSAL Y VOZ" in prompt for prompt in captured)
+    assert all("Snezhnaya" in prompt for prompt in captured)
 
 
 def test_bot_author_detection_requires_a_real_uid_match():
@@ -486,8 +549,8 @@ def test_open_topic_request_is_recognized_as_missing_subject():
     assert clarification_for_unspecified_topic(
         "Katherine Necesito ayuda para saber de un tema"
     ) == (
-        "¡Claro! ¿Sobre qué tema necesitas información? Dime el nombre del tema "
-        "o qué te gustaría entender y te ayudo."
+        "¡Por supuesto! Con mucho gusto te ayudo. ¿Sobre qué tema necesitas información? "
+        "Cuéntame qué te gustaría entender y te orientaré paso a paso."
     )
     assert clarification_for_unspecified_topic(
         "Oye Katherine, quiero saber sobre algún tema"
@@ -1383,7 +1446,7 @@ def test_anarchy_apps_semantic_faq_does_not_require_llm():
 
 def test_common_greeting_is_answered_locally():
     from katherine_ai import resolve_community_faq
-    assert resolve_community_faq("Hola Katherine") == "¡Hola! ¿Qué hacemos hoy?"
+    assert resolve_community_faq("Hola Katherine") == "¡Ad astra abyssosque! ¡Qué alegría recibirte! ¿En qué puedo ayudarte hoy?"
 
 
 
@@ -1662,8 +1725,8 @@ def test_cleanup_expires_ai_cache_and_rate_windows_without_touching_live_tasks()
 
 
 
-def test_katherine_identity_is_the_genshin_impact_es_community_bot():
-    assert "bot comunitario de Genshin Impact ES" in BASE_INSTRUCTIONS
+def test_katherine_identity_is_the_genshin_impact_es_receptionist():
+    assert "recepcionista de la comunidad Genshin Impact ES" in BASE_INSTRUCTIONS
     assert "Anarchy Apps es únicamente la plataforma" in BASE_INSTRUCTIONS
     assert "No eres un bot oficial de Anarchy Apps" in BASE_INSTRUCTIONS
     assert "bot de entretenimiento de Anarchy Apps" not in BASE_INSTRUCTIONS
