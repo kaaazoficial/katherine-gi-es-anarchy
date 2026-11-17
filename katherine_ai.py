@@ -86,7 +86,7 @@ AI_DIRECT_ACTION_COMMANDS = frozenset({
 
 AI_COMMAND_CATALOG = {
     "ayuda": "sin argumentos: muestra categorías y usos.",
-    "menu": "alias de ayuda: muestra el catálogo completo de comandos.",
+    "menu": "sin argumentos: muestra el catálogo de comandos por categorías.",
     "centro": "sin argumentos: panel de administración (solo administradores).",
     "nexus": "sin argumentos: panel Nexus (solo administradores).",
     "estado": "sin argumentos: estado técnico (solo administradores).",
