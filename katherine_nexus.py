@@ -237,7 +237,7 @@ def interpret_natural_request(value: str) -> str | None:
         (r"^(?:abre|abrir|muestra|mostrar) (?:el )?(?:menu|panel)(?: interactivo)?$", "menu"),
         (r"^(?:ayuda|que puedes hacer|que sabes hacer|comandos disponibles)$", "ayuda"),
         (r"^(?:revisa|consulta|muestra) (?:el )?(?:estado|salud|diagnostico)(?: del bot| de katherine)?$", "estado"),
-        (r"^(?:abre|muestra|consulta) (?:el )?(?:panel de administracion|guardian)$", "guardian"),
+        (r"^(?:abre|muestra|consulta) (?:el )?panel de administracion$", "admin"),
         (r"^(?:dime|cuentame) (?:un )?chiste$", "chiste"),
         (r"^(?:dame|di) (?:una )?frase$", "frase"),
         (r"^(?:lanza|tira) (?:un )?dado$", "azar dado"),
