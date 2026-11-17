@@ -10049,7 +10049,7 @@ def parse_admin_bot_targets(value: str) -> tuple[list[str], str]:
     remainder = str(value or "").strip()
     parts = remainder.split(maxsplit=1)
     if parts and parts[0].casefold() in {
-        "community", "desarrollador", "dev", "community", "comunidad",
+        "community", "desarrollador", "dev", "comunidad",
         "com", "both", "ambos",
     }:
         remainder = parts[1].strip() if len(parts) > 1 else ""
@@ -13457,7 +13457,7 @@ Uso: !enciclopedia <nombre>""",
             await send_message(
                 thread,
                 "Uso: !perfilbot Nombre | Estado\n"
-                "Actualiza el único perfil comunitario. Nombre: 2-32 caracteres; 
+                "Actualiza el único perfil comunitario. Nombre: 2-32 caracteres; "
                 "estado: máximo 40. Usa - para borrar el estado.",
                 source, reply
             )
@@ -13499,7 +13499,7 @@ Uso: !enciclopedia <nombre>""",
             await send_message(
                 thread,
                 "Uso: !avatarbot URL_DE_IMAGEN_O_ARTICULO\n"
-                "Actualiza el avatar del único bot comunitario, incluido el que entra a las llamadas. 
+                "Actualiza el avatar del único bot comunitario, incluido el que entra a las llamadas. "
                 "Acepta HTTPS, PNG/JPG/WebP/GIF y máximo 512 KB.",
                 source, reply
             )
