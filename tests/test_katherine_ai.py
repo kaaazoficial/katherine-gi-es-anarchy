@@ -40,7 +40,7 @@ def test_katherine_personality_matches_guild_receptionist_identity():
     assert "ad astra abyssosque" in prompt.lower()
     assert "misiones, reclamaciones y expediciones" in prompt
     assert "Fatui" in prompt and "Sandrone" in prompt
-    assert "Sinner desarrolló el bot" in prompt
+    assert "fue desarrollada por Sinner" in prompt
 
 
 def test_katherine_personality_persists_outside_genshin_for_every_intent():
