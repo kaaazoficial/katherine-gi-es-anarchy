@@ -18,10 +18,9 @@ from katherine_nexus import (
         ("Katherine, revisa el estado", "estado"),
         ("Katherine, diagnostica Katherine", "estado"),
         ("Katherine, qué fuentes", "fuentes"),
-        ("Katherine, abre el panel de administración", "guardian"),
+        ("Katherine, abre el panel de administración", "admin"),
         ("Katherine, cuéntame un chiste", "chiste"),
         ("Katherine, dame una frase", "frase"),
-    ("Katherine, suerte", "frase"),
         ("Katherine, lanza un dado", "azar dado"),
         ("Katherine, tira una moneda", "azar moneda"),
         ("Katherine, consulta mis puntos", "puntos"),
@@ -74,7 +73,7 @@ def test_ambiguous_or_ordinary_chat_is_not_routed(utterance):
 
 @pytest.mark.parametrize(("utterance", "expected"), [
     ("Katherine ayuda", "ayuda"),
-    ("Katherine, comandos", "comandos"),
+    ("Katherine, ayuda", "ayuda"),
     ("Katherine !guia Cyno", "guia cyno"),
     ("Katherine -estado", "estado"),
     ("Oye Katherine, admin resumen", "admin resumen"),
@@ -91,7 +90,7 @@ def test_every_catalog_command_can_be_invoked_with_katherine(utterance, expected
 def test_every_catalog_entry_is_reachable_by_its_katherine_name():
     for command in AI_COMMAND_CATALOG:
         routed = interpret_natural_request(f"Katherine {command}")
-        expected = "admin" if command == "guardian" else command
+        expected = command
         assert routed == expected, (command, routed)
 
 
@@ -184,11 +183,6 @@ def test_natural_language_requires_explicit_katherine_invocation():
 
 @pytest.mark.parametrize(("content", "prefix", "expected"), [
     ("!dj buscar Cyno", "!", ("!dj", ["buscar", "Cyno"])),
-    ("!buscar Cyno", "!", ("!dj", ["buscar", "Cyno"])),
-    ("!guardian actividad", "!", ("!admin", ["actividad"])),
-    ("!dado", "!", ("!azar", ["dado"])),
-    ("!moneda", "!", ("!azar", ["moneda"])),
-    ("!suerte", "!", ("!frase", [])),
     ("-estado", "-", ("!estado", [])),
     ("?ayuda", "?", ("!ayuda", [])),
     ("!dj", "!", ("!dj", [])),

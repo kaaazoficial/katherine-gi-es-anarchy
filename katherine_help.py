@@ -24,7 +24,7 @@ def _command_help_sections(prefix: str):
         (CATEGORY_TITLES[0], [
             (True, "▸ Ayuda y Navegación"),
             (False, f"• {prefix}ayuda [categoría] — Muestra una sección concreta."),
-            (False, f"• {prefix}menu — Muestra la guía completa por secciones."),
+            (False, f"• {prefix}menu — Muestra el catálogo completo por categorías."),
             (True, "▸ Asistente IA"),
             (False, f"• {prefix}asistente <consulta> — Conversación y solicitudes en lenguaje natural."),
             (False, f"• {prefix}ia ayuda — Guía de IA."),

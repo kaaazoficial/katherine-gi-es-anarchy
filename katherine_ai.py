@@ -22,7 +22,7 @@ RequestFunc = Callable[..., Awaitable[Any]]
 
 AI_PUBLIC_COMMANDS = frozenset({
     # Ayuda, consulta e investigación
-    "ayuda", "comandos", "menu",
+    "ayuda", "menu",
     "fecha", "zona", "miuid", "perfil", "puntos", "ranking", "actividad",
     "investigar", "calcular", "traducir", "multimedia", "media", "imagen",
     "video", "audio",
@@ -47,7 +47,7 @@ AI_PUBLIC_COMMANDS = frozenset({
 
 AI_ADMIN_COMMANDS = frozenset({
     "estado", "fuentes", "saludfuentes", "metricas",
-    "centro", "nexus", "autotest", "admin", "paneladmin", "guardian",
+    "centro", "nexus", "autotest", "admin", "paneladmin",
     "respuestas", "respuesta", "advertir", "advertencias",
     "quitaradvertencia", "antispam", "perfilbot", "avatarbot",
     "eliminarmensajes",
@@ -86,8 +86,7 @@ AI_DIRECT_ACTION_COMMANDS = frozenset({
 
 AI_COMMAND_CATALOG = {
     "ayuda": "sin argumentos: muestra categorías y usos.",
-    "comandos": "alias de ayuda.",
-    "menu": "alias de ayuda: muestra el catálogo completo de comandos.",
+    "menu": "sin argumentos: muestra el catálogo de comandos por categorías.",
     "centro": "sin argumentos: panel de administración (solo administradores).",
     "nexus": "sin argumentos: panel Nexus (solo administradores).",
     "estado": "sin argumentos: estado técnico (solo administradores).",
@@ -97,7 +96,6 @@ AI_COMMAND_CATALOG = {
     "autotest": "sin argumentos: ejecuta pruebas internas (solo administradores).",
     "admin": "[resumen|actividad|antispam|avisos|historial]: panel administrativo.",
     "paneladmin": "alias del panel administrativo.",
-    "guardian": "panel preventivo (solo administradores).",
     "respuestas": "[estado|on|off]: consulta o activa respuestas automáticas (administradores).",
     "respuesta": "añadir palabra | respuesta; lista; eliminar ID (administradores).",
     "advertir": "@usuario [motivo]: registra una advertencia (administradores).",
