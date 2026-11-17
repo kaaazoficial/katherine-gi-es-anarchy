@@ -13559,7 +13559,7 @@ Uso: !enciclopedia <nombre>""",
         lines = ["AVATAR DE KATHERINE"]
         for target, ok, status, detail in results:
             if ok:
-                lines.append(f"✓ {target}: actualización confirmada por el servicio.")
+                lines.append(f"✓ {target}: actualizado y confirmado.")
             else:
                 reason = f" · {detail}" if detail else ""
                 lines.append(f"✗ {target}: no confirmado (HTTP {status or '?'}).{reason}")
