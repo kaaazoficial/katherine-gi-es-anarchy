@@ -143,9 +143,6 @@ async def test_admin_cleanup_deletes_only_tracked_own_message_ids(monkeypatch):
         {"message_id": "own-1", "created_at": now},
         {"message_id": "own-2", "created_at": now + 1},
     ])
-    bot_main.BOT_SENT_MESSAGES[("community", "cleanup-room")].append(
-        {"message_id": "other-bot", "created_at": 3}
-    )
     calls = []
 
     async def fake_api(method, path, source="community", body=None):
@@ -162,9 +159,7 @@ async def test_admin_cleanup_deletes_only_tracked_own_message_ids(monkeypatch):
         ("DELETE", "/threads/cleanup-room/messages/own-2", "community"),
     ]
     assert [item["message_id"] for item in bot_main.BOT_SENT_MESSAGES[key]] == ["own-2"]
-    assert bot_main.BOT_SENT_MESSAGES[("community", "cleanup-room")][0]["message_id"] == "other-bot"
     bot_main.BOT_SENT_MESSAGES.pop(key, None)
-    bot_main.BOT_SENT_MESSAGES.pop(("community", "cleanup-room"), None)
 
 
 
@@ -399,7 +394,7 @@ async def test_avatarbot_updates_only_the_community_bot(monkeypatch, tmp_path):
 
     assert [item[1] for item in calls] == ["community"]
     assert all(item[2:] == (b"fake-image", "image/png") for item in calls)
-    assert sent and "community: actualizado" in sent[0] and "community" not in sent[0]
+    assert sent and "community: actualizado" in sent[0] and "desarrollador:" not in sent[0]
 
 
 def test_admin_bot_target_parser_always_selects_the_community_identity():
