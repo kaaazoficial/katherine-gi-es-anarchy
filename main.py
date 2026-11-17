@@ -908,7 +908,7 @@ def check_antispam_message(event: dict, source: str):
     if USER_SPAM_WARNED_UNTIL.get(warn_key, 0) > now:
         return True, None
     USER_SPAM_WARNED_UNTIL[warn_key] = now + 60
-    target_uid = scoped_uid(f"developer:{thread_id}", uid)
+    target_uid = scoped_uid(f"community:{thread_id}", uid)
     warning_id = add_moderation_warning(
         thread_id, target_uid, nickname, "Katherine", "Katherine",
         reason,
@@ -15100,8 +15100,7 @@ async def dispatch(event: dict, source: str):
     kind = event.get("type")
 
     if kind == "message":
-        # Ambos bots reciben el mismo evento de chat. Solo el bot developer
-        # procesa texto, comandos y TTS; el community queda reservado para voz.
+        # La identidad comunitaria procesa mensajes, comandos y TTS en todas las salas.
         if source != "community":
             return
         blocked, spam_info = check_antispam_message(event, source)
