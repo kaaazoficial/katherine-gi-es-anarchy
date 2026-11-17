@@ -1194,23 +1194,6 @@ def external_host_resources(
                 SOURCE_HEALTH.pop(stale_host, None)
                 EXTERNAL_HOST_LIMITS.pop(stale_host, None)
 
-        # If TTL cleanup did not free a slot, recycle the least-recently-used
-        # host only when its semaphore has no active holder/waiter and its
-        # circuit breaker is closed. This preserves isolation for live hosts.
-        if (
-            len(SOURCE_HEALTH) >= EXTERNAL_HOST_STATE_MAX
-            or len(EXTERNAL_HOST_LIMITS) >= EXTERNAL_HOST_STATE_MAX
-        ):
-            for candidate, candidate_state in list(SOURCE_HEALTH.items()):
-                candidate_semaphore = EXTERNAL_HOST_LIMITS.get(candidate)
-                if candidate_semaphore is not None and candidate_semaphore.locked():
-                    continue
-                if float(candidate_state.get("circuit_open_until", 0) or 0) > current:
-                    continue
-                SOURCE_HEALTH.pop(candidate, None)
-                EXTERNAL_HOST_LIMITS.pop(candidate, None)
-                break
-
     state = SOURCE_HEALTH.get(host_key)
     if state is None:
         state = _new_external_host_state(current)
