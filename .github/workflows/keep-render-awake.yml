@@ -1,0 +1,20 @@
+name: Keep Katherine awake
+on:
+  schedule:
+    - cron: '2-59/5 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: render-keep-awake
+  cancel-in-progress: true
+jobs:
+  ping-health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Ping Katherine health endpoint
+        env:
+          HEALTH_URL: https://katherine-gi-es-anarchy.onrender.com/health
+        run: |
+          curl --fail --silent --show-error --max-time 25 --retry 1 --retry-delay 3 "$HEALTH_URL"
