@@ -1,4 +1,4 @@
-# Katherine - Bot comunitario de Genshin Impact ES en Anarchy Apps (Python)
+# Katheryne - Bot comunitario de Genshin Impact ES en Anarchy Apps (Python)
 # Requiere Python 3.11+
 import os
 import re
@@ -251,7 +251,7 @@ AI_TOOL_SILENT: ContextVar[bool] = ContextVar(
 )
 # ---------------------------------------------------------------------------
 # IDENTIDAD ÚNICA
-# Katherine opera exclusivamente con el bot comunitario.
+# Katheryne opera exclusivamente con el bot comunitario.
 # ---------------------------------------------------------------------------
 API = "https://api.anarchyapps.org/bot-api/v1"
 GAME_API = "https://genshin-db-api.vercel.app/api/v5"
@@ -910,7 +910,7 @@ def check_antispam_message(event: dict, source: str):
     USER_SPAM_WARNED_UNTIL[warn_key] = now + 60
     target_uid = scoped_uid(f"community:{thread_id}", uid)
     warning_id = add_moderation_warning(
-        thread_id, target_uid, nickname, "Katherine", "Katherine",
+        thread_id, target_uid, nickname, "Katheryne", "Katheryne",
         reason,
         automatic=True
     )
@@ -11632,7 +11632,7 @@ async def _handle_command_impl(event: dict, source: str):
 
         await send_message(
             thread,
-            f"🔥 Katherine contraataca: @{target_name}, {random.choice(roasts)}",
+            f"🔥 Katheryne contraataca: @{target_name}, {random.choice(roasts)}",
             source,
             reply
         )
@@ -12985,7 +12985,7 @@ Uso: !enciclopedia <nombre>""",
         )
         await send_message(
             thread,
-            f"ELECCIÓN DE KATHERINE\n{nickname} propone elegir entre:",
+            f"ELECCIÓN DE KATHERYNE\n{nickname} propone elegir entre:",
             source,
             reply,
             buttons
@@ -15237,8 +15237,8 @@ async def dispatch(event: dict, source: str):
                     return
 
             routing_text = (
-                f"Katherine, {name_call}" if name_call is not None and name_call
-                else "Katherine" if name_call is not None
+                f"Katheryne, {name_call}" if name_call is not None and name_call
+                else "Katheryne" if name_call is not None
                 else incoming_text
             )
             routed_command = interpret_natural_request(routing_text)
@@ -15701,7 +15701,7 @@ async def startup():
             logging.info(
                 "[BOT %s] %s | botId: %s | uid: %s | chats: %s",
                 source.upper(),
-                bot.get("name") if isinstance(bot, dict) else "Katherine",
+                bot.get("name") if isinstance(bot, dict) else "Katheryne",
                 str(bot.get("botId") or "no disponible") if isinstance(bot, dict) else "no disponible",
                 str(bot.get("uid") or bot.get("id") or bot.get("userId") or "no disponible") if isinstance(bot, dict) else "no disponible",
                 len(me["data"].get("threadIds") or [])
