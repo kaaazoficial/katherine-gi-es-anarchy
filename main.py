@@ -15699,9 +15699,11 @@ async def startup():
                     "name": str(bot.get("name") or "")
                 }
             logging.info(
-                "[BOT %s] %s | chats: %s",
+                "[BOT %s] %s | botId: %s | uid: %s | chats: %s",
                 source.upper(),
                 bot.get("name") if isinstance(bot, dict) else "Katherine",
+                str(bot.get("botId") or "no disponible") if isinstance(bot, dict) else "no disponible",
+                str(bot.get("uid") or bot.get("id") or bot.get("userId") or "no disponible") if isinstance(bot, dict) else "no disponible",
                 len(me["data"].get("threadIds") or [])
             )
         else:
