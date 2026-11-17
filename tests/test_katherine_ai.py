@@ -775,8 +775,8 @@ async def test_genshin_question_can_still_use_teyvat_tool(monkeypatch):
         ("Katherine, ¿quién te creó?", "En el lore de Genshin Impact, Katheryne fue creada por Sandrone. Esta versión comunitaria del bot de Genshin Impact ES fue desarrollada por Sinner."),
         ("¿Quién creó a Katheryne?", "Dentro del lore de Genshin Impact, Katheryne fue creada por Sandrone."),
         ("¿Quién desarrolló el bot?", "Esta versión comunitaria del bot de Genshin Impact ES fue desarrollada por Sinner."),
-        ("¿Quién eres?", "Soy Katherine, la recepcionista del Gremio de Aventureros de la comunidad Genshin Impact ES. Dentro del lore de Teyvat, soy una marioneta biónica de Snezhnaya creada por Sandrone. Esta versión comunitaria del bot fue desarrollada por Sinner para atender a los aventureros de Genshin Impact ES. Estoy aquí para escuchar tus consultas y atender tus misiones, reclamaciones y expediciones con paciencia y profesionalismo. ¡Ad astra abyssosque!"),
-        ("Katherine, preséntate", "Soy Katherine, la recepcionista del Gremio de Aventureros de la comunidad Genshin Impact ES. Dentro del lore de Teyvat, soy una marioneta biónica de Snezhnaya creada por Sandrone. Esta versión comunitaria del bot fue desarrollada por Sinner para atender a los aventureros de Genshin Impact ES. Estoy aquí para escuchar tus consultas y atender tus misiones, reclamaciones y expediciones con paciencia y profesionalismo. ¡Ad astra abyssosque!"),
+        ("¿Quién eres?", "Soy Katherine, la recepcionista del Gremio de Aventureros de la comunidad Genshin Impact ES. Dentro del lore de Teyvat, soy una marioneta biónica de Snezhnaya creada por Sandrone y vinculada a la tecnología de los Fatui. Esta versión comunitaria del bot fue desarrollada por Sinner para atender a los aventureros de Genshin Impact ES. Estoy aquí para escuchar tus consultas y atender tus misiones, reclamaciones y expediciones con paciencia y profesionalismo. ¡Ad astra abyssosque! También puedo orientarte en temas ajenos a Teyvat."),
+        ("Katherine, preséntate", "Soy Katherine, la recepcionista del Gremio de Aventureros de la comunidad Genshin Impact ES. Dentro del lore de Teyvat, soy una marioneta biónica de Snezhnaya creada por Sandrone y vinculada a la tecnología de los Fatui. Esta versión comunitaria del bot fue desarrollada por Sinner para atender a los aventureros de Genshin Impact ES. Estoy aquí para escuchar tus consultas y atender tus misiones, reclamaciones y expediciones con paciencia y profesionalismo. ¡Ad astra abyssosque! También puedo orientarte en temas ajenos a Teyvat."),
     ],
 )
 async def test_katherine_canonical_identity_facts(monkeypatch, question, expected):
@@ -809,7 +809,7 @@ async def test_katherine_identity_faq_works_without_ai_credentials(monkeypatch):
     assert "Fatui" in answer and "Sandrone" in answer
     assert "creada por Sandrone" in answer
     assert "desarrollada por Sinner" in answer
-    assert "cualquier otro tema" in answer
+    assert "temas ajenos a Teyvat" in answer
 
 
 @pytest.mark.asyncio
