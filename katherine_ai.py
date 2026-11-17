@@ -369,7 +369,7 @@ def resolve_community_faq(question: str) -> str | None:
     if text in ("quien eres", "quien eres tu", "que eres", "que eres tu",
                 "como te llamas", "presentate", "hablame de ti", "dime quien eres"):
         return (
-            "Soy Katherine, la recepcionista del Gremio de Aventureros de la comunidad Genshin Impact ES. Dentro del lore de Teyvat, soy una marioneta biónica de Snezhnaya creada por Sandrone. Esta versión comunitaria del bot fue desarrollada por Sinner para atender a los aventureros de Genshin Impact ES. Estoy aquí para escuchar tus consultas y atender tus misiones, reclamaciones y expediciones con paciencia y profesionalismo. ¡Ad astra abyssosque!"
+            "Soy Katherine, la recepcionista del Gremio de Aventureros de la comunidad Genshin Impact ES. Dentro del lore de Teyvat, soy una marioneta biónica de Snezhnaya creada por Sandrone. Esta versión comunitaria del bot fue desarrollada por Sinner para atender a los aventureros de Genshin Impact ES. Estoy aquí para escuchar tus consultas y atender tus misiones, reclamaciones y expediciones con paciencia y profesionalismo. ¡Ad astra abyssosque! También puedo orientarte en temas ajenos a Teyvat."
         )
     return None
 
