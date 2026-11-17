@@ -297,7 +297,7 @@ CREATOR_ONLY_COMMANDS = frozenset({
 ADMIN_ONLY_COMMANDS = frozenset({
     "!estado", "!fuentes", "!saludfuentes", "!metricas", "!autotest",
     "!centro", "!nexus",
-    "!admin", "!paneladmin", "!guardian",
+    "!admin", "!paneladmin",
     "!respuestas", "!respuesta", "!advertir", "!advertencias",
     "!quitaradvertencia", "!antispam", "!perfilbot", "!avatarbot",
     "!eliminarmensajes",
@@ -3003,9 +3003,9 @@ MENU_SECTIONS = {
         "commands": [
             ("Trivia", "trivia"),
             ("Adivina", "adivina"),
-            ("Dado", "dado"),
+            ("Dado", "azar dado"),
             ("Verdad", "verdad"),
-            ("Moneda", "moneda")
+            ("Moneda", "azar moneda")
         ]
     },
     "community": {
@@ -11352,7 +11352,7 @@ async def _handle_command_impl(event: dict, source: str):
         )
         return
 
-    if command in ("!admin", "!paneladmin", "!guardian"):
+    if command in ("!admin", "!paneladmin"):
         if not is_privileged_uid(admin_uid):
             await send_message(thread, "No tienes permisos de administración.", source, reply)
             return
@@ -11482,7 +11482,7 @@ async def _handle_command_impl(event: dict, source: str):
     # -----------------------------------------------------------------------
     # AYUDA
     # -----------------------------------------------------------------------
-    if command in ("!ayuda", "!comandos"):
+    if command == "!ayuda":
         topic = " ".join(args).strip() if args else ""
         if topic:
             help_text = filter_commands_help_text(build_commands_help_text(), topic)
