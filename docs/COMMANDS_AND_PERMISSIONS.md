@@ -69,9 +69,7 @@ Los eventos se crean libremente; solo su creador o un UID administrador puede ce
 
 ### Identidad del bot: perfil y avatar
 
-- `!perfilbot [ambos|desarrollador|comunidad] Nombre | Estado`: actualiza el perfil de la identidad seleccionada. Por defecto actualiza ambas.
-- `!avatarbot [ambos|desarrollador|comunidad] URL`: actualiza el icono de la identidad seleccionada. Por defecto actualiza ambas, para mantener sincronizados el perfil de chat y la identidad que entra a las llamadas.
-- Los comandos siguen requiriendo un UID administrador exacto. Si una de las identidades falla, el resultado informa el éxito parcial en vez de afirmar que ambas se actualizaron.
+Katherine tiene una sola identidad operativa: el bot comunitario. Los comandos `!perfilbot Nombre | Estado` y `!avatarbot URL` actualizan exclusivamente ese bot. Los alias antiguos de selección se aceptan por compatibilidad, pero nunca activan una segunda identidad. Ambos comandos requieren un UID administrador exacto.
 
 
 ## Llamadas y música
