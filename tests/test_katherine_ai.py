@@ -57,9 +57,9 @@ def test_creator_faq_separates_katherine_lore_from_community_developer():
     from katherine_ai import resolve_community_faq
 
     answer = resolve_community_faq("¿Quién es tu creador?")
-    assert "Snezhnaya" in answer
-    assert "Sandrone" in answer
-    assert "Sinner" in answer
+    assert answer == "Mi creador es Sinner."
+    assert "Snezhnaya" not in answer
+    assert "Sandrone" not in answer
 
 
 @pytest.mark.asyncio
@@ -812,10 +812,12 @@ async def test_katherine_identity_faq_works_without_ai_credentials(monkeypatch):
         raise AssertionError("La FAQ debe funcionar sin credenciales.")
 
     result = await ai.assist("¿Quién eres?", "room:verified-user", unexpected_request)
-    assert "recepcionista del Gremio de Aventureros" in result["answer"]
-    assert "marioneta biónica" in result["answer"]
-    assert "Snezhnaya" in result["answer"]
-    assert "no soy un bot oficial" in result["answer"].casefold()
+    answer = result["answer"]
+    assert "recepcionista del Gremio de Aventureros" in answer
+    assert "marioneta biónica" in answer
+    assert "Snezhnaya" in answer
+    assert "Fatui" in answer and "Sandrone" in answer
+    assert "cualquier otro tema" in answer
 
 
 @pytest.mark.asyncio
