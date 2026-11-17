@@ -37,11 +37,6 @@ def _normalize(value: str) -> str:
     return re.sub(r"\s+", " ", text).strip().strip("¿?¡!.,;: ")
 
 COMMAND_ALIASES = {
-    "!buscar": ("!dj", ("buscar",)),
-    "!guardian": ("!admin", ()),
-    "!dado": ("!azar", ("dado",)),
-    "!moneda": ("!azar", ("moneda",)),
-    "!suerte": ("!frase", ()),
 }
 
 
@@ -50,10 +45,8 @@ COMMAND_ALIASES = {
 NATURAL_COMMAND_ALIASES = {
     "menu": "menu",
     "menú": "menu",
-    "suerte": "frase",
     "mi-id": "mi-id",
     "mi_uid": "mi_uid",
-    "guardian": "admin",
     "investiga": "investigar",
     "investigacion": "investigar",
     "investigación": "investigar",
