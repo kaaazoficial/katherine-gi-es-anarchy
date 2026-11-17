@@ -5195,7 +5195,7 @@ async def ensure_voice_room(thread_id: str):
             )
             return False, (
                 f"No hay una llamada en vivo activa para el chat {thread_id}. "
-                 "Abre primero la llamada desde la aplicación y vuelve a ejecutar !join. 
+                 "Abre primero la llamada desde la aplicación y vuelve a ejecutar !join. "
                 "Puedes comprobar las salas detectadas con !salas. Si la llamada "
                 "ya está abierta, verifica que COMMUNITY_BOT_TOKEN corresponda "
                 "al bot comunitario añadido a esta comunidad."
@@ -15171,7 +15171,7 @@ async def dispatch(event: dict, source: str):
                 await send_message(
                     str(event.get("threadId") or ""),
                     "🛡️ Enlace no permitido detectado. Katherine no procesará este mensaje. "
-                     "El servicio no permite que un bot elimine mensajes de otros usuarios, 
+                     "El servicio no permite que un bot elimine mensajes de otros usuarios, "
                     "por lo que el mensaje y el enlace siguen visibles. Un moderador debe retirarlo. "
                     "Motivo: "
                     + str(link_verdict.get("reason") or "destino no permitido."),
@@ -15382,7 +15382,7 @@ async def dispatch(event: dict, source: str):
                     await send_message(
                         str(event.get("threadId") or ""),
                         "🛡️ Se detectó un enlace no permitido en la edición. Katherine no procesará "
-                         "el contenido. El servicio no permite que un bot elimine mensajes 
+                         "el contenido. El servicio no permite que un bot elimine mensajes "
                         "de otros usuarios, por lo que el mensaje editado y el enlace siguen visibles. "
                         "Un moderador debe retirarlo. Motivo: "
                         + str(verdict.get("reason") or "destino no permitido."),
