@@ -594,18 +594,17 @@ def test_contextual_genshin_followups_require_a_recent_genshin_question():
 
 
 @pytest.mark.asyncio
-async def test_canonical_faq_drops_previous_genshin_context(monkeypatch):
-    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+async def test_canonical_creator_faq_drops_previous_genshin_context(monkeypatch):
     ai = KatherineAI()
     ai._append_history("room:user", "user", "¿Quién es Nahida?")
     ai._append_history("room:user", "assistant", "Nahida es una arconte.")
     result = await ai.assist(
-        "Katherine, ¿qué es Anarchy Apps?",
+        "Katherine, ¿quién creó a Katheryne?",
         "room:user",
         lambda *args, **kwargs: None,
     )
     assert result["kind"] == "answer"
-    assert "Anarchy apps es una red social" in result["answer"]
+    assert result["answer"] == "Dentro del lore de Genshin Impact, Katheryne fue creada por Sandrone."
     assert "Nahida" not in str(ai._history("room:user"))
 
 
@@ -711,30 +710,19 @@ async def test_persistent_domain_drift_uses_neutral_recovery_not_teyvat_rejectio
 
 
 @pytest.mark.asyncio
-async def test_unrelated_question_cannot_execute_genshin_tool(monkeypatch):
+async def test_unrelated_greeting_does_not_call_genshin_tool(monkeypatch):
     monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
     ai = KatherineAI()
     requests = []
-    responses = [
-        FakeResponse(response_payload({
-            "kind": "command", "answer": "", "command": "enciclopedia",
-            "args": "Anarchy Apps",
-        })),
-        FakeResponse(response_payload({
-            "kind": "answer",
-            "answer": "Anarchy Apps es la plataforma donde funciona esta comunidad.",
-            "command": "", "args": "",
-        })),
-    ]
 
     async def fake_request(method, url, **kwargs):
         requests.append(kwargs)
-        return responses.pop(0)
+        raise AssertionError("A canonical greeting must not invoke a Genshin tool.")
 
-    result = await ai.assist("qué ofrece el ecosistema comunitario de esta aplicación", "room:user", fake_request)
+    result = await ai.assist("Hola Katherine", "room:user", fake_request)
     assert result["kind"] == "answer"
-    assert "anarchy apps" in result["answer"].casefold()
-    assert len(requests) == 0  # Canonical answer served locally; no API tokens consumed.
+    assert "Ad astra abyssosque" in result["answer"]
+    assert requests == []
 
 
 @pytest.mark.asyncio
@@ -744,12 +732,12 @@ async def test_unrelated_direct_answer_cannot_drift_to_genshin(monkeypatch):
     responses = [
         FakeResponse(response_payload({
             "kind": "answer",
-            "answer": "Anarchy Apps es una comunidad de Genshin en Teyvat.",
+            "answer": "Este servicio comunitario es una comunidad de Genshin en Teyvat.",
             "command": "", "args": "",
         })),
         FakeResponse(response_payload({
             "kind": "answer",
-            "answer": "Anarchy Apps es la plataforma de la comunidad.",
+            "answer": "Este servicio comunitario permite organizar conversaciones.",
             "command": "", "args": "",
         })),
     ]
