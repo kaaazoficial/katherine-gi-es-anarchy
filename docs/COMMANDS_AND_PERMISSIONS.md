@@ -1,11 +1,11 @@
 # Katherine · Catálogo y permisos de comandos
 
-La ayuda del chat (`!ayuda`) muestra el catálogo completo en siete secciones o una categoría concreta. `!menu` abre el menú interactivo. Este documento conserva el detalle técnico y los permisos; la IA tiene ayuda separada mediante `!ia ayuda`.
+La ayuda del chat (`!ayuda`) muestra el catálogo completo en siete secciones o una categoría concreta. `!menu` muestra el catálogo completo por categorías. Este documento conserva el detalle técnico y los permisos; la IA tiene ayuda separada mediante `!ia ayuda`.
 
 ## Ayuda pública y alias compatibles
 
 - `!ayuda` muestra las siete secciones; `!ayuda genshin`, `!ayuda juegos`, etc. filtran una categoría.
-- Se retiró `!comandos`, que duplicaba `!ayuda`. `!menu` se conserva como menú interactivo.
+- Se retiró `!comandos`, que duplicaba `!ayuda`. `!menu` se conserva como acceso al catálogo completo.
 - Los lanzamientos aleatorios se unifican en `!azar <mín> <máx>`, `!azar dado` y `!azar moneda`.
 - Se retiraron los accesos antiguos `!dado`, `!moneda` y `!suerte`; sus funciones se mantienen en `!azar dado`, `!azar moneda` y `!frase`.
 - `!economia` fue retirado porque solo repetía la información de puntos y recompensas, que ahora está en `!ayuda juegos`.
