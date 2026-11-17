@@ -1,13 +1,13 @@
 # Katherine · Catálogo y permisos de comandos
 
-La ayuda del chat (`!ayuda`) muestra el catálogo completo en siete secciones o una categoría concreta. `!comandos`, `!menu` y `!menú` se conservan como accesos compatibles a la misma ayuda; no abren un panel interactivo. El menú publica nombres canónicos y evita duplicar alias. Este documento conserva el detalle técnico y los permisos; la IA tiene ayuda separada mediante `!ia ayuda`.
+La ayuda del chat (`!ayuda`) muestra el catálogo completo en siete secciones o una categoría concreta. `!menu` abre el menú interactivo. Este documento conserva el detalle técnico y los permisos; la IA tiene ayuda separada mediante `!ia ayuda`.
 
 ## Ayuda pública y alias compatibles
 
 - `!ayuda` muestra las siete secciones; `!ayuda genshin`, `!ayuda juegos`, etc. filtran una categoría.
-- `!comandos`, `!menu` y `!menú` siguen funcionando como alias de `!ayuda`, pero no se repiten en el catálogo.
+- Se retiró `!comandos`, que duplicaba `!ayuda`. `!menu` se conserva como menú interactivo.
 - Los lanzamientos aleatorios se unifican en `!azar <mín> <máx>`, `!azar dado` y `!azar moneda`.
-- Por compatibilidad, `!dado`, `!moneda` y `!suerte` siguen redirigiendo a `!azar dado`, `!azar moneda` y `!frase`; no se muestran como comandos independientes.
+- Se retiraron los accesos antiguos `!dado`, `!moneda` y `!suerte`; sus funciones se mantienen en `!azar dado`, `!azar moneda` y `!frase`.
 - `!economia` fue retirado porque solo repetía la información de puntos y recompensas, que ahora está en `!ayuda juegos`.
 
 ## Investigación y herramientas universales
@@ -34,7 +34,7 @@ Ambas identidades se validan exclusivamente contra `message.author.uid`; el nick
 - `!sistema`, `!diagnostico`, `!rendimiento` y `!laboratorio` [SOLO CREADOR]: consola privada del creador.
 - `!estado`, `!fuentes`, `!saludfuentes`, `!metricas`, `!autotest`
 - `!centro`, `!nexus`
-- `!admin`, `!paneladmin`, `!guardian`
+- `!admin`, `!paneladmin`
 - `!antispam`, `!advertir`, `!advertencias`, `!quitaradvertencia`
 - `!perfilbot`, `!avatarbot`
 - `!respuestas`, `!respuesta`
