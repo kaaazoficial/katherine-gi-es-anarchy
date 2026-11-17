@@ -304,19 +304,41 @@ def test_external_host_registry_is_bounded_and_uses_shared_overflow(monkeypatch)
 
     _, first_limit = katherine.external_host_resources("one.example")
     _, second_limit = katherine.external_host_resources("two.example")
-    third_state, third_limit = katherine.external_host_resources("three.example")
 
-    assert first_limit is not second_limit
-    assert third_limit is overflow
-    assert len(katherine.SOURCE_HEALTH) == 2
-    assert len(katherine.EXTERNAL_HOST_LIMITS) == 2
-    assert third_state["last_seen_at"] > 0
+    async def exercise_full_registry():
+        for _ in range(3):
+            await first_limit.acquire()
+            await second_limit.acquire()
+        try:
+            third_state, third_limit = katherine.external_host_resources("three.example")
+            assert third_limit is overflow
+            assert third_state["last_seen_at"] > 0
+            for index in range(20):
+                katherine.external_host_resources(f"host-{index}.example")
+            assert len(katherine.SOURCE_HEALTH) == 2
+            assert len(katherine.EXTERNAL_HOST_LIMITS) == 2
+        finally:
+            for _ in range(3):
+                first_limit.release()
+                second_limit.release()
 
-    # New arbitrary hosts cannot grow either registry beyond its configured cap.
-    for index in range(20):
-        katherine.external_host_resources(f"host-{index}.example")
-    assert len(katherine.SOURCE_HEALTH) == 2
-    assert len(katherine.EXTERNAL_HOST_LIMITS) == 2
+    asyncio.run(exercise_full_registry())
+
+
+def test_external_host_registry_recycles_idle_hosts_before_overflow(monkeypatch):
+    from collections import OrderedDict
+
+    monkeypatch.setattr(katherine, "EXTERNAL_HOST_STATE_MAX", 1)
+    monkeypatch.setattr(katherine, "SOURCE_HEALTH", OrderedDict())
+    monkeypatch.setattr(katherine, "EXTERNAL_HOST_LIMITS", OrderedDict())
+    monkeypatch.setattr(katherine, "EXTERNAL_HOST_OVERFLOW_LIMIT", asyncio.Semaphore(3))
+
+    _, first_limit = katherine.external_host_resources("first.example")
+    _, second_limit = katherine.external_host_resources("second.example")
+
+    assert second_limit is not first_limit
+    assert list(katherine.SOURCE_HEALTH) == ["second.example"]
+    assert list(katherine.EXTERNAL_HOST_LIMITS) == ["second.example"]
 
 
 def test_external_host_resources_reuses_existing_semaphore(monkeypatch):
