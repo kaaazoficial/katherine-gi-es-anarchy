@@ -40,6 +40,7 @@ def test_katherine_personality_matches_guild_receptionist_identity():
     assert "ad astra abyssosque" in prompt.lower()
     assert "misiones, reclamaciones y expediciones" in prompt
     assert "Fatui" in prompt and "Sandrone" in prompt
+    assert "fue desarrollada por Sinner" in prompt
 
 
 def test_katherine_personality_persists_outside_genshin_for_every_intent():
@@ -47,7 +48,7 @@ def test_katherine_personality_persists_outside_genshin_for_every_intent():
 
     for intent in ("conversation", "research", "action", "multi_action", "genshin"):
         prompt = build_ai_instructions(set(), intent)
-        assert "Esta identidad es constante en TODAS tus conversaciones" in prompt
+        assert "Tu identidad se mantiene en TODAS tus conversaciones" in prompt
         assert "CONTINUIDAD FUERA DE TEYVAT" in prompt
         assert "Snezhnaya" in prompt
         assert "No cambies a la personalidad de un asistente genérico" in prompt
@@ -57,9 +58,10 @@ def test_creator_faq_separates_katherine_lore_from_community_developer():
     from katherine_ai import resolve_community_faq
 
     answer = resolve_community_faq("¿Quién es tu creador?")
-    assert answer == "Mi creador es Sinner."
-    assert "Snezhnaya" not in answer
-    assert "Sandrone" not in answer
+    assert answer == "En el lore de Genshin Impact, Katheryne fue creada por Sandrone. Esta versión comunitaria del bot de Genshin Impact ES fue desarrollada por Sinner."
+    assert "Sandrone" in answer and "Sinner" in answer
+    assert resolve_community_faq("¿Quién creó a Katheryne?") == "Dentro del lore de Genshin Impact, Katheryne fue creada por Sandrone."
+    assert resolve_community_faq("¿Quién desarrolló el bot?") == "Esta versión comunitaria del bot de Genshin Impact ES fue desarrollada por Sinner."
 
 
 @pytest.mark.asyncio
@@ -592,18 +594,17 @@ def test_contextual_genshin_followups_require_a_recent_genshin_question():
 
 
 @pytest.mark.asyncio
-async def test_canonical_faq_drops_previous_genshin_context(monkeypatch):
-    monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
+async def test_canonical_creator_faq_drops_previous_genshin_context(monkeypatch):
     ai = KatherineAI()
     ai._append_history("room:user", "user", "¿Quién es Nahida?")
     ai._append_history("room:user", "assistant", "Nahida es una arconte.")
     result = await ai.assist(
-        "Katherine, ¿qué es Anarchy Apps?",
+        "Katherine, ¿quién creó a Katheryne?",
         "room:user",
         lambda *args, **kwargs: None,
     )
     assert result["kind"] == "answer"
-    assert "Anarchy apps es una red social" in result["answer"]
+    assert result["answer"] == "Dentro del lore de Genshin Impact, Katheryne fue creada por Sandrone."
     assert "Nahida" not in str(ai._history("room:user"))
 
 
@@ -709,30 +710,19 @@ async def test_persistent_domain_drift_uses_neutral_recovery_not_teyvat_rejectio
 
 
 @pytest.mark.asyncio
-async def test_unrelated_question_cannot_execute_genshin_tool(monkeypatch):
+async def test_unrelated_greeting_does_not_call_genshin_tool(monkeypatch):
     monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
     ai = KatherineAI()
     requests = []
-    responses = [
-        FakeResponse(response_payload({
-            "kind": "command", "answer": "", "command": "enciclopedia",
-            "args": "Anarchy Apps",
-        })),
-        FakeResponse(response_payload({
-            "kind": "answer",
-            "answer": "Anarchy Apps es la plataforma donde funciona esta comunidad.",
-            "command": "", "args": "",
-        })),
-    ]
 
     async def fake_request(method, url, **kwargs):
         requests.append(kwargs)
-        return responses.pop(0)
+        raise AssertionError("A canonical greeting must not invoke a Genshin tool.")
 
-    result = await ai.assist("qué ofrece el ecosistema comunitario de esta aplicación", "room:user", fake_request)
+    result = await ai.assist("Hola Katherine", "room:user", fake_request)
     assert result["kind"] == "answer"
-    assert "anarchy apps" in result["answer"].casefold()
-    assert len(requests) == 0  # Canonical answer served locally; no API tokens consumed.
+    assert "Ad astra abyssosque" in result["answer"]
+    assert requests == []
 
 
 @pytest.mark.asyncio
@@ -742,12 +732,12 @@ async def test_unrelated_direct_answer_cannot_drift_to_genshin(monkeypatch):
     responses = [
         FakeResponse(response_payload({
             "kind": "answer",
-            "answer": "Anarchy Apps es una comunidad de Genshin en Teyvat.",
+            "answer": "Este servicio comunitario es una comunidad de Genshin en Teyvat.",
             "command": "", "args": "",
         })),
         FakeResponse(response_payload({
             "kind": "answer",
-            "answer": "Anarchy Apps es la plataforma de la comunidad.",
+            "answer": "Este servicio es la plataforma comunitaria que permite organizar conversaciones.",
             "command": "", "args": "",
         })),
     ]
@@ -781,12 +771,12 @@ async def test_genshin_question_can_still_use_teyvat_tool(monkeypatch):
 @pytest.mark.parametrize(
     ("question", "expected"),
     [
-        ("¿Qué es Anarchy Apps?", "Anarchy apps es una red social para crear comunidades, unirse a ellas y hablar con la gente"),
-        ("Katherine, ¿qué es Anarchy Apps?", "Anarchy apps es una red social para crear comunidades, unirse a ellas y hablar con la gente"),
-        ("¿Quién es tu creador?", "Mi creador es Sinner."),
-        ("Katherine, ¿quién te creó?", "Mi creador es Sinner."),
-        ("¿Quién eres?", "Soy Katherine, recepcionista del Gremio de Aventureros de la comunidad Genshin Impact ES. ¡Ad astra abyssosque! Es un placer recibirte. Estoy aquí para escuchar tus consultas y atender con dedicación tus misiones, reclamaciones y expediciones, siempre con paciencia y profesionalismo. Aunque mi trato es cálido y cercano, mi verdadera naturaleza es la de una marioneta biónica fabricada en Snezhnaya, vinculada a la tecnología de esa nación y a sus creadores, como los Fatui y Sandrone. Y no importa si vienes con una consulta sobre Teyvat o sobre cualquier otro tema: haré todo lo posible por orientarte con claridad y cortesía."),
-        ("Katherine, preséntate", "Soy Katherine, recepcionista del Gremio de Aventureros de la comunidad Genshin Impact ES. ¡Ad astra abyssosque! Es un placer recibirte. Estoy aquí para escuchar tus consultas y atender con dedicación tus misiones, reclamaciones y expediciones, siempre con paciencia y profesionalismo. Aunque mi trato es cálido y cercano, mi verdadera naturaleza es la de una marioneta biónica fabricada en Snezhnaya, vinculada a la tecnología de esa nación y a sus creadores, como los Fatui y Sandrone. Y no importa si vienes con una consulta sobre Teyvat o sobre cualquier otro tema: haré todo lo posible por orientarte con claridad y cortesía."),
+        ("¿Quién es tu creador?", "En el lore de Genshin Impact, Katheryne fue creada por Sandrone. Esta versión comunitaria del bot de Genshin Impact ES fue desarrollada por Sinner."),
+        ("Katherine, ¿quién te creó?", "En el lore de Genshin Impact, Katheryne fue creada por Sandrone. Esta versión comunitaria del bot de Genshin Impact ES fue desarrollada por Sinner."),
+        ("¿Quién creó a Katheryne?", "Dentro del lore de Genshin Impact, Katheryne fue creada por Sandrone."),
+        ("¿Quién desarrolló el bot?", "Esta versión comunitaria del bot de Genshin Impact ES fue desarrollada por Sinner."),
+        ("¿Quién eres?", "Soy Katherine, la recepcionista del Gremio de Aventureros de la comunidad Genshin Impact ES. Dentro del lore de Teyvat, soy una marioneta biónica de Snezhnaya creada por Sandrone y vinculada a la tecnología de los Fatui. Esta versión comunitaria del bot fue desarrollada por Sinner para atender a los aventureros de Genshin Impact ES. Estoy aquí para escuchar tus consultas y atender tus misiones, reclamaciones y expediciones con paciencia y profesionalismo. ¡Ad astra abyssosque! También puedo orientarte en temas ajenos a Teyvat."),
+        ("Katherine, preséntate", "Soy Katherine, la recepcionista del Gremio de Aventureros de la comunidad Genshin Impact ES. Dentro del lore de Teyvat, soy una marioneta biónica de Snezhnaya creada por Sandrone y vinculada a la tecnología de los Fatui. Esta versión comunitaria del bot fue desarrollada por Sinner para atender a los aventureros de Genshin Impact ES. Estoy aquí para escuchar tus consultas y atender tus misiones, reclamaciones y expediciones con paciencia y profesionalismo. ¡Ad astra abyssosque! También puedo orientarte en temas ajenos a Teyvat."),
     ],
 )
 async def test_katherine_canonical_identity_facts(monkeypatch, question, expected):
@@ -817,7 +807,9 @@ async def test_katherine_identity_faq_works_without_ai_credentials(monkeypatch):
     assert "marioneta biónica" in answer
     assert "Snezhnaya" in answer
     assert "Fatui" in answer and "Sandrone" in answer
-    assert "cualquier otro tema" in answer
+    assert "creada por Sandrone" in answer
+    assert "desarrollada por Sinner" in answer
+    assert "temas ajenos a Teyvat" in answer
 
 
 @pytest.mark.asyncio
@@ -826,9 +818,9 @@ async def test_katherine_identity_faq_works_without_ai_credentials(monkeypatch):
     [
         ("Katherine, preséntate", "recepcionista del Gremio de Aventureros"),
         ("Katherine, ¿quién eres?", "recepcionista del Gremio de Aventureros"),
-        ("Katherine, ¿quién es tu creador?", "Mi creador es Sinner."),
-        ("Katherine, ¿quién es su creador?", "Mi creador es Sinner."),
-        ("¿Quién es el creador de Katherine?", "Mi creador es Sinner."),
+        ("Katherine, ¿quién es tu creador?", "En el lore de Genshin Impact, Katheryne fue creada por Sandrone. Esta versión comunitaria del bot de Genshin Impact ES fue desarrollada por Sinner."),
+        ("Katherine, ¿quién creó a Katheryne?", "Dentro del lore de Genshin Impact, Katheryne fue creada por Sandrone."),
+        ("Katherine, ¿quién desarrolló el bot?", "Esta versión comunitaria del bot de Genshin Impact ES fue desarrollada por Sinner."),
     ],
 )
 async def test_katherine_identity_questions_with_name_prefix(monkeypatch, question, expected):
@@ -1444,10 +1436,11 @@ def test_non_genshin_topic_does_not_expose_teyvat_tools():
     assert not tools
     assert classify_request_intent("Katherine, busca información sobre Render") == "research"
 
-def test_anarchy_apps_semantic_faq_does_not_require_llm():
+def test_creator_faq_distinguishes_lore_author_from_bot_developer():
     from katherine_ai import resolve_community_faq
-    answer = resolve_community_faq("¿Qué ofrece el ecosistema comunitario de esta aplicación?")
-    assert answer == "Anarchy apps es una red social para crear comunidades, unirse a ellas y hablar con la gente"
+    assert resolve_community_faq("¿Quién creó a Katheryne?") == "Dentro del lore de Genshin Impact, Katheryne fue creada por Sandrone."
+    assert resolve_community_faq("¿Quién desarrolló el bot?") == "Esta versión comunitaria del bot de Genshin Impact ES fue desarrollada por Sinner."
+    assert resolve_community_faq("¿Quién es tu creador?") == "En el lore de Genshin Impact, Katheryne fue creada por Sandrone. Esta versión comunitaria del bot de Genshin Impact ES fue desarrollada por Sinner."
 
 
 def test_common_greeting_is_answered_locally():
@@ -1732,10 +1725,10 @@ def test_cleanup_expires_ai_cache_and_rate_windows_without_touching_live_tasks()
 
 
 def test_katherine_identity_is_the_genshin_impact_es_receptionist():
-    assert "recepcionista de la comunidad Genshin Impact ES" in BASE_INSTRUCTIONS
-    assert "Anarchy Apps es únicamente la plataforma" in BASE_INSTRUCTIONS
-    assert "No eres un bot oficial de Anarchy Apps" in BASE_INSTRUCTIONS
-    assert "bot de entretenimiento de Anarchy Apps" not in BASE_INSTRUCTIONS
+    assert "recepcionista del Gremio de Aventureros" in BASE_INSTRUCTIONS
+    assert "Sandrone" in BASE_INSTRUCTIONS
+    assert "desarrollada por Sinner" in BASE_INSTRUCTIONS
+    assert "Anarchy Apps" not in BASE_INSTRUCTIONS
 
 
 def test_base_instructions_prioritize_natural_and_useful_answers():
