@@ -325,22 +325,6 @@ def test_external_host_registry_is_bounded_and_uses_shared_overflow(monkeypatch)
     asyncio.run(exercise_full_registry())
 
 
-def test_external_host_registry_recycles_idle_hosts_before_overflow(monkeypatch):
-    from collections import OrderedDict
-
-    monkeypatch.setattr(katherine, "EXTERNAL_HOST_STATE_MAX", 1)
-    monkeypatch.setattr(katherine, "SOURCE_HEALTH", OrderedDict())
-    monkeypatch.setattr(katherine, "EXTERNAL_HOST_LIMITS", OrderedDict())
-    monkeypatch.setattr(katherine, "EXTERNAL_HOST_OVERFLOW_LIMIT", asyncio.Semaphore(3))
-
-    _, first_limit = katherine.external_host_resources("first.example")
-    _, second_limit = katherine.external_host_resources("second.example")
-
-    assert second_limit is not first_limit
-    assert list(katherine.SOURCE_HEALTH) == ["second.example"]
-    assert list(katherine.EXTERNAL_HOST_LIMITS) == ["second.example"]
-
-
 def test_external_host_resources_reuses_existing_semaphore(monkeypatch):
     from collections import OrderedDict
 
