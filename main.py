@@ -250,18 +250,15 @@ AI_TOOL_SILENT: ContextVar[bool] = ContextVar(
     "katherine_ai_tool_silent", default=False
 )
 # ---------------------------------------------------------------------------
-# CONFIGURACION
-# En Render: BOT_TOKEN, WEBHOOK_SECRET. Para bot de comunidad:
-# COMMUNITY_BOT_TOKEN y COMMUNITY_WEBHOOK_SECRET.
+# IDENTIDAD ÚNICA
+# Katherine opera exclusivamente con el bot comunitario.
 # ---------------------------------------------------------------------------
 API = "https://api.anarchyapps.org/bot-api/v1"
 GAME_API = "https://genshin-db-api.vercel.app/api/v5"
 PORT = SETTINGS.port
 # Render requires the web server to listen on every container interface.
 UVICORN_BIND_HOST = os.getenv("UVICORN_BIND_HOST", "0.0.0.0").strip() or "0.0.0.0"
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 COMMUNITY_TOKEN = os.getenv("COMMUNITY_BOT_TOKEN", "").strip()
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
 COMMUNITY_SECRET = os.getenv("COMMUNITY_WEBHOOK_SECRET", "").strip()
 METRICS_TOKEN = os.getenv("PROMETHEUS_METRICS_TOKEN", "").strip()
 PREFIX = SETTINGS.command_prefix
@@ -311,10 +308,10 @@ LAST_COMMAND_AT = None
 LAST_COMMAND_NAME = None
 LAST_COMMAND_USER = None
 
-if not BOT_TOKEN:
-    logging.warning("Falta BOT_TOKEN.")
-if not WEBHOOK_SECRET:
-    logging.warning("Falta WEBHOOK_SECRET. El webhook del bot principal rechazara eventos.")
+if not COMMUNITY_TOKEN:
+    logging.warning("Falta COMMUNITY_BOT_TOKEN.")
+if not COMMUNITY_SECRET:
+    logging.warning("Falta COMMUNITY_WEBHOOK_SECRET. El webhook comunitario rechazara eventos.")
 
 @asynccontextmanager
 async def application_lifespan(application: FastAPI):
@@ -1493,8 +1490,9 @@ CURIOSITIES = [
 # ---------------------------------------------------------------------------
 # FUNCIONES GENERALES
 # ---------------------------------------------------------------------------
-def token_for(source: str) -> str:
-    return COMMUNITY_TOKEN if source == "community" else BOT_TOKEN
+def token_for(source: str = "community") -> str:
+    """Return the sole credential; legacy source labels never select another bot."""
+    return COMMUNITY_TOKEN
 
 
 def format_duration(seconds: float) -> str:
@@ -1805,8 +1803,7 @@ async def build_status_message(source: str, nickname: str, thread_id: str | None
         f"• Python: {sys.version.split()[0]} | PID: {os.getpid()}",
         f"• Cliente HTTP: {'activo' if HTTP_CLIENT is not None and not HTTP_CLIENT.is_closed else 'inactivo'}",
         f"• Directorio de datos: {'escribible' if DATA_DIR.exists() and os.access(DATA_DIR, os.W_OK) else 'no disponible'}",
-        f"• Token desarrollador: {'Configurado' if BOT_TOKEN else 'No configurado'}",
-        f"• Token comunidad: {'Configurado' if COMMUNITY_TOKEN else 'No configurado'}",
+        f"• Identidad comunitaria: {'Configurada' if COMMUNITY_TOKEN else 'No configurada'}",
         f"• Chats vinculados al token: {len(thread_ids)}",
         "Los contadores corresponden a este proceso desde su último reinicio."
     ]
@@ -10047,24 +10044,16 @@ AVATAR_MIME_TYPES = {
 }
 
 
-ADMIN_BOT_TARGET_ALIASES = {
-    "developer": "developer", "desarrollador": "developer", "dev": "developer",
-    "community": "community", "comunidad": "community", "com": "community",
-    "both": "both", "ambos": "both",
-}
-
-
 def parse_admin_bot_targets(value: str) -> tuple[list[str], str]:
-    """Parse an optional target; profile/avatar updates default to both identities."""
+    """Keep profile and avatar administration scoped to the sole community bot."""
     remainder = str(value or "").strip()
-    if not remainder:
-        return ["developer", "community"], ""
     parts = remainder.split(maxsplit=1)
-    selected = ADMIN_BOT_TARGET_ALIASES.get(parts[0].casefold())
-    if selected is None:
-        return ["developer", "community"], remainder
-    targets = ["developer", "community"] if selected == "both" else [selected]
-    return targets, parts[1].strip() if len(parts) > 1 else ""
+    if parts and parts[0].casefold() in {
+        "developer", "desarrollador", "dev", "community", "comunidad",
+        "com", "both", "ambos",
+    }:
+        remainder = parts[1].strip() if len(parts) > 1 else ""
+    return ["community"], remainder
 
 
 def avatar_meta_image(markup: str) -> str | None:
@@ -13467,8 +13456,8 @@ Uso: !enciclopedia <nombre>""",
         if not 2 <= len(name) <= 32 or (status is not None and len(status) > 40):
             await send_message(
                 thread,
-                "Uso: !perfilbot [ambos|desarrollador|comunidad] Nombre | Estado\n"
-                "Por defecto actualiza las dos identidades. Nombre: 2-32 caracteres; "
+                "Uso: !perfilbot Nombre | Estado\n"
+                "Actualiza el único perfil comunitario. Nombre: 2-32 caracteres; 
                 "estado: máximo 40. Usa - para borrar el estado.",
                 source, reply
             )
@@ -13492,10 +13481,7 @@ Uso: !enciclopedia <nombre>""",
             lines.append("No actualizado: " + ", ".join(
                 f"{target} (HTTP {code or '?'})" for target, code in failed
             ))
-        lines.append(
-            "Por defecto se sincronizan las identidades de chat y llamada. "
-            "Puedes seleccionar una sola con desarrollador o comunidad."
-        )
+        lines.append("El perfil actualizado corresponde a la única identidad comunitaria de Katherine.")
         await send_message(thread, "\\n".join(lines), source, reply)
         return
 
@@ -13512,8 +13498,8 @@ Uso: !enciclopedia <nombre>""",
         if not avatar_value:
             await send_message(
                 thread,
-                "Uso: !avatarbot [ambos|desarrollador|comunidad] URL_DE_IMAGEN_O_ARTICULO\n"
-                "Por defecto actualiza los dos bots, incluido el que entra a las llamadas. "
+                "Uso: !avatarbot URL_DE_IMAGEN_O_ARTICULO\n"
+                "Actualiza el avatar del único bot comunitario, incluido el que entra a las llamadas. 
                 "Acepta HTTPS, PNG/JPG/WebP/GIF y máximo 512 KB.",
                 source, reply
             )
@@ -13565,7 +13551,7 @@ Uso: !enciclopedia <nombre>""",
                 lines.append(f"✗ {target}: no confirmado (HTTP {status or '?'}).{reason}")
         lines.append(
             f"Imagen preparada: {mime}, {len(image_bytes) // 1024} KB. "
-            "El objetivo por defecto es mantener iguales el perfil y la identidad de voz."
+            "El avatar pertenece a la única identidad comunitaria de Katherine."
         )
         await send_message(thread, "\\n".join(lines), source, reply)
         return
@@ -14769,15 +14755,8 @@ async def select_dj_search_result(
 
 
 def is_button_source_allowed(action: dict, source: str) -> bool:
-    """Allow only the deliberate DJ developer-message/community-interaction bridge."""
-    return (
-        action.get("source") == source
-        or (
-            action.get("type") == "dj_select"
-            and action.get("source") == "developer"
-            and source == "community"
-        )
-    )
+    """Accept callbacks belonging to the sole community bot identity."""
+    return action.get("source") == source
 
 
 async def handle_interaction(event: dict, source: str):
@@ -15342,7 +15321,7 @@ async def dispatch(event: dict, source: str):
         metrics[f"event_{kind}"] += 1
         # Revalidar el contenido editado evita que un enlace prohibido se
         # introduzca después de que el mensaje original haya sido publicado.
-        if source == "developer":
+        if source == "community":
             message_data = event.get("message") or {}
             if not isinstance(message_data, dict):
                 message_data = {}
@@ -15516,60 +15495,20 @@ async def webhook(request: Request, source: str | None):
     event = None
     verified_source = source
 
-    # El endpoint raíz acepta webhooks de ambos bots. Esto evita que un
-    # webhook comunitario configurado por error en "/" sea validado con
-    # WEBHOOK_SECRET en vez de COMMUNITY_WEBHOOK_SECRET.
-    candidates = (
-        (source,)
-        if source in ("developer", "community")
-        else ("developer", "community")
-    )
-    valid_sources = []
-    for candidate in candidates:
-        secret = COMMUNITY_SECRET if candidate == "community" else WEBHOOK_SECRET
-        if not secret:
-            continue
-        candidate_event = verify_webhook(raw, request.headers, secret)
-        if candidate_event is not None:
-            valid_sources.append((candidate, candidate_event))
-
-    if not valid_sources:
-        configured = {
-            "developer": bool(WEBHOOK_SECRET),
-            "community": bool(COMMUNITY_SECRET)
-        }
-        logging.warning(
-            "[WEBHOOK] Firma rechazada en %s | secretos configurados: %s",
-            request.url.path,
-            configured
+    # Una única identidad y un único secreto: el webhook comunitario.
+    if not COMMUNITY_SECRET:
+        logging.warning("[WEBHOOK] Secreto comunitario no configurado en %s.", request.url.path)
+        raise HTTPException(
+            status_code=503,
+            detail="El secreto del webhook comunitario no está configurado."
         )
-        if not any(configured.values()):
-            raise HTTPException(
-                status_code=503,
-                detail="Ningún secreto de webhook está configurado."
-            )
+    event = verify_webhook(raw, request.headers, COMMUNITY_SECRET)
+    if event is None:
         raise HTTPException(
             status_code=401,
-            detail="Firma inválida para los bots configurados."
+            detail="Firma inválida para el webhook comunitario."
         )
-
-    if len(valid_sources) == 1:
-        verified_source, event = valid_sources[0]
-    else:
-        # Si por configuración ambos secretos coinciden, el botId permite
-        # identificar el emisor sin confiar en datos no firmados.
-        candidate_event = valid_sources[0][1]
-        bot_id = str(candidate_event.get("botId") or "")
-        matched = next(
-            (
-                item for item in valid_sources
-                if str(
-                    (BOT_IDENTITIES.get(item[0]) or {}).get("bot_id") or ""
-                ) == bot_id and bot_id
-            ),
-            None
-        )
-        verified_source, event = matched or valid_sources[0]
+    verified_source = "community"
 
     active_webhooks = sum(1 for task in webhook_tasks if not task.done())
     if active_webhooks >= MAX_WEBHOOK_BACKGROUND_TASKS:
@@ -15618,12 +15557,12 @@ async def webhook(request: Request, source: str | None):
 # ---------------------------------------------------------------------------
 @app.post("/")
 async def main_webhook(request: Request):
-    return await webhook(request, None)
+    return await webhook(request, "community")
 
 
 @app.post("/webhook")
 async def main_webhook_alias(request: Request):
-    return await webhook(request, None)
+    return await webhook(request, "community")
 
 
 @app.post("/community")
@@ -15746,8 +15685,7 @@ async def startup():
     )
     logging.info("[AI] Credencial %s | modelo=%s", "detectada" if AI_CORE.is_enabled else "no detectada", AI_CORE.model if AI_CORE.is_enabled else "pendiente")
     logging.info(
-        "[WEBHOOK] Secretos configurados | developer=%s | community=%s",
-        bool(WEBHOOK_SECRET),
+        "[WEBHOOK] Secreto comunitario configurado=%s",
         bool(COMMUNITY_SECRET)
     )
 
@@ -15775,9 +15713,7 @@ async def startup():
                 me["data"]
             )
 
-    identity_sources = [
-        source for source in ("developer", "community") if token_for(source)
-    ]
+    identity_sources = ["community"] if COMMUNITY_TOKEN else []
     if identity_sources:
         phase_started_at = time.perf_counter()
         await asyncio.gather(*(load_bot_identity(source) for source in identity_sources))
