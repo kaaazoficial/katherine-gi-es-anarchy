@@ -500,6 +500,63 @@ def get_chat_setting(thread_id: str, key: str, default: str = "") -> str:
     return stored_value if stored_value is not None else str(default)
 
 
+def get_chat_settings(thread_id: str, defaults: dict[str, str]) -> dict[str, str]:
+    """Read a group of room settings with one SQLite session for cache misses."""
+    room_id = str(thread_id)
+    normalized_defaults = {
+        str(key): str(default) for key, default in defaults.items()
+    }
+    if not normalized_defaults:
+        return {}
+
+    now = time.monotonic()
+    values: dict[str, str] = {}
+    missing: list[str] = []
+    for key, default in normalized_defaults.items():
+        cache_key = (room_id, key)
+        cached = CHAT_SETTING_CACHE.get(cache_key)
+        if cached is not None and cached[0] > now:
+            metrics["chat_setting_cache_hits"] += 1
+            values[key] = str(cached[1]) if cached[1] is not None else default
+        else:
+            metrics["chat_setting_cache_misses"] += 1
+            missing.append(key)
+
+    if not missing:
+        return values
+
+    stored_values: dict[str, str] = {}
+    # Respect SQLite's conservative bind-variable limit while keeping ordinary
+    # room-configuration reads to a single indexed query.
+    for offset in range(0, len(missing), 500):
+        chunk = missing[offset:offset + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        with db_session() as db:
+            rows = db.execute(
+                "SELECT setting_key,setting_value FROM chat_settings "
+                f"WHERE thread_id=? AND setting_key IN ({placeholders})",
+                (room_id, *chunk),
+            ).fetchall()
+        stored_values.update({
+            str(row["setting_key"]): str(row["setting_value"])
+            for row in rows
+        })
+
+    for key in missing:
+        cache_key = (room_id, key)
+        stored_value = stored_values.get(key)
+        if (
+            cache_key not in CHAT_SETTING_CACHE
+            and len(CHAT_SETTING_CACHE) >= CHAT_SETTING_CACHE_MAX_ENTRIES
+        ):
+            CHAT_SETTING_CACHE.pop(next(iter(CHAT_SETTING_CACHE)), None)
+        CHAT_SETTING_CACHE[cache_key] = (now + CHAT_SETTING_CACHE_TTL, stored_value)
+        values[key] = (
+            stored_value if stored_value is not None else normalized_defaults[key]
+        )
+    return values
+
+
 def set_chat_setting(thread_id: str, key: str, value: str):
     cache_key = (str(thread_id), str(key))
     stored_value = str(value)
@@ -703,18 +760,31 @@ def delete_dj_favorite(thread_id: str, uid: str, favorite_id: int) -> bool:
 
 
 def anti_spam_configuration(thread_id: str) -> dict:
+    settings = get_chat_settings(
+        thread_id,
+        {
+            "antispam_enabled": "1",
+            "antispam_max_messages": "7",
+            "antispam_window_seconds": "8",
+            "antispam_repeat_limit": "3",
+            "antispam_max_links": "4",
+            "antispam_max_mentions": "8",
+        },
+    )
+
     def bounded(key, default, minimum, maximum):
         try:
-            return max(minimum, min(maximum, int(get_chat_setting(thread_id, key, str(default)))))
+            return max(minimum, min(maximum, int(settings[key])))
         except (TypeError, ValueError):
             return default
+
     return {
-        "enabled": get_chat_setting(thread_id, "antispam_enabled", "1") == "1",
+        "enabled": settings["antispam_enabled"] == "1",
         "max_messages": bounded("antispam_max_messages", 7, 3, 20),
         "window_seconds": bounded("antispam_window_seconds", 8, 3, 60),
         "repeat_limit": bounded("antispam_repeat_limit", 3, 2, 10),
         "max_links": bounded("antispam_max_links", 4, 2, 12),
-        "max_mentions": bounded("antispam_max_mentions", 8, 3, 20)
+        "max_mentions": bounded("antispam_max_mentions", 8, 3, 20),
     }
 
 

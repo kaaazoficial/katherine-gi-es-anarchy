@@ -149,6 +149,26 @@ def test_dj_playlist_creation_tracks_and_deletion(database):
     assert database.get_dj_playlist("room-1", "Música favorita") == (None, [])
 
 
+def test_antispam_configuration_batches_cold_setting_reads(database, monkeypatch):
+    original_session = database.db_session
+    opened_sessions = []
+
+    def counted_session():
+        opened_sessions.append(True)
+        return original_session()
+
+    monkeypatch.setattr(database, "db_session", counted_session)
+
+    config = database.anti_spam_configuration("room-batched")
+    assert config["enabled"] is True
+    assert config["max_messages"] == 7
+    assert len(opened_sessions) == 1
+
+    # A second read is served entirely from the existing short-lived cache.
+    database.anti_spam_configuration("room-batched")
+    assert len(opened_sessions) == 1
+
+
 def test_antispam_configuration_applies_safe_bounds(database):
     defaults = database.anti_spam_configuration("room-1")
     assert defaults == {
