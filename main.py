@@ -10049,7 +10049,7 @@ def parse_admin_bot_targets(value: str) -> tuple[list[str], str]:
     remainder = str(value or "").strip()
     parts = remainder.split(maxsplit=1)
     if parts and parts[0].casefold() in {
-        "community", "desarrollador", "dev", "comunidad",
+        "developer", "desarrollador", "dev", "comunidad",
         "com", "both", "ambos",
     }:
         remainder = parts[1].strip() if len(parts) > 1 else ""
