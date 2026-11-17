@@ -1279,7 +1279,7 @@ class KatherineAI:
         state = self._provider_state()
         state["last_latency_ms"] = elapsed * 1000
         state["requests"] = float(state.get("requests", 0) or 0) + 1
-        logging.info(
+        logging.debug(
             "[AI_LATENCY] proveedor=%s modelo=%s intento=%s tiempo_ms=%.0f",
             self.provider_name, self.model, attempt, elapsed * 1000,
         )
