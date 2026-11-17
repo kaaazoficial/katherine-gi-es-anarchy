@@ -858,7 +858,7 @@ def prune_antispam_tracking(now: float | None = None) -> None:
 
 
 def check_antispam_message(event: dict, source: str):
-    if source != "developer":
+    if source != "community":
         return False, None
     thread_id = str(event.get("threadId") or "")
     message = event.get("message") or {}
@@ -2045,7 +2045,7 @@ def is_not_in_chat_response(status_code: int | None, data: Any) -> bool:
     return error_code in {"not_in_chat", "bot_not_in_chat"} or message == "the bot is not in this chat"
 
 
-async def api(method: str, path: str, source="developer", body=None):
+async def api(method: str, path: str, source="community", body=None):
     token = token_for(source)
     if not token:
         return {
@@ -2507,7 +2507,7 @@ def schedule_pending_delivery(
 async def send_message(
     thread_id: str,
     content: str,
-    source="developer",
+    source="community",
     reply_id=None,
     buttons=None,
     allow_safe_links: bool = False,
@@ -2704,7 +2704,7 @@ async def send_message(
 # PROGRESO EDITABLE · NEXUS
 # ---------------------------------------------------------------------------
 async def start_progress_message(
-    thread_id: str, content: str, source: str = "developer", reply_id=None
+    thread_id: str, content: str, source: str = "community", reply_id=None
 ) -> dict:
     """Publica el primer estado y conserva el ID si la API lo devuelve."""
     result = await send_message(thread_id, content, source, reply_id)
@@ -2728,7 +2728,7 @@ async def update_progress_message(context: dict | None, content: str) -> bool:
     result = await api(
         "PATCH",
         f"/threads/{context['thread_id']}/messages/{context['message_id']}",
-        context.get("source", "developer"),
+        context.get("source", "community"),
         {"content": sanitize_chat_text(content)[:2000]},
     )
     if result.get("ok"):
@@ -6585,7 +6585,7 @@ async def dj_playback_loop(
                     str(thread_id),
                     "⚠️ La salida de audio se interrumpió. Detuve la reproducción para evitar "
                     "volver a decodificar la misma canción; vuelve a ejecutar !join y después !dj.",
-                    "developer"
+                    "community"
                 )
             except Exception as exc:
                 metrics["dj_playback_errors"] += 1
@@ -6594,7 +6594,7 @@ async def dj_playback_loop(
                     str(thread_id),
                     f"⚠️ No pude reproducir «{current_title}» ({type(exc).__name__}). "
                     "La saltaré y continuaré con la cola.",
-                    "developer"
+                    "community"
                 )
 
             if played_ok:
@@ -6664,7 +6664,7 @@ async def dj_playback_loop(
                         str(thread_id),
                         f"⚠️ No pude preparar «{candidate.get('title') or 'la siguiente pista'}» "
                         f"({type(exc).__name__}). Continuaré con la cola.",
-                        "developer"
+                        "community"
                     )
                     await cleanup_temporary(candidate.get("temporary"))
                     continue
@@ -10049,7 +10049,7 @@ def parse_admin_bot_targets(value: str) -> tuple[list[str], str]:
     remainder = str(value or "").strip()
     parts = remainder.split(maxsplit=1)
     if parts and parts[0].casefold() in {
-        "developer", "desarrollador", "dev", "community", "comunidad",
+        "community", "desarrollador", "dev", "community", "comunidad",
         "com", "both", "ambos",
     }:
         remainder = parts[1].strip() if len(parts) > 1 else ""
@@ -10424,7 +10424,7 @@ async def maybe_send_auto_reply(thread_id: str, uid: str, nickname: str, content
             AUTO_REPLY_CHAT_COOLDOWN[str(thread_id)] = now + 4
             AUTO_REPLY_USER_COOLDOWN[(str(thread_id), str(uid))] = now + 30
             metrics["auto_replies_sent"] += 1
-            await send_message(thread_id, response, "developer")
+            await send_message(thread_id, response, "community")
             return True
     return False
 
@@ -14992,7 +14992,7 @@ async def handle_interaction(event: dict, source: str):
         return
 
     if action_type == "dj_select":
-        dj_source = "developer"
+        dj_source = "community"
         saved = DJ_SEARCH_RESULTS.get(thread_id) or {}
         search_id = str(payload.get("search_id") or "")
         if (
@@ -15102,7 +15102,7 @@ async def dispatch(event: dict, source: str):
     if kind == "message":
         # Ambos bots reciben el mismo evento de chat. Solo el bot developer
         # procesa texto, comandos y TTS; el community queda reservado para voz.
-        if source != "developer":
+        if source != "community":
             return
         blocked, spam_info = check_antispam_message(event, source)
         if blocked:
@@ -15111,7 +15111,7 @@ async def dispatch(event: dict, source: str):
                     str(event.get("threadId") or ""),
                     f"🛡️ {spam_info['nickname']}, baja la frecuencia de mensajes. "
                     f"Se registró la advertencia #{spam_info['warning_id']}.",
-                    "developer"
+                    "community"
                 )
             return
         message_data = event.get("message") or {}
