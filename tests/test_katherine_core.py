@@ -284,10 +284,10 @@ def test_guardian_warns_for_link_bursts_and_records_reason(database, monkeypatch
             "mentions": [],
         },
     }
-    blocked, info = katherine.check_antispam_message(event, "developer")
+    blocked, info = katherine.check_antispam_message(event, "community")
     assert blocked is True
     assert info and info["warning_id"]
-    target_uid = katherine.scoped_uid("developer:room-guardian", "user-guardian")
+    target_uid = katherine.scoped_uid("community:room-guardian", "user-guardian")
     warnings = database.get_moderation_warnings("room-guardian", target_uid)
     assert warnings[0]["automatic"] == 1
     assert "Exceso de enlaces" in warnings[0]["reason"]

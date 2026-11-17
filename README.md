@@ -2,6 +2,10 @@
 
 Katherine es el bot comunitario de Genshin Impact ES en Anarchy, desarrollado en Python con FastAPI. Anarchy Apps es su plataforma anfitriona. Integra comandos de Genshin, moderación, herramientas sociales, asistencia conversacional, investigación web, música y voz.
 
+## Identidad y credenciales
+
+Katherine utiliza una sola identidad: el bot comunitario. Configura `COMMUNITY_BOT_TOKEN` y `COMMUNITY_WEBHOOK_SECRET` en el proveedor. Las credenciales heredadas `BOT_TOKEN` y `WEBHOOK_SECRET` ya no forman parte del runtime. Los endpoints `/`, `/webhook` y `/community` validan el mismo secreto comunitario.
+
 ## Arquitectura
 - `main.py`: orquestación de webhooks, despacho y compatibilidad con los comandos de Anarchy.
 - `katherine_database.py`: conexiones, transacciones y creación del esquema SQLite.

@@ -7,6 +7,12 @@ import pytest
 import main as bot_main
 
 
+def test_all_api_source_labels_resolve_to_the_community_token(monkeypatch):
+    monkeypatch.setattr(bot_main, "COMMUNITY_TOKEN", "community-token-for-test")
+    assert bot_main.token_for("community") == "community-token-for-test"
+    assert bot_main.token_for("developer") == "community-token-for-test"
+
+
 def test_ai_transport_has_reserved_capacity_separate_from_background_requests():
     assert bot_main.external_request_semaphore() is bot_main.EXTERNAL_GLOBAL_LIMIT
     token = bot_main.AI_PRIORITY_REQUEST.set(True)
@@ -32,7 +38,7 @@ async def test_ai_plan_executor_rejects_side_effect_tools_before_execution(monke
     monkeypatch.setattr(bot_main, "execute_ai_tool", fake_execute)
     executed = await bot_main.execute_ai_plan(
         {"threadId": "room", "message": {}},
-        "developer",
+        "community",
         "session",
         ["pagar @Ana 100"],
         request_text="consulta",
@@ -73,9 +79,9 @@ async def test_failed_message_delivery_is_not_saved_to_ai_context(monkeypatch):
     captured = []
     token = bot_main.AI_TOOL_OUTPUT_CAPTURE.set(captured)
     monkeypatch.setattr(bot_main, "last_bot_send", 0.0)
-    monkeypatch.setitem(bot_main.last_chat_send, "developer:test-room", 0.0)
+    monkeypatch.setitem(bot_main.last_chat_send, "community:test-room", 0.0)
 
-    async def failed_api(method, path, source="developer", body=None):
+    async def failed_api(method, path, source="community", body=None):
         return {
             "ok": False,
             "status": 403,
@@ -99,9 +105,9 @@ async def test_successful_message_delivery_is_saved_to_ai_context(monkeypatch):
     captured = []
     token = bot_main.AI_TOOL_OUTPUT_CAPTURE.set(captured)
     monkeypatch.setattr(bot_main, "last_bot_send", 0.0)
-    monkeypatch.setitem(bot_main.last_chat_send, "developer:test-room-success", 0.0)
+    monkeypatch.setitem(bot_main.last_chat_send, "community:test-room-success", 0.0)
 
-    async def successful_api(method, path, source="developer", body=None):
+    async def successful_api(method, path, source="community", body=None):
         return {
             "ok": True,
             "status": 200,
@@ -130,35 +136,30 @@ def test_long_messages_are_split_into_blocks_of_at_most_2000_utf16_units():
 
 @pytest.mark.asyncio
 async def test_admin_cleanup_deletes_only_tracked_own_message_ids(monkeypatch):
-    key = ("developer", "cleanup-room")
+    key = ("community", "cleanup-room")
     bot_main.BOT_SENT_MESSAGES[key].clear()
     now = bot_main.time.time()
     bot_main.BOT_SENT_MESSAGES[key].extend([
         {"message_id": "own-1", "created_at": now},
         {"message_id": "own-2", "created_at": now + 1},
     ])
-    bot_main.BOT_SENT_MESSAGES[("community", "cleanup-room")].append(
-        {"message_id": "other-bot", "created_at": 3}
-    )
     calls = []
 
-    async def fake_api(method, path, source="developer", body=None):
+    async def fake_api(method, path, source="community", body=None):
         calls.append((method, path, source))
         if path.endswith("own-2"):
             return {"ok": False, "status": 403, "data": {}}
         return {"ok": True, "status": 204, "data": {}}
 
     monkeypatch.setattr(bot_main, "api", fake_api)
-    result = await bot_main.delete_katherine_messages("cleanup-room", "developer")
+    result = await bot_main.delete_katherine_messages("cleanup-room", "community")
     assert result == {"attempted": 2, "deleted": 1, "failed": 1}
     assert calls == [
-        ("DELETE", "/threads/cleanup-room/messages/own-1", "developer"),
-        ("DELETE", "/threads/cleanup-room/messages/own-2", "developer"),
+        ("DELETE", "/threads/cleanup-room/messages/own-1", "community"),
+        ("DELETE", "/threads/cleanup-room/messages/own-2", "community"),
     ]
     assert [item["message_id"] for item in bot_main.BOT_SENT_MESSAGES[key]] == ["own-2"]
-    assert bot_main.BOT_SENT_MESSAGES[("community", "cleanup-room")][0]["message_id"] == "other-bot"
     bot_main.BOT_SENT_MESSAGES.pop(key, None)
-    bot_main.BOT_SENT_MESSAGES.pop(("community", "cleanup-room"), None)
 
 
 
@@ -173,19 +174,19 @@ def test_cleanup_command_is_privileged_and_not_available_to_public_ai():
 
 @pytest.mark.asyncio
 async def test_admin_cleanup_ignores_expired_ephemeral_message_ids(monkeypatch):
-    key = ("developer", "cleanup-expired-room")
+    key = ("community", "cleanup-expired-room")
     bot_main.BOT_SENT_MESSAGES[key].clear()
     bot_main.BOT_SENT_MESSAGES[key].extend([
         {"message_id": "expired", "created_at": 1},
     ])
     calls = []
 
-    async def fake_api(method, path, source="developer", body=None):
+    async def fake_api(method, path, source="community", body=None):
         calls.append(path)
         return {"ok": True, "status": 204, "data": {}}
 
     monkeypatch.setattr(bot_main, "api", fake_api)
-    result = await bot_main.delete_katherine_messages("cleanup-expired-room", "developer")
+    result = await bot_main.delete_katherine_messages("cleanup-expired-room", "community")
     assert result == {"attempted": 0, "deleted": 0, "failed": 0}
     assert calls == []
     assert key not in bot_main.BOT_SENT_MESSAGES
@@ -193,7 +194,7 @@ async def test_admin_cleanup_ignores_expired_ephemeral_message_ids(monkeypatch):
 
 
 def test_periodic_cleanup_removes_expired_own_message_ids():
-    key = ("developer", "cleanup-periodic-room")
+    key = ("community", "cleanup-periodic-room")
     bot_main.BOT_SENT_MESSAGES[key].clear()
     bot_main.BOT_SENT_MESSAGES[key].append({"message_id": "expired", "created_at": 1})
     bot_main.cleanup_expired_state()
@@ -207,7 +208,7 @@ async def test_send_message_retries_429_until_block_is_accepted(monkeypatch):
     async def no_wait(_seconds):
         return None
 
-    async def rate_limited_then_success(method, path, source="developer", body=None):
+    async def rate_limited_then_success(method, path, source="community", body=None):
         calls.append((method, path, body))
         if len(calls) == 1:
             return {"ok": False, "status": 429, "retry_after": "0.5", "data": {}}
@@ -216,8 +217,8 @@ async def test_send_message_retries_429_until_block_is_accepted(monkeypatch):
     monkeypatch.setattr(bot_main.asyncio, "sleep", no_wait)
     monkeypatch.setattr(bot_main, "api", rate_limited_then_success)
     monkeypatch.setattr(bot_main, "last_bot_send", 0.0)
-    monkeypatch.setitem(bot_main.last_chat_send, "developer:retry-room", 0.0)
-    key = ("developer", "retry-room")
+    monkeypatch.setitem(bot_main.last_chat_send, "community:retry-room", 0.0)
+    key = ("community", "retry-room")
     bot_main.BOT_SENT_MESSAGES.pop(key, None)
 
     result = await bot_main.send_message("retry-room", "Respuesta recuperable")
@@ -237,7 +238,7 @@ async def test_pending_delivery_retries_only_definitive_429(monkeypatch):
     async def no_wait(_seconds):
         return None
 
-    async def rate_limited_then_success(method, path, source="developer", body=None):
+    async def rate_limited_then_success(method, path, source="community", body=None):
         calls.append((method, path, body))
         if len(calls) == 1:
             return {"ok": False, "status": 429, "retry_after": "0.5", "data": {}}
@@ -246,12 +247,12 @@ async def test_pending_delivery_retries_only_definitive_429(monkeypatch):
     monkeypatch.setattr(bot_main.asyncio, "sleep", no_wait)
     monkeypatch.setattr(bot_main, "api", rate_limited_then_success)
     monkeypatch.setattr(bot_main, "last_bot_send", 0.0)
-    monkeypatch.setitem(bot_main.last_chat_send, "developer:pending-room", 0.0)
-    key = ("developer", "pending-room")
+    monkeypatch.setitem(bot_main.last_chat_send, "community:pending-room", 0.0)
+    key = ("community", "pending-room")
     bot_main.BOT_SENT_MESSAGES.pop(key, None)
 
     await bot_main.retry_pending_delivery(
-        "pending-room", "developer", [{"content": "Bloque pendiente"}], expires_in=60
+        "pending-room", "community", [{"content": "Bloque pendiente"}], expires_in=60
     )
 
     assert len(calls) == 2
@@ -268,7 +269,7 @@ async def test_pending_delivery_does_not_retry_ambiguous_server_errors(monkeypat
     async def no_wait(_seconds):
         return None
 
-    async def server_error(method, path, source="developer", body=None):
+    async def server_error(method, path, source="community", body=None):
         calls.append(method)
         return {"ok": False, "status": 500, "data": {"error": "server"}}
 
@@ -276,7 +277,7 @@ async def test_pending_delivery_does_not_retry_ambiguous_server_errors(monkeypat
     monkeypatch.setattr(bot_main, "api", server_error)
 
     await bot_main.retry_pending_delivery(
-        "pending-ambiguous-room", "developer", [{"content": "No duplicar"}], expires_in=60
+        "pending-ambiguous-room", "community", [{"content": "No duplicar"}], expires_in=60
     )
 
     assert calls == ["POST"]
@@ -291,7 +292,7 @@ async def test_rate_limited_response_is_marked_queued_to_prevent_fallback_duplic
     async def no_wait(_seconds):
         return None
 
-    async def always_rate_limited(method, path, source="developer", body=None):
+    async def always_rate_limited(method, path, source="community", body=None):
         calls.append((method, path, body))
         return {"ok": False, "status": 429, "retry_after": "0.5", "data": {}}
 
@@ -303,7 +304,7 @@ async def test_rate_limited_response_is_marked_queued_to_prevent_fallback_duplic
     monkeypatch.setattr(bot_main, "api", always_rate_limited)
     monkeypatch.setattr(bot_main, "schedule_pending_delivery", capture_schedule)
     monkeypatch.setattr(bot_main, "last_bot_send", 0.0)
-    monkeypatch.setitem(bot_main.last_chat_send, "developer:queued-room", 0.0)
+    monkeypatch.setitem(bot_main.last_chat_send, "community:queued-room", 0.0)
 
     result = await bot_main.send_message("queued-room", "Se recuperará")
 
@@ -322,7 +323,7 @@ async def test_ai_tool_failure_is_not_reported_as_success(monkeypatch):
     monkeypatch.setattr(bot_main, "handle_command", failing_command)
     result = await bot_main.execute_ai_tool(
         {"threadId": "room", "message": {"content": "consulta"}},
-        "developer", "room:user", "ayuda", silent=True,
+        "community", "room:user", "ayuda", silent=True,
     )
     assert result["output"]
     assert result["success"] is False
@@ -360,7 +361,7 @@ async def test_webhook_body_reader_accepts_bounded_stream():
 
 
 @pytest.mark.asyncio
-async def test_avatarbot_updates_and_verifies_both_bot_identities_by_default(monkeypatch, tmp_path):
+async def test_avatarbot_updates_only_the_community_bot(monkeypatch, tmp_path):
     monkeypatch.setattr(bot_main, "DB_PATH", tmp_path / "avatar-bot-test.sqlite3")
     bot_main.init_db()
     monkeypatch.setattr(bot_main, "ADMIN_UIDS", {"trusted-admin"})
@@ -374,7 +375,7 @@ async def test_avatarbot_updates_and_verifies_both_bot_identities_by_default(mon
         calls.append((path, target, content, mime))
         return {"ok": True, "status": 200, "data": {"bot": {"icon": f"https://cdn.example/{target}.png"}}}
 
-    async def fake_send(thread_id, content, source="developer", reply_id=None, buttons=None, **kwargs):
+    async def fake_send(thread_id, content, source="community", reply_id=None, buttons=None, **kwargs):
         sent.append(str(content))
         return {"ok": True}
 
@@ -389,22 +390,22 @@ async def test_avatarbot_updates_and_verifies_both_bot_identities_by_default(mon
             "author": {"uid": "trusted-admin", "nickname": "Admin"},
         },
     }
-    await bot_main.handle_command(event, "developer")
+    await bot_main.handle_command(event, "community")
 
-    assert [item[1] for item in calls] == ["developer", "community"]
+    assert [item[1] for item in calls] == ["community"]
     assert all(item[2:] == (b"fake-image", "image/png") for item in calls)
-    assert sent and "developer: actualizado" in sent[0] and "community: actualizado" in sent[0]
+    assert sent and "community: actualizado" in sent[0] and "desarrollador:" not in sent[0]
 
 
-def test_admin_bot_target_parser_defaults_to_both_and_accepts_explicit_target():
+def test_admin_bot_target_parser_always_selects_the_community_identity():
     assert bot_main.parse_admin_bot_targets("https://example.com/avatar.png") == (
-        ["developer", "community"], "https://example.com/avatar.png"
+        ["community"], "https://example.com/avatar.png"
     )
     assert bot_main.parse_admin_bot_targets("comunidad https://example.com/a.png") == (
         ["community"], "https://example.com/a.png"
     )
     assert bot_main.parse_admin_bot_targets("desarrollador Nombre") == (
-        ["developer"], "Nombre"
+        ["community"], "Nombre"
     )
 
 
@@ -415,7 +416,7 @@ async def test_avatarbot_remains_uid_protected(monkeypatch, tmp_path):
     monkeypatch.setattr(bot_main, "ADMIN_UIDS", {"trusted-admin"})
     sent = []
 
-    async def fake_send(thread_id, content, source="developer", reply_id=None, buttons=None, **kwargs):
+    async def fake_send(thread_id, content, source="community", reply_id=None, buttons=None, **kwargs):
         sent.append(str(content))
         return {"ok": True}
 
@@ -427,7 +428,7 @@ async def test_avatarbot_remains_uid_protected(monkeypatch, tmp_path):
             "author": {"uid": "not-admin", "nickname": "trusted-admin"},
         },
     }
-    await bot_main.handle_command(event, "developer")
+    await bot_main.handle_command(event, "community")
     assert sent and "Acceso restringido" in sent[0]
 
 
@@ -455,19 +456,19 @@ def test_reply_reference_accepts_flat_and_nested_webhook_shapes():
 
 
 def test_only_confirmed_katherine_messages_trigger_reply_routing():
-    key = ("developer", "reply-room")
+    key = ("community", "reply-room")
     bot_main.BOT_SENT_MESSAGES[key].clear()
     bot_main.BOT_SENT_MESSAGES[key].append({
         "message_id": "katherine-known", "created_at": bot_main.time.time(),
     })
-    assert bot_main.is_known_katherine_message("katherine-known", "developer", "reply-room")
-    assert not bot_main.is_known_katherine_message("another-user-id", "developer", "reply-room")
+    assert bot_main.is_known_katherine_message("katherine-known", "community", "reply-room")
+    assert not bot_main.is_known_katherine_message("another-user-id", "community", "reply-room")
     bot_main.BOT_SENT_MESSAGES.pop(key, None)
 
 
 @pytest.mark.asyncio
 async def test_reply_to_katherine_routes_plain_text_to_assistant(monkeypatch):
-    key = ("developer", "reply-route-room")
+    key = ("community", "reply-route-room")
     bot_main.BOT_SENT_MESSAGES[key].clear()
     bot_main.BOT_SENT_MESSAGES[key].append({
         "message_id": "katherine-reply-target", "created_at": bot_main.time.time(),
@@ -491,10 +492,10 @@ async def test_reply_to_katherine_routes_plain_text_to_assistant(monkeypatch):
             "content": "¿Puedes explicar un poco más?",
             "author": {"uid": "user-1", "nickname": "Usuario"},
         },
-    }, "developer")
+    }, "community")
     assert len(captured) == 1
     routed_event, source = captured[0]
-    assert source == "developer"
+    assert source == "community"
     assert routed_event["message"]["content"].startswith("!asistente ")
     assert routed_event["message"]["messageId"] == "user-reply-message"
     assert bot_main.metrics["ai_reply_triggers"] >= 1
@@ -558,9 +559,9 @@ def test_command_help_lists_core_commands_without_button_menu():
 async def test_send_message_keeps_at_name_literal_without_undocumented_mentions(monkeypatch):
     captured = []
     monkeypatch.setattr(bot_main, "last_bot_send", 0.0)
-    monkeypatch.setitem(bot_main.last_chat_send, "developer:mention-test", 0.0)
+    monkeypatch.setitem(bot_main.last_chat_send, "community:mention-test", 0.0)
 
-    async def successful_api(method, path, source="developer", body=None):
+    async def successful_api(method, path, source="community", body=None):
         captured.append(body)
         return {"ok": True, "status": 200, "data": {"messageId": "mention-test-id"}}
 
@@ -579,7 +580,7 @@ async def test_safe_dispatch_serializes_events_inside_same_room(monkeypatch):
     release_first = asyncio.Event()
     second_started = asyncio.Event()
     processed = []
-    key = ("developer", "dispatch-same-room")
+    key = ("community", "dispatch-same-room")
     bot_main.event_dispatch_locks.pop(key, None)
 
     async def fake_dispatch(event, source):
@@ -625,7 +626,7 @@ async def test_safe_dispatch_keeps_different_rooms_parallel(monkeypatch):
     monkeypatch.setattr(bot_main, "dispatch", fake_dispatch)
     tasks = [
         asyncio.create_task(bot_main.safe_dispatch(
-            {"type": "message", "threadId": room}, "developer"
+            {"type": "message", "threadId": room}, "community"
         ))
         for room in started
     ]
@@ -644,7 +645,7 @@ async def test_safe_dispatch_keeps_different_rooms_parallel(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_safe_dispatch_counts_failures_without_leaking_room_locks(monkeypatch):
-    key = ("developer", "dispatch-failing-room")
+    key = ("community", "dispatch-failing-room")
 
     async def failing_dispatch(event, source):
         raise RuntimeError("simulated dispatch failure")
@@ -665,7 +666,7 @@ async def test_command_help_blocks_are_sent_in_order_and_reply_only_to_first(mon
     blocks = ["bloque IA", "bloque Genshin", "bloque Social"]
     calls = []
 
-    async def fake_send(thread_id, content, source="developer", reply_id=None):
+    async def fake_send(thread_id, content, source="community", reply_id=None):
         calls.append((thread_id, content, source, reply_id))
         return {"ok": True}
 
@@ -686,7 +687,7 @@ async def test_command_help_delivery_stops_after_first_failed_block(monkeypatch)
     blocks = ["bloque IA", "bloque Genshin", "bloque Social"]
     calls = []
 
-    async def fake_send(thread_id, content, source="developer", reply_id=None):
+    async def fake_send(thread_id, content, source="community", reply_id=None):
         calls.append(content)
         if content == "bloque Genshin":
             return {"ok": False, "status": 503}
@@ -695,7 +696,7 @@ async def test_command_help_delivery_stops_after_first_failed_block(monkeypatch)
     monkeypatch.setattr(bot_main, "build_commands_help_blocks", lambda _prefix: blocks)
     monkeypatch.setattr(bot_main, "send_message", fake_send)
 
-    await bot_main.send_command_help_blocks("room-help-failure", "developer")
+    await bot_main.send_command_help_blocks("room-help-failure", "community")
 
     assert calls == ["bloque IA", "bloque Genshin"]
 
@@ -835,11 +836,11 @@ async def test_misspelled_katherine_call_routes_to_ai_assistant(monkeypatch):
         },
     }
 
-    await bot_main.dispatch(event, "developer")
+    await bot_main.dispatch(event, "community")
 
     assert len(captured) == 1
     routed_event, source = captured[0]
-    assert source == "developer"
+    assert source == "community"
     assert routed_event["message"]["content"] == (
         f"{bot_main.PREFIX}asistente necesito ayuda con una pregunta."
     )
@@ -855,7 +856,7 @@ async def test_calling_katherine_without_a_question_gets_a_short_prompt(monkeypa
     async def no_speech(*_args, **_kwargs):
         return None
 
-    async def fake_send(thread_id, content, source="developer", **kwargs):
+    async def fake_send(thread_id, content, source="community", **kwargs):
         sent.append((thread_id, content, source))
         return {"ok": True}
 
@@ -869,9 +870,9 @@ async def test_calling_katherine_without_a_question_gets_a_short_prompt(monkeypa
             "content": "Kathy",
             "author": {"uid": "user-2", "nickname": "Viajero"},
         },
-    }, "developer")
+    }, "community")
 
-    assert sent == [("name-call-room", "Aquí estoy. ¿Qué necesitas?", "developer")]
+    assert sent == [("name-call-room", "Aquí estoy. ¿Qué necesitas?", "community")]
 
 
 @pytest.mark.asyncio
@@ -896,7 +897,7 @@ async def test_unaddressed_typos_do_not_trigger_spelling_corrections(monkeypatch
             "content": "ola k ase, nesesito alluda con esto",
             "author": {"uid": "user-typo", "nickname": "Usuario"},
         },
-    }, "developer")
+    }, "community")
 
     assert sent == []
     assert bot_main.metrics["unaddressed_messages_ignored"] >= 1
@@ -923,9 +924,9 @@ async def test_spelling_errors_in_direct_katherine_request_are_preserved_for_ai(
             "content": "Katherin, me podes alludar con esta pregunta?",
             "author": {"uid": "user-typo", "nickname": "Usuario"},
         },
-    }, "developer")
+    }, "community")
 
     assert len(captured) == 1
     routed_event, source = captured[0]
-    assert source == "developer"
+    assert source == "community"
     assert routed_event["message"]["content"] == "!asistente me podes alludar con esta pregunta?"

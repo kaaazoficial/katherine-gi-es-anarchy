@@ -24,7 +24,7 @@ def test_find_live_room_for_thread_rejects_invalid_payload(room_list):
 async def test_ensure_voice_room_explains_when_chat_has_no_active_call(monkeypatch):
     calls = []
 
-    async def fake_api(method, path, source="developer", body=None):
+    async def fake_api(method, path, source="community", body=None):
         calls.append((method, path, source))
         return {"ok": True, "status": 200, "data": {"roomList": [
             {"threadId": "885", "title": "Otra sala"},
@@ -48,7 +48,7 @@ async def test_ensure_voice_room_explains_when_chat_has_no_active_call(monkeypat
 
 @pytest.mark.asyncio
 async def test_ensure_voice_room_reports_community_bot_access_error(monkeypatch):
-    async def fake_api(method, path, source="developer", body=None):
+    async def fake_api(method, path, source="community", body=None):
         return {
             "ok": False,
             "status": 403,

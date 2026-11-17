@@ -10,15 +10,15 @@ import main as katherine
 
 
 
-def test_dj_button_accepts_community_callback_for_developer_message():
+def test_dj_button_accepts_community_callback_for_community_message():
     action = {
         "type": "dj_select",
-        "source": "developer",
+        "source": "community",
         "thread": "room-1",
         "expires": 9999999999,
     }
     assert katherine.is_button_source_allowed(action, "community")
-    assert katherine.is_button_source_allowed(action, "developer")
+    assert katherine.is_button_source_allowed(action, "community")
 
     action["type"] = "choose_option"
     assert not katherine.is_button_source_allowed(action, "community")
