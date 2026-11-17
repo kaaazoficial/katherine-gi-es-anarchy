@@ -216,7 +216,7 @@ async def test_send_message_retries_429_until_block_is_accepted(monkeypatch):
     monkeypatch.setattr(bot_main.asyncio, "sleep", no_wait)
     monkeypatch.setattr(bot_main, "api", rate_limited_then_success)
     monkeypatch.setattr(bot_main, "last_bot_send", 0.0)
-    monkeypatch.setitem(bot_main.last_chat_send, "developer:retry-room", 0.0)
+    monkeypatch.setitem(bot_main.last_chat_send, "community:retry-room", 0.0)
     key = ("community", "retry-room")
     bot_main.BOT_SENT_MESSAGES.pop(key, None)
 
@@ -246,7 +246,7 @@ async def test_pending_delivery_retries_only_definitive_429(monkeypatch):
     monkeypatch.setattr(bot_main.asyncio, "sleep", no_wait)
     monkeypatch.setattr(bot_main, "api", rate_limited_then_success)
     monkeypatch.setattr(bot_main, "last_bot_send", 0.0)
-    monkeypatch.setitem(bot_main.last_chat_send, "developer:pending-room", 0.0)
+    monkeypatch.setitem(bot_main.last_chat_send, "community:pending-room", 0.0)
     key = ("community", "pending-room")
     bot_main.BOT_SENT_MESSAGES.pop(key, None)
 
@@ -303,7 +303,7 @@ async def test_rate_limited_response_is_marked_queued_to_prevent_fallback_duplic
     monkeypatch.setattr(bot_main, "api", always_rate_limited)
     monkeypatch.setattr(bot_main, "schedule_pending_delivery", capture_schedule)
     monkeypatch.setattr(bot_main, "last_bot_send", 0.0)
-    monkeypatch.setitem(bot_main.last_chat_send, "developer:queued-room", 0.0)
+    monkeypatch.setitem(bot_main.last_chat_send, "community:queued-room", 0.0)
 
     result = await bot_main.send_message("queued-room", "Se recuperará")
 
@@ -393,7 +393,7 @@ async def test_avatarbot_updates_only_the_community_bot(monkeypatch, tmp_path):
 
     assert [item[1] for item in calls] == ["community"]
     assert all(item[2:] == (b"fake-image", "image/png") for item in calls)
-    assert sent and "community: actualizado" in sent[0] and "developer" not in sent[0]
+    assert sent and "community: actualizado" in sent[0] and "community" not in sent[0]
 
 
 def test_admin_bot_target_parser_always_selects_the_community_identity():
@@ -558,7 +558,7 @@ def test_command_help_lists_core_commands_without_button_menu():
 async def test_send_message_keeps_at_name_literal_without_undocumented_mentions(monkeypatch):
     captured = []
     monkeypatch.setattr(bot_main, "last_bot_send", 0.0)
-    monkeypatch.setitem(bot_main.last_chat_send, "developer:mention-test", 0.0)
+    monkeypatch.setitem(bot_main.last_chat_send, "community:mention-test", 0.0)
 
     async def successful_api(method, path, source="community", body=None):
         captured.append(body)
