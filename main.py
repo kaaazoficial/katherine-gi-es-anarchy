@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from typing import Any
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urljoin, quote, urlparse, urlsplit, urlunsplit
@@ -1140,8 +1140,91 @@ def external_request_semaphore():
     return EXTERNAL_AI_LIMIT if AI_PRIORITY_REQUEST.get() else EXTERNAL_GLOBAL_LIMIT
 
 
-EXTERNAL_HOST_LIMITS = {}
-SOURCE_HEALTH = {}
+# Host-level telemetry and semaphores are bounded. Unknown hosts share a small
+# overflow semaphore instead of allocating unbounded per-host state.
+EXTERNAL_HOST_STATE_MAX = 128
+EXTERNAL_HOST_STATE_TTL = 6 * 60 * 60
+EXTERNAL_HOST_LIMITS: OrderedDict[str, asyncio.Semaphore] = OrderedDict()
+SOURCE_HEALTH: OrderedDict[str, dict[str, Any]] = OrderedDict()
+EXTERNAL_HOST_OVERFLOW_LIMIT = asyncio.Semaphore(3)
+
+
+def _new_external_host_state(now: float) -> dict[str, Any]:
+    return {
+        "requests": 0,
+        "successes": 0,
+        "failures": 0,
+        "last_status": None,
+        "last_latency_ms": 0.0,
+        "last_success_at": None,
+        "last_error": None,
+        "consecutive_failures": 0,
+        "circuit_open_until": 0.0,
+        "last_seen_at": now,
+    }
+
+
+def external_host_resources(
+    host: str, *, now: float | None = None
+) -> tuple[dict[str, Any], asyncio.Semaphore]:
+    """Return bounded host telemetry and request capacity without unbounded growth."""
+    current = time.time() if now is None else float(now)
+    host_key = str(host or "unknown").strip().casefold()[:253] or "unknown"
+
+    state = SOURCE_HEALTH.get(host_key)
+    semaphore = EXTERNAL_HOST_LIMITS.get(host_key)
+    if state is not None and semaphore is not None:
+        if hasattr(SOURCE_HEALTH, "move_to_end"):
+            SOURCE_HEALTH.move_to_end(host_key)
+        if hasattr(EXTERNAL_HOST_LIMITS, "move_to_end"):
+            EXTERNAL_HOST_LIMITS.move_to_end(host_key)
+        state["last_seen_at"] = current
+        return state, semaphore
+
+    # At capacity, discard only expired entries. Active/recent hosts retain
+    # their semaphore so concurrent requests cannot bypass their host limit.
+    if (
+        len(SOURCE_HEALTH) >= EXTERNAL_HOST_STATE_MAX
+        or len(EXTERNAL_HOST_LIMITS) >= EXTERNAL_HOST_STATE_MAX
+    ):
+        stale_before = current - EXTERNAL_HOST_STATE_TTL
+        for stale_host, stale_state in list(SOURCE_HEALTH.items()):
+            last_seen = float(stale_state.get("last_seen_at", 0) or 0)
+            if last_seen and last_seen < stale_before:
+                SOURCE_HEALTH.pop(stale_host, None)
+                EXTERNAL_HOST_LIMITS.pop(stale_host, None)
+
+    state = SOURCE_HEALTH.get(host_key)
+    if state is None:
+        state = _new_external_host_state(current)
+        if len(SOURCE_HEALTH) < EXTERNAL_HOST_STATE_MAX:
+            SOURCE_HEALTH[host_key] = state
+        else:
+            # Keep per-request telemetry locally, but do not retain a new
+            # arbitrary hostname after the bounded registry is full.
+            metrics["external_host_tracking_overflow"] += 1
+    else:
+        state["last_seen_at"] = current
+        if hasattr(SOURCE_HEALTH, "move_to_end"):
+            SOURCE_HEALTH.move_to_end(host_key)
+
+    semaphore = EXTERNAL_HOST_LIMITS.get(host_key)
+    if semaphore is not None:
+        if hasattr(EXTERNAL_HOST_LIMITS, "move_to_end"):
+            EXTERNAL_HOST_LIMITS.move_to_end(host_key)
+    elif (
+        host_key in SOURCE_HEALTH
+        and len(EXTERNAL_HOST_LIMITS) < EXTERNAL_HOST_STATE_MAX
+    ):
+        semaphore = asyncio.Semaphore(3)
+        EXTERNAL_HOST_LIMITS[host_key] = semaphore
+    else:
+        semaphore = EXTERNAL_HOST_OVERFLOW_LIMIT
+        metrics["external_host_tracking_overflow"] += 1
+
+    return state, semaphore
+
+
 poll_button_map: dict[str, str] = {}
 BUTTON_ACTIONS: dict[str, dict] = {}
 COMMUNITY_EVENTS: dict[str, dict] = {}
@@ -1816,19 +1899,10 @@ async def external_request(method: str, url: str, **kwargs):
         if not 1 <= max_response_bytes <= 150 * 1024 * 1024:
             raise ValueError("El límite debe estar entre 1 byte y 150 MB.")
 
-    host_state = SOURCE_HEALTH.setdefault(host, {
-        "requests": 0, "successes": 0, "failures": 0,
-        "last_status": None, "last_latency_ms": 0.0,
-        "last_success_at": None, "last_error": None,
-        "consecutive_failures": 0, "circuit_open_until": 0.0,
-        "last_seen_at": time.time()
-    })
-    host_state["last_seen_at"] = time.time()
+    host_state, host_semaphore = external_host_resources(host)
     if float(host_state.get("circuit_open_until", 0) or 0) > time.time():
         metrics["external_circuit_open"] += 1
         raise RuntimeError(f"Fuente {host} temporalmente aislada por fallos consecutivos.")
-
-    host_semaphore = EXTERNAL_HOST_LIMITS.setdefault(host, asyncio.Semaphore(3))
     safe_retry = str(method).upper() in ("GET", "HEAD")
     attempts = 3 if safe_retry else 1
     last_error = None
@@ -1877,11 +1951,7 @@ async def external_request(method: str, url: str, **kwargs):
                         )
 
                     elapsed_ms = (time.perf_counter() - started) * 1000
-                    state = SOURCE_HEALTH.setdefault(host, {
-                        "requests": 0, "successes": 0, "failures": 0,
-                        "last_status": None, "last_latency_ms": 0.0,
-                        "last_success_at": None, "last_error": None
-                    })
+                    state = host_state
                     state["requests"] += 1
                     state["last_seen_at"] = time.time()
                     state["last_status"] = response.status_code
@@ -1917,11 +1987,7 @@ async def external_request(method: str, url: str, **kwargs):
 
                 except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
                     last_error = exc
-                    state = SOURCE_HEALTH.setdefault(host, {
-                        "requests": 0, "successes": 0, "failures": 0,
-                        "last_status": None, "last_latency_ms": 0.0,
-                        "last_success_at": None, "last_error": None
-                    })
+                    state = host_state
                     state["requests"] += 1
                     state["last_seen_at"] = time.time()
                     state["failures"] += 1
@@ -1990,12 +2056,20 @@ async def api(method: str, path: str, source="developer", body=None):
         except Exception:
             data = {"raw": response.text[:1000]}
 
-        logging.info(
-            "[ANARCHY] %s %s -> %s",
-            method,
-            path,
-            response.status_code
-        )
+        if response.is_success:
+            logging.debug(
+                "[ANARCHY] %s %s -> %s",
+                method,
+                path,
+                response.status_code,
+            )
+        else:
+            logging.warning(
+                "[ANARCHY] %s %s -> %s",
+                method,
+                path,
+                response.status_code,
+            )
         if not response.is_success:
             if is_not_in_chat_response(response.status_code, data):
                 metrics["api_membership_denials"] += 1
@@ -5841,18 +5915,11 @@ async def _download_dj_audio_uncached(url: str, file_extension: str | None = Non
                             raise ValueError("La descarga intentó acceder a un dominio no autorizado.")
                         current_host = (urlsplit(current_url).hostname or "").lower()
                         if current_host not in locked_hosts:
-                            await download_locks.enter_async_context(
-                                EXTERNAL_HOST_LIMITS.setdefault(current_host, asyncio.Semaphore(3))
-                            )
+                            _, host_semaphore = external_host_resources(current_host)
+                            await download_locks.enter_async_context(host_semaphore)
                             locked_hosts.add(current_host)
                         pinned_url, pinned_headers, pinned_extensions = await pin_public_https_url(current_url)
-                        host_state = SOURCE_HEALTH.setdefault(current_host, {
-                            "requests": 0, "successes": 0, "failures": 0,
-                            "last_status": None, "last_latency_ms": 0.0,
-                            "last_success_at": None, "last_error": None,
-                            "consecutive_failures": 0, "circuit_open_until": 0.0,
-                            "last_seen_at": time.time(),
-                        })
+                        host_state, _ = external_host_resources(current_host)
                         if float(host_state.get("circuit_open_until", 0) or 0) > time.time():
                             metrics["external_circuit_open"] += 1
                             raise RuntimeError("La fuente musical está temporalmente aislada por fallos consecutivos.")
@@ -15295,7 +15362,7 @@ async def dispatch(event: dict, source: str):
                         + str(verdict.get("reason") or "destino no permitido."),
                         source,
                     )
-        logging.info("[EVENTO] %s", kind)
+        logging.debug("[EVENTO] %s", kind)
 
     elif kind == "thread.removed":
         metrics[f"event_{kind}"] += 1
@@ -15303,14 +15370,14 @@ async def dispatch(event: dict, source: str):
         clear_voice_room(thread_id)
         if thread_id in DJ_ROOMS:
             await stop_dj_room(thread_id, request_leave=False)
-        logging.info("[EVENTO] %s; estado temporal de sala eliminado.", kind)
+        logging.debug("[EVENTO] %s; estado temporal de sala eliminado.", kind)
 
     elif kind in ("thread.added", "message.deleted"):
         metrics[f"event_{kind}"] += 1
-        logging.info("[EVENTO] %s", kind)
+        logging.debug("[EVENTO] %s", kind)
 
     else:
-        logging.info("[EVENTO] Ignorado: %s", kind)
+        logging.debug("[EVENTO] Ignorado: %s", kind)
 
 
 async def safe_dispatch(event: dict, source: str):
@@ -15503,11 +15570,11 @@ async def webhook(request: Request, source: str | None):
         seen_events.append(event_id)
         seen_event_set.add(event_id)
 
-    logging.info(
+    logging.debug(
         "[WEBHOOK] Evento %s recibido por %s desde %s",
         event.get("type"),
         verified_source,
-        request.url.path
+        request.url.path,
     )
 
     # Responder rápido a Anarchy; el procesamiento continúa en segundo plano.
@@ -15672,7 +15739,7 @@ async def startup():
                 "[BOT %s] %s | chats: %s",
                 source.upper(),
                 bot.get("name") if isinstance(bot, dict) else "Katherine",
-                me["data"].get("threadIds", [])
+                len(me["data"].get("threadIds") or [])
             )
         else:
             logging.error(
