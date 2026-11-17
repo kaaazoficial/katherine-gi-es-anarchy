@@ -2094,7 +2094,7 @@ class KatherineAI:
                     queue_wait = max(0.0, attempt_started - queued_at)
                     self.metrics["ai_provider_queue_wait_seconds"] += queue_wait
                     self.metrics["ai_provider_queue_wait_observations"] += 1
-                    logging.info(
+                    logging.debug(
                         "[AI_QUEUE] proveedor=%s espera_ms=%.0f",
                         self.provider_name,
                         queue_wait * 1000,
