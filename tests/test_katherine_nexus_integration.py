@@ -16,7 +16,7 @@ def test_progress_message_edits_with_existing_documented_patch(monkeypatch):
     monkeypatch.setattr(katherine, "api", fake_api)
     context = {
         "thread_id": "thread-1",
-        "source": "developer",
+        "source": "community",
         "message_id": "message-1",
         "created_at": katherine.time.time(),
         "enabled": True,
@@ -27,7 +27,7 @@ def test_progress_message_edits_with_existing_documented_patch(monkeypatch):
         (
             "PATCH",
             "/threads/thread-1/messages/message-1",
-            "developer",
+            "community",
             {"content": "Fase 2"},
         )
     ]
@@ -43,7 +43,7 @@ def test_progress_message_disables_editing_after_api_failure(monkeypatch):
     monkeypatch.setattr(katherine, "api", fake_api)
     context = {
         "thread_id": "thread-1",
-        "source": "developer",
+        "source": "community",
         "message_id": "missing-message",
         "created_at": katherine.time.time(),
         "enabled": True,
@@ -57,18 +57,18 @@ def test_progress_message_disables_editing_after_api_failure(monkeypatch):
 def test_progress_falls_back_to_separate_final_message_when_no_id(monkeypatch):
     sent = []
 
-    async def fake_send(thread_id, content, source="developer", reply_id=None, buttons=None):
+    async def fake_send(thread_id, content, source="community", reply_id=None, buttons=None):
         sent.append((thread_id, content, source, reply_id))
         return {"ok": True, "status": 200, "data": {"threadId": thread_id}}
 
     monkeypatch.setattr(katherine, "send_message", fake_send)
     context = asyncio.run(
-        katherine.start_progress_message("thread-1", "Consultando…", "developer", "reply-1")
+        katherine.start_progress_message("thread-1", "Consultando…", "community", "reply-1")
     )
     assert context["enabled"] is False
     assert asyncio.run(
         katherine.finish_progress_message(
-            context, "Resultado final", "thread-1", "developer", "reply-1"
+            context, "Resultado final", "thread-1", "community", "reply-1"
         )
     )["ok"]
     assert [item[1] for item in sent] == ["Consultando…", "Resultado final"]
@@ -158,7 +158,7 @@ def test_unaddressed_chat_only_updates_bounded_activity_and_does_not_activate_ka
             "author": {"uid": "user-1", "nickname": "Viajero"},
         },
     }
-    asyncio.run(katherine.dispatch(event, "developer"))
+    asyncio.run(katherine.dispatch(event, "community"))
 
     assert calls["commands"] == []
     assert calls["users"] == []
@@ -190,7 +190,7 @@ def test_addressed_natural_request_routes_to_existing_command(monkeypatch):
             "author": {"uid": "user-1", "nickname": "Viajero"},
         },
     }
-    asyncio.run(katherine.dispatch(event, "developer"))
+    asyncio.run(katherine.dispatch(event, "community"))
     assert calls == ["!dj pausa"]
 
 
@@ -207,7 +207,7 @@ def test_unaddressed_typo_is_understood_without_automatic_correction(monkeypatch
     async def no_auto_reply(*_args):
         return False
 
-    async def fake_send(thread, content, source="developer", reply_id=None, buttons=None):
+    async def fake_send(thread, content, source="community", reply_id=None, buttons=None):
         sent.append((thread, content, source))
         return {"ok": True}
 
@@ -228,7 +228,7 @@ def test_unaddressed_typo_is_understood_without_automatic_correction(monkeypatch
             "author": {"uid": "user-1", "nickname": "Viajero"},
         },
     }
-    asyncio.run(katherine.dispatch(event, "developer"))
+    asyncio.run(katherine.dispatch(event, "community"))
 
     assert sent == []
     assert command_calls == []
@@ -243,7 +243,7 @@ def test_affectionate_compliment_to_katherine_gets_a_warm_reply(monkeypatch):
     async def no_speech(event, source):
         return None
 
-    async def fake_send(thread, content, source="developer", reply_id=None, buttons=None):
+    async def fake_send(thread, content, source="community", reply_id=None, buttons=None):
         sent.append(content)
         return {"ok": True}
 
@@ -264,7 +264,7 @@ def test_affectionate_compliment_to_katherine_gets_a_warm_reply(monkeypatch):
             "author": {"uid": "user-warm", "nickname": "Viajero"},
         },
     }
-    asyncio.run(katherine.dispatch(event, "developer"))
+    asyncio.run(katherine.dispatch(event, "community"))
     assert len(sent) == 1
     assert any(word in sent[0].casefold() for word in ("cumplido", "sonrojar", "ternura"))
     assert command_calls == []
@@ -282,7 +282,7 @@ def test_dispatch_does_not_trigger_automatic_spelling_feedback(monkeypatch):
     async def no_auto_reply(*_args):
         return False
 
-    async def fake_send(thread, content, source="developer", reply_id=None, buttons=None):
+    async def fake_send(thread, content, source="community", reply_id=None, buttons=None):
         sent.append((thread, content, source))
         return {"ok": True}
 
@@ -303,7 +303,7 @@ def test_dispatch_does_not_trigger_automatic_spelling_feedback(monkeypatch):
             "author": {"uid": "user-spelling", "nickname": "Viajero"},
         },
     }
-    asyncio.run(katherine.dispatch(event, "developer"))
+    asyncio.run(katherine.dispatch(event, "community"))
 
     assert sent == []
     assert command_calls == []
