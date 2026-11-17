@@ -851,7 +851,7 @@ def build_ai_instructions(
             "plan: 1-3 pasos válidos."
         )
     )
-    return BASE_INSTRUCTIONS + "\n" + intent_text + "\n" + tool_text + "\n" + output_contract
+    return KATHERINE_PERSONA_GUIDANCE + "\n\n" + BASE_INSTRUCTIONS + "\n" + intent_text + "\n" + tool_text + "\n" + output_contract
 
 
 def validate_ai_tool_call(
