@@ -2240,3 +2240,35 @@ def test_selected_music_does_not_silently_play_another_search_result(monkeypatch
         assert "No cambié a otra canción" in message
     finally:
         katherine.DJ_SEARCH_RESULTS.pop(thread, None)
+
+def test_dj_search_results_are_expired_and_globally_bounded():
+    original = dict(katherine.DJ_SEARCH_RESULTS)
+    try:
+        katherine.DJ_SEARCH_RESULTS.clear()
+        now = katherine.time.time()
+        for index in range(katherine.DJ_SEARCH_RESULTS_MAX_ENTRIES + 4):
+            katherine.DJ_SEARCH_RESULTS[f"search-room-{index}"] = {
+                "search_id": f"search-{index}",
+                "tracks": [{"title": f"Track {index}"}],
+                "query": f"query-{index}",
+                "expires": now + 900 + index,
+            }
+
+        removed = katherine.prune_dj_search_results(now=now)
+
+        assert removed == 4
+        assert len(katherine.DJ_SEARCH_RESULTS) == katherine.DJ_SEARCH_RESULTS_MAX_ENTRIES
+        assert "search-room-0" not in katherine.DJ_SEARCH_RESULTS
+        assert "search-room-3" not in katherine.DJ_SEARCH_RESULTS
+        assert "search-room-4" in katherine.DJ_SEARCH_RESULTS
+
+        katherine.DJ_SEARCH_RESULTS["expired-room"] = {
+            "tracks": [],
+            "expires": now - 1,
+        }
+        assert katherine.prune_dj_search_results(now=now) == 1
+        assert "expired-room" not in katherine.DJ_SEARCH_RESULTS
+    finally:
+        katherine.DJ_SEARCH_RESULTS.clear()
+        katherine.DJ_SEARCH_RESULTS.update(original)
+

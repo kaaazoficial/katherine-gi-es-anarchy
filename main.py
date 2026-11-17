@@ -1318,6 +1318,36 @@ USER_SPAM_WARNED_UNTIL = {}
 DJ_MUSIC_DIR = Path(os.getenv("DJ_MUSIC_DIR", "music")).resolve()
 DJ_AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".oga", ".flac", ".m4a", ".aac", ".opus"}
 DJ_SEARCH_RESULTS: dict[str, dict] = {}
+DJ_SEARCH_RESULTS_MAX_ENTRIES = 256
+
+
+def prune_dj_search_results(now: float | None = None) -> int:
+    """Expire stale DJ selections and cap process-local room search state."""
+    current = time.time() if now is None else float(now)
+    removed = 0
+    for thread_id, saved in tuple(DJ_SEARCH_RESULTS.items()):
+        if not isinstance(saved, dict):
+            DJ_SEARCH_RESULTS.pop(thread_id, None)
+            removed += 1
+            continue
+        try:
+            expires_at = float(saved.get("expires", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            expires_at = 0.0
+        if expires_at <= current:
+            DJ_SEARCH_RESULTS.pop(thread_id, None)
+            removed += 1
+
+    while len(DJ_SEARCH_RESULTS) > DJ_SEARCH_RESULTS_MAX_ENTRIES:
+        oldest_thread = min(
+            DJ_SEARCH_RESULTS,
+            key=lambda key: float(
+                (DJ_SEARCH_RESULTS[key] or {}).get("expires", 0) or 0
+            ) if isinstance(DJ_SEARCH_RESULTS[key], dict) else 0.0,
+        )
+        DJ_SEARCH_RESULTS.pop(oldest_thread, None)
+        removed += 1
+    return removed
 DJ_FAVORITES: dict[tuple[str, str], list[dict]] = {}
 DJ_FAVORITES_TTL = 86400
 
@@ -1569,9 +1599,7 @@ def cleanup_expired_state():
     for host, expires_at in list(DJ_SOURCE_COOLDOWNS.items()):
         if float(expires_at or 0) <= monotonic_now:
             DJ_SOURCE_COOLDOWNS.pop(host, None)
-    for key, item in list(DJ_SEARCH_RESULTS.items()):
-        if not isinstance(item, dict) or float(item.get("expires", 0) or 0) <= now:
-            DJ_SEARCH_RESULTS.pop(key, None)
+    prune_dj_search_results(now=now)
     for key, favorites in list(DJ_FAVORITES.items()):
         retained = [
             item for item in favorites
@@ -14460,9 +14488,7 @@ Uso: !enciclopedia <nombre>""",
                 "query": search_term,
                 "expires": time.time() + 900
             }
-            for old_thread, saved in list(DJ_SEARCH_RESULTS.items()):
-                if saved.get("expires", 0) <= time.time():
-                    DJ_SEARCH_RESULTS.pop(old_thread, None)
+            prune_dj_search_results()
 
             buttons = register_buttons(
                 dj_source,
