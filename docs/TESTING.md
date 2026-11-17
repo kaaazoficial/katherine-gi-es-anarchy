@@ -22,7 +22,7 @@ O ejecuta toda la suite:
 
 tests/integration/test_webhook_flow.py utiliza la aplicación ASGI real de FastAPI
 y eventos sintéticos firmados con secretos de prueba. Verifica las rutas de webhook,
-validación HMAC y antigüedad del timestamp, selección de identidad developer/community,
+validación HMAC y antigüedad del timestamp, selección exclusiva de identidad comunitaria,
 deduplicación de eventId, límites de tamaño, despacho hasta el manejador de comandos
 y endpoint de salud.
 
