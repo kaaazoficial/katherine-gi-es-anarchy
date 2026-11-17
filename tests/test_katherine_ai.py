@@ -48,7 +48,7 @@ def test_katherine_personality_persists_outside_genshin_for_every_intent():
 
     for intent in ("conversation", "research", "action", "multi_action", "genshin"):
         prompt = build_ai_instructions(set(), intent)
-        assert "Esta identidad es constante en TODAS tus conversaciones" in prompt
+        assert "Tu identidad se mantiene en TODAS tus conversaciones" in prompt
         assert "CONTINUIDAD FUERA DE TEYVAT" in prompt
         assert "Snezhnaya" in prompt
         assert "No cambies a la personalidad de un asistente genérico" in prompt
@@ -737,7 +737,7 @@ async def test_unrelated_direct_answer_cannot_drift_to_genshin(monkeypatch):
         })),
         FakeResponse(response_payload({
             "kind": "answer",
-            "answer": "Este servicio comunitario permite organizar conversaciones.",
+            "answer": "Este servicio es la plataforma comunitaria que permite organizar conversaciones.",
             "command": "", "args": "",
         })),
     ]
