@@ -23,6 +23,19 @@ def response_payload(result):
         {"type": "output_text", "text": json.dumps(result)}
     ]}]}
 
+def test_katherine_personality_matches_guild_receptionist_identity():
+    from katherine_ai import resolve_community_faq
+
+    assert "¡Ad astra abyssosque!" in resolve_community_faq("hola")
+    identity = resolve_community_faq("¿quién eres?")
+    assert "recepcionista" in identity.lower()
+    assert "marioneta biónica" in identity.lower()
+    assert "Snezhnaya" in identity
+    assert "ad astra abyssosque" in BASE_INSTRUCTIONS.lower()
+    assert "misiones, reclamaciones y expediciones" in BASE_INSTRUCTIONS
+    assert "Fatui" in BASE_INSTRUCTIONS and "Sandrone" in BASE_INSTRUCTIONS
+
+
 def test_bot_author_detection_requires_a_real_uid_match():
     assert is_bot_author({"uid": "bot-123"}, "bot-123")
     assert is_bot_author({"isBot": True}, "")
