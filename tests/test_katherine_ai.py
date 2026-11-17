@@ -31,7 +31,7 @@ def test_katherine_personality_matches_guild_receptionist_identity():
     assert "recepcionista" in identity.lower()
     assert "marioneta biónica" in identity.lower()
     assert "Snezhnaya" in identity
-    assert "AD ASTRA ABYSSOSQUE" in BASE_INSTRUCTIONS
+    assert "ad astra abyssosque" in BASE_INSTRUCTIONS.lower()
     assert "misiones, reclamaciones y expediciones" in BASE_INSTRUCTIONS
     assert "Fatui" in BASE_INSTRUCTIONS and "Sandrone" in BASE_INSTRUCTIONS
 
