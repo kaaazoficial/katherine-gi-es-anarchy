@@ -97,6 +97,10 @@ def _command_help_sections(prefix: str):
             (False, f"• {prefix}diario — Reclama tu recompensa diaria."),
             (False, f"• {prefix}trabajar — Gana puntos."),
             (False, f"• {prefix}pagar @usuario <cantidad> — Transfiere puntos."),
+            (False, f"• {prefix}tienda — Consulta el catálogo comunitario."),
+            (False, f"• {prefix}comprar <clave> [cantidad] — Compra artículos con puntos."),
+            (False, f"• {prefix}inventario — Consulta tus artículos."),
+            (False, f"• {prefix}historial — Consulta tus últimos movimientos."),
 
             (True, "▸ Comunidad"),
             (False, f"• {prefix}encuesta <pregunta> | <opciones> — Crea una votación."),
