@@ -35,6 +35,7 @@ from katherine_boot import IMPORT_STARTED_AT
 from katherine_runtime import RuntimeLifecycle, RuntimePhase, TaskSupervisor
 from katherine_game_client import GameAPIClient
 from katherine_settings import ChatSettingsStore
+from katherine_community_repository import CommunityRepository
 from katherine_moderation import (
     AntiSpamSettings, bounded_expiry_keys, bounded_oldest_keys,
     derive_message_signals, evaluate_antispam, is_platform_bot_author,
@@ -371,59 +372,17 @@ def init_db():
 
 
 def record_user_and_chat_activity(
-    uid: str,
-    nickname: str,
-    thread_id: str,
-    *,
-    count_message: bool = True,
+    uid: str, nickname: str, thread_id: str, *, count_message: bool = True
 ) -> None:
-    """Persist user presence and chat activity in one short SQLite transaction."""
-    now = time.time()
-    day_key, hour = get_chat_activity_clock_bucket()
-    safe_uid = str(uid)
-    safe_nickname = str(nickname or "Viajero")[:80]
-    with db_session() as db:
-        db.execute(
-            """INSERT INTO users(uid,nickname,created_at,last_seen,message_count)
-               VALUES(?,?,?,?,?)
-               ON CONFLICT(uid) DO UPDATE SET
-               nickname=excluded.nickname,
-               last_seen=excluded.last_seen,
-               message_count=users.message_count + excluded.message_count""",
-            (safe_uid, safe_nickname, now, now, 1 if count_message else 0),
-        )
-        if thread_id:
-            db.execute(
-                """INSERT INTO chat_activity_daily(
-                       thread_id,uid,nickname,day_key,message_count
-                   ) VALUES(?,?,?,?,1)
-                   ON CONFLICT(thread_id,uid,day_key) DO UPDATE SET
-                   nickname=excluded.nickname,
-                   message_count=chat_activity_daily.message_count+1""",
-                (str(thread_id), safe_uid, safe_nickname, day_key),
-            )
-            db.execute(
-                """INSERT INTO chat_activity_hourly(
-                       thread_id,day_key,hour_of_day,message_count
-                   ) VALUES(?,?,?,1)
-                   ON CONFLICT(thread_id,day_key,hour_of_day) DO UPDATE SET
-                   message_count=chat_activity_hourly.message_count+1""",
-                (str(thread_id), day_key, hour),
-            )
+    """Compatibility wrapper for community activity persistence."""
+    COMMUNITY_REPOSITORY.record_user_and_chat_activity(
+        uid, nickname, thread_id, count_message=count_message
+    )
 
 
 def record_user(uid: str, nickname: str, count_message: bool = False):
     """Compatibility wrapper for non-message user updates."""
-    now = time.time()
-    with db_session() as db:
-        db.execute(
-            """INSERT INTO users(uid,nickname,created_at,last_seen,message_count)
-               VALUES(?,?,?,?,?)
-               ON CONFLICT(uid) DO UPDATE SET nickname=excluded.nickname,
-               last_seen=excluded.last_seen,
-               message_count=users.message_count + excluded.message_count""",
-            (uid, nickname[:80], now, now, 1 if count_message else 0),
-        )
+    return COMMUNITY_REPOSITORY.record_user(uid, nickname, count_message)
 
 
 def scoped_uid(scope_key: str, uid: str) -> str:
@@ -431,65 +390,23 @@ def scoped_uid(scope_key: str, uid: str) -> str:
 
 
 def get_user(uid: str):
-    with db_session() as db:
-        row = db.execute("SELECT * FROM users WHERE uid=?", (uid,)).fetchone()
-        return dict(row) if row else None
+    return COMMUNITY_REPOSITORY.get_user(uid)
 
 
 def get_user_profile(uid: str, viewer_uid: str) -> tuple[dict | None, int]:
-    """Read a profile and its viewer-relative affinity in one SQLite query."""
-    with db_session() as db:
-        row = db.execute(
-            """SELECT u.*, COALESCE(a.score,0) AS viewer_affinity
-               FROM users AS u
-               LEFT JOIN affinities AS a
-                 ON a.uid=? AND a.target_uid=u.uid
-               WHERE u.uid=?""",
-            (str(viewer_uid), str(uid)),
-        ).fetchone()
-    if row is None:
-        return None, 0
-    profile = dict(row)
-    affinity = int(profile.pop("viewer_affinity", 0) or 0)
-    return profile, affinity
+    return COMMUNITY_REPOSITORY.get_user_profile(uid, viewer_uid)
 
 
 def find_user_profile_by_nickname(
     nickname: str, scope_key: str | None, viewer_uid: str
 ) -> tuple[dict | None, int]:
-    """Resolve a local nickname and its affinity without a second DB session."""
-    params: list[Any] = [str(viewer_uid), str(nickname).lstrip("@")]
-    sql = (
-        "SELECT u.*, COALESCE(a.score,0) AS viewer_affinity "
-        "FROM users AS u LEFT JOIN affinities AS a "
-        "ON a.uid=? AND a.target_uid=u.uid "
-        "WHERE lower(u.nickname)=lower(?)"
+    return COMMUNITY_REPOSITORY.find_user_profile_by_nickname(
+        nickname, scope_key, viewer_uid
     )
-    if scope_key:
-        prefix = str(scope_key) + ":"
-        sql += " AND substr(u.uid,1,?)=?"
-        params.extend([len(prefix), prefix])
-    sql += " ORDER BY u.last_seen DESC LIMIT 1"
-    with db_session() as db:
-        row = db.execute(sql, tuple(params)).fetchone()
-    if row is None:
-        return None, 0
-    profile = dict(row)
-    affinity = int(profile.pop("viewer_affinity", 0) or 0)
-    return profile, affinity
 
 
 def find_user_by_nickname(nickname: str, scope_key: str | None = None):
-    with db_session() as db:
-        sql = "SELECT * FROM users WHERE lower(nickname)=lower(?)"
-        params = [nickname.lstrip("@")]
-        if scope_key:
-            prefix = scope_key + ":"
-            sql += " AND substr(uid,1,?)=?"
-            params.extend([len(prefix), prefix])
-        sql += " ORDER BY last_seen DESC LIMIT 1"
-        row = db.execute(sql, tuple(params)).fetchone()
-        return dict(row) if row else None
+    return COMMUNITY_REPOSITORY.find_user_by_nickname(nickname, scope_key)
 
 
 def get_chat_setting(thread_id: str, key: str, default: str = "") -> str:
@@ -1319,6 +1236,10 @@ IA_ALLOWED_LICENSES = {
 metrics = defaultdict(int)
 CHAT_SETTINGS = ChatSettingsStore(db_session=lambda: db_session(), metrics=metrics)
 CHAT_SETTING_CACHE = CHAT_SETTINGS.cache
+COMMUNITY_REPOSITORY = CommunityRepository(
+    db_session=lambda: db_session(),
+    activity_clock_bucket=get_chat_activity_clock_bucket,
+)
 USER_MESSAGE_ACTIVITY = defaultdict(deque)
 USER_SPAM_WARNED_UNTIL = {}
 metrics["api_latency_total_ms"] = 0.0
