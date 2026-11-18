@@ -1498,6 +1498,7 @@ def cleanup_expired_state():
     except (sqlite3.Error, OSError, ValueError):
         logging.exception("[PRIVACY] Falló la limpieza de retención; se reintentará.")
     try:
+        PROGRESSION.purge_expired_daily_state(keep_days=14)
         POLLS.close_expired(now=time.time())
         expired_polls = POLLS.purge_expired(now=time.time())
         if expired_polls["polls"]:
