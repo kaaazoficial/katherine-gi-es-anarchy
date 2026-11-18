@@ -125,3 +125,11 @@ def test_progression_leaderboard_is_bounded(progression):
     top = service.leaderboard(limit=1)
     assert len(top) == 1
     assert top[0].uid == "a"
+
+
+def test_progression_leaderboard_is_room_scoped(progression):
+    service, _ = progression
+    service.record_action("community:room:a", "daily_claim")
+    service.record_action("community:other:b", "guess_win")
+    top = service.leaderboard(scope_prefix="community:room:")
+    assert [item.uid for item in top] == ["community:room:a"]
