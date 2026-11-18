@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from typing import Any
 
 
-_SPACE_RE = re.compile(r"\\s+")
-_LINK_RE = re.compile(r"(?:https?://|www\\.)\\S+", flags=re.IGNORECASE)
+_SPACE_RE = re.compile(r"\s+")
+_LINK_RE = re.compile(r"(?:https?://|www\.)\S+", flags=re.IGNORECASE)
 _BOT_TRUE_VALUES = frozenset({"true", "1", "yes"})
 
 
