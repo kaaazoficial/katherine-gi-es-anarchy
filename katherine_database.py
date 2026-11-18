@@ -221,6 +221,7 @@ def initialize_database(session_factory):
             ON economy_ledger(uid,idempotency_key) WHERE idempotency_key<>''""")
         db.execute("""CREATE INDEX IF NOT EXISTS idx_economy_ledger_user
             ON economy_ledger(uid,id DESC)""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_economy_ledger_created_at ON economy_ledger(created_at)")
         db.execute("""CREATE TABLE IF NOT EXISTS economy_store_items (
             item_key TEXT PRIMARY KEY,
             name TEXT NOT NULL,
