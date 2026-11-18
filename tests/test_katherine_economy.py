@@ -167,6 +167,15 @@ def test_default_store_catalog_is_repeatable(economy):
     assert len(service.list_items()) == 12
 
 
+def test_economy_ledger_entries_expire_after_retention_window(economy):
+    service, _, clock = economy
+    service.credit("community:room:alice", 10, reason="old reward")
+    clock[0] += 91 * 86400
+    assert service.purge_expired_ledger(retention_days=90) == 1
+    assert service.history("community:room:alice") == []
+    assert service.reconcile_balance("community:room:alice")
+
+
 def test_unknown_account_and_disabled_item_are_rejected(economy):
     service, _, _ = economy
     with pytest.raises(EconomyAccountMissing):
