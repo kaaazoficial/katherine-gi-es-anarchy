@@ -334,7 +334,7 @@ async def application_lifespan(application: FastAPI):
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 app = FastAPI(
-    title="Katherine · Genshin Impact ES",
+    title="Katheryne · Genshin Impact ES",
     lifespan=application_lifespan,
 )
 
@@ -15587,7 +15587,7 @@ async def community_webhook(request: Request):
 @app.get("/")
 async def health():
     return {
-        "bot": "Katherine",
+        "bot": "Katheryne",
         "status": "online",
         "uptime": int(time.time() - STARTED)
     }
@@ -15597,7 +15597,7 @@ async def health():
 async def health_check():
     return {
         "ok": True,
-        "bot": "Katherine"
+        "bot": "Katheryne"
     }
 
 @app.get("/ready")
