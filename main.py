@@ -34,6 +34,7 @@ from urllib.parse import parse_qs, urljoin, quote, urlparse, urlsplit, urlunspli
 from katherine_boot import IMPORT_STARTED_AT
 from katherine_runtime import RuntimeLifecycle, RuntimePhase, TaskSupervisor
 from katherine_game_client import GameAPIClient
+from katherine_moderation import AntiSpamService
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
@@ -843,90 +844,13 @@ MAX_ANTISPAM_TRACKED_USERS = 5000
 
 
 def prune_antispam_tracking(now: float | None = None) -> None:
-    """Bound per-user in-memory anti-spam state without persisting message content."""
-    current = time.time() if now is None else float(now)
-    for key, history in list(USER_MESSAGE_ACTIVITY.items()):
-        if not history or current - history[-1][0] > 300:
-            USER_MESSAGE_ACTIVITY.pop(key, None)
-    if len(USER_MESSAGE_ACTIVITY) >= MAX_ANTISPAM_TRACKED_USERS:
-        excess = len(USER_MESSAGE_ACTIVITY) - MAX_ANTISPAM_TRACKED_USERS + 1
-        oldest = sorted(
-            USER_MESSAGE_ACTIVITY,
-            key=lambda key: USER_MESSAGE_ACTIVITY[key][-1][0]
-            if USER_MESSAGE_ACTIVITY[key] else 0,
-        )[:excess]
-        for key in oldest:
-            USER_MESSAGE_ACTIVITY.pop(key, None)
-
-    for key, expiry in list(USER_SPAM_WARNED_UNTIL.items()):
-        if expiry <= current:
-            USER_SPAM_WARNED_UNTIL.pop(key, None)
-    if len(USER_SPAM_WARNED_UNTIL) > MAX_ANTISPAM_TRACKED_USERS:
-        excess = len(USER_SPAM_WARNED_UNTIL) - MAX_ANTISPAM_TRACKED_USERS
-        for key, _ in sorted(USER_SPAM_WARNED_UNTIL.items(), key=lambda item: item[1])[:excess]:
-            USER_SPAM_WARNED_UNTIL.pop(key, None)
+    """Prune ephemeral moderation counters without retaining message content."""
+    ANTI_SPAM.prune(now=now)
 
 
 def check_antispam_message(event: dict, source: str):
-    if source != "community":
-        return False, None
-    thread_id = str(event.get("threadId") or "")
-    message = event.get("message") or {}
-    author = message.get("author") or {}
-    uid = str(author.get("uid") or author.get("userId") or "")
-    nickname = str(author.get("nickname") or author.get("name") or "Usuario")
-    content = re.sub(r"\s+", " ", str(message.get("content") or "")).strip().casefold()
-    identity = BOT_IDENTITIES.get(source) or {}
-    if (
-        not thread_id or not uid or not content or is_admin_uid(uid)
-        or uid == str(identity.get("uid") or "")
-        or any(
-            str(author.get(key, "")).lower() in ("true", "1", "yes")
-            for key in ("bot", "isBot", "is_bot")
-        )
-    ):
-        return False, None
-
-    config = anti_spam_configuration(thread_id)
-    if not config["enabled"]:
-        return False, None
-
-    now = time.time()
-    key = (thread_id, uid)
-    if key not in USER_MESSAGE_ACTIVITY and len(USER_MESSAGE_ACTIVITY) >= MAX_ANTISPAM_TRACKED_USERS:
-        prune_antispam_tracking(now)
-    activity = USER_MESSAGE_ACTIVITY[key]
-    cutoff = now - config["window_seconds"]
-    while activity and activity[0][0] < cutoff:
-        activity.popleft()
-    digest = hashlib.sha256(content.encode("utf-8", errors="ignore")).hexdigest()
-    activity.append((now, digest))
-    repeated = sum(1 for _, item_digest in activity if item_digest == digest)
-    link_count = len(re.findall(r"(?:https?://|www\.)\S+", content, flags=re.I))
-    mention_count = len(message.get("mentions") or [])
-    reason = ""
-    if link_count > config["max_links"]:
-        reason = f"Exceso de enlaces en un mensaje ({link_count})."
-    elif mention_count > config["max_mentions"]:
-        reason = f"Menciones masivas en un mensaje ({mention_count})."
-    elif len(activity) >= config["max_messages"] or repeated >= config["repeat_limit"]:
-        reason = "Antispam automático: demasiados mensajes o contenido repetido."
-    if not reason:
-        return False, None
-
-    warn_key = f"{thread_id}:{uid}"
-    if USER_SPAM_WARNED_UNTIL.get(warn_key, 0) > now:
-        return True, None
-    USER_SPAM_WARNED_UNTIL[warn_key] = now + 60
-    target_uid = scoped_uid(f"community:{thread_id}", uid)
-    warning_id = add_moderation_warning(
-        thread_id, target_uid, nickname, "Katheryne", "Katheryne",
-        reason,
-        automatic=True
-    )
-    metrics["antispam_blocked"] += 1
-    logging.warning("[MODERACION] Antispam automático | advertencia=%s", warning_id)
-    return True, {"warning_id": warning_id, "nickname": nickname}
+    """Compatibility wrapper for the isolated moderation service."""
+    return ANTI_SPAM.check(event, source)
 
 
 def get_wish_state(uid: str) -> dict:
@@ -1318,8 +1242,6 @@ TTS_VOICE_OPTIONS = {
     "lucia": "es-AR-ElenaNeural",
     "carlos": "es-CO-GonzaloNeural"
 }
-USER_MESSAGE_ACTIVITY = defaultdict(deque)
-USER_SPAM_WARNED_UNTIL = {}
 DJ_MUSIC_DIR = Path(os.getenv("DJ_MUSIC_DIR", "music")).resolve()
 DJ_AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".oga", ".flac", ".m4a", ".aac", ".opus"}
 DJ_SEARCH_RESULTS: dict[str, dict] = {}
@@ -1410,6 +1332,17 @@ IA_ALLOWED_LICENSES = {
 
 # Contadores del proceso actual. Se reinician cuando Render reinicia el servicio.
 metrics = defaultdict(int)
+ANTI_SPAM = AntiSpamService(
+    get_configuration=anti_spam_configuration,
+    is_admin=is_admin_uid,
+    identity_getter=lambda source: BOT_IDENTITIES.get(source) or {},
+    scope_uid=scoped_uid,
+    create_warning=add_moderation_warning,
+    metrics=metrics,
+    max_tracked_users=MAX_ANTISPAM_TRACKED_USERS,
+)
+USER_MESSAGE_ACTIVITY = ANTI_SPAM.activity
+USER_SPAM_WARNED_UNTIL = ANTI_SPAM.warned_until
 metrics["api_latency_total_ms"] = 0.0
 metrics["api_latency_last_ms"] = 0.0
 metrics["api_latency_max_ms"] = 0.0
