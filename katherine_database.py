@@ -277,4 +277,37 @@ def initialize_database(session_factory):
         db.execute("""CREATE INDEX IF NOT EXISTS idx_community_poll_votes_poll
             ON community_poll_votes(poll_id,option_index)""")
 
+        # Game progression stores aggregate XP and daily quest counters only.
+        db.execute("""CREATE TABLE IF NOT EXISTS community_progress (
+            uid TEXT PRIMARY KEY,
+            xp INTEGER NOT NULL DEFAULT 0 CHECK(xp>=0),
+            updated_at REAL NOT NULL
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_community_progress_xp ON community_progress(xp DESC,updated_at)")
+        db.execute("""CREATE TABLE IF NOT EXISTS community_daily_actions (
+            uid TEXT NOT NULL,
+            day_key TEXT NOT NULL,
+            action TEXT NOT NULL,
+            action_count INTEGER NOT NULL DEFAULT 0 CHECK(action_count>=0),
+            updated_at REAL NOT NULL,
+            PRIMARY KEY(uid,day_key,action)
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_community_daily_actions_expiry ON community_daily_actions(day_key)")
+        db.execute("""CREATE TABLE IF NOT EXISTS community_quest_claims (
+            uid TEXT NOT NULL,
+            day_key TEXT NOT NULL,
+            quest_id TEXT NOT NULL,
+            claimed_at REAL NOT NULL,
+            PRIMARY KEY(uid,day_key,quest_id)
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_community_quest_claims_expiry ON community_quest_claims(day_key)")
+        db.execute("""CREATE TABLE IF NOT EXISTS community_achievements (
+            uid TEXT NOT NULL,
+            achievement_id TEXT NOT NULL,
+            unlocked_at REAL NOT NULL,
+            PRIMARY KEY(uid,achievement_id)
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_community_achievements_user ON community_achievements(uid,unlocked_at)")
+
+
 
