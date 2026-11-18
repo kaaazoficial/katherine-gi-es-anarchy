@@ -8,6 +8,7 @@ Katheryne utiliza una sola identidad: el bot comunitario. Configura `COMMUNITY_B
 
 ## Arquitectura
 - `main.py`: orquestación de webhooks, despacho y compatibilidad con los comandos de Anarchy.
+- `katherine_runtime.py`: ciclo de vida, estados de disponibilidad y supervisión acotada de tareas asíncronas.
 - `katherine_database.py`: conexiones, transacciones y creación del esquema SQLite.
 - `katherine_ai.py`: núcleo de IA, proveedores Gemini/Groq, validación de herramientas y contexto temporal.
 - `katherine_nexus.py`: interpretación determinista de solicitudes naturales.
@@ -20,6 +21,11 @@ Katheryne utiliza una sola identidad: el bot comunitario. Configura `COMMUNITY_B
 Katheryne no crea memoria personal permanente ni almacena conversaciones como historial a largo plazo. El contexto de IA es temporal y en memoria; no se recopilan mensajes de sala para resúmenes ni se registran preguntas y respuestas de IA. Los registros operativos deben evitar secretos y minimizar datos personales.
 
 ## Desarrollo y pruebas
+
+Mide el código de producción sin contar pruebas, documentación, comentarios de línea completa ni líneas vacías:
+```bash
+python scripts/measure_source.py
+```
 Requiere Python 3.11 o posterior.
 ```bash
 python -m pip install -r requirements-test.txt
