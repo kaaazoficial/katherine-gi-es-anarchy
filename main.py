@@ -36,6 +36,7 @@ from katherine_runtime import RuntimeLifecycle, RuntimePhase, TaskSupervisor
 from katherine_game_client import GameAPIClient
 from katherine_settings import ChatSettingsStore
 from katherine_community_repository import CommunityRepository
+from katherine_economy import EconomyService, EconomyError, seed_default_store
 from katherine_moderation import (
     AntiSpamSettings, bounded_expiry_keys, bounded_oldest_keys,
     derive_message_signals, evaluate_antispam, is_platform_bot_author,
@@ -369,6 +370,7 @@ def db_session():
 
 def init_db():
     initialize_database(db_session)
+    seed_default_store(ECONOMY)
 
 
 def record_user_and_chat_activity(
@@ -802,8 +804,14 @@ def update_user_field(uid: str, field: str, value: str):
 
 
 def add_points(uid: str, amount: int):
-    with db_session() as db:
-        db.execute("UPDATE users SET points=points+? WHERE uid=?", (int(amount), uid))
+    """Compatibility wrapper; all wallet mutations pass through the ledger."""
+    value = int(amount)
+    if value == 0:
+        return ECONOMY.wallet(uid)
+    return ECONOMY.apply(
+        uid, value, operation="credit" if value > 0 else "debit",
+        reason="Recompensa o actividad comunitaria",
+    )
 
 
 def claim_reward(uid: str, action: str, cooldown: int, low: int, high: int):
@@ -830,24 +838,17 @@ def claim_reward(uid: str, action: str, cooldown: int, low: int, high: int):
 
 
 def transfer_points(sender_uid: str, target_uid: str, amount: int) -> str:
-    """Transfiere puntos atómicamente y nunca permite un saldo negativo."""
-    if amount <= 0 or sender_uid == target_uid:
-        return "invalid"
-    with db_session() as db:
-        db.execute("BEGIN IMMEDIATE")
-        sender = db.execute(
-            "SELECT points FROM users WHERE uid=?", (sender_uid,)
-        ).fetchone()
-        target = db.execute(
-            "SELECT points FROM users WHERE uid=?", (target_uid,)
-        ).fetchone()
-        if not sender or not target:
-            return "missing"
-        if int(sender["points"]) < amount:
+    """Compatibility wrapper for a room-scoped, ledger-backed transfer."""
+    try:
+        ECONOMY.transfer(sender_uid, target_uid, amount)
+        return "ok"
+    except EconomyError as exc:
+        message = str(exc)
+        if "saldo suficiente" in message:
             return "insufficient"
-        db.execute("UPDATE users SET points=points-? WHERE uid=?", (amount, sender_uid))
-        db.execute("UPDATE users SET points=points+? WHERE uid=?", (amount, target_uid))
-    return "ok"
+        if "registrado" in message:
+            return "missing"
+        return "invalid"
 
 
 def get_affinity(uid: str, target_uid: str) -> int:
@@ -1239,6 +1240,11 @@ CHAT_SETTING_CACHE = CHAT_SETTINGS.cache
 COMMUNITY_REPOSITORY = CommunityRepository(
     db_session=lambda: db_session(),
     activity_clock_bucket=lambda: get_chat_activity_clock_bucket(),
+)
+ECONOMY = EconomyService(
+    db_session=lambda: db_session(),
+    max_transfer=10_000,
+    max_purchase_quantity=99,
 )
 USER_MESSAGE_ACTIVITY = defaultdict(deque)
 USER_SPAM_WARNED_UNTIL = {}
