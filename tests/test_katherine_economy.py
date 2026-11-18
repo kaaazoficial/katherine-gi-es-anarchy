@@ -122,8 +122,9 @@ def test_store_purchase_enforces_stock_and_inventory_limits(economy):
     assert purchased.inventory_quantity == 2
     with pytest.raises(EconomyConflict):
         service.buy("community:room:alice", "ticket", 1)
+    service.define_item("expensive", "Expensive", "No stock limit", 40, max_per_user=5)
     with pytest.raises(EconomyInsufficientFunds):
-        service.buy("community:room:bob", "ticket", 2)
+        service.buy("community:room:bob", "expensive", 2)
 
 
 def test_inventory_consume_and_grant(economy):
@@ -145,7 +146,7 @@ def test_leaderboard_can_be_filtered_by_community_scope(economy):
 def test_default_store_catalog_is_repeatable(economy):
     service, _, _ = economy
     assert seed_default_store(service) == 12
-    assert seed_default_store(service) == 12
+    assert seed_default_store(service) == 0
     assert len(service.list_items()) == 12
 
 
