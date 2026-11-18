@@ -534,6 +534,53 @@ class EconomyService:
             ).fetchone()
         return int(row["quantity"])
 
+    def equip(self, uid: str, item_key: str) -> StoreItem:
+        """Equip an owned cosmetic item in its category without consuming it."""
+        key = str(item_key or "").strip().casefold()
+        with self.db_session() as db:
+            db.execute("BEGIN IMMEDIATE")
+            item_row = db.execute(
+                "SELECT * FROM economy_store_items WHERE item_key=? AND enabled=1",
+                (key,),
+            ).fetchone()
+            if item_row is None:
+                raise EconomyConflict("El artículo no está disponible.")
+            item = self._item_from_row(item_row)
+            if item.category != "cosmetic":
+                raise EconomyConflict("Solo puedes equipar artículos cosméticos.")
+            owned = db.execute(
+                "SELECT quantity FROM economy_inventory WHERE uid=? AND item_key=?",
+                (str(uid), key),
+            ).fetchone()
+            if owned is None or int(owned["quantity"]) < 1:
+                raise EconomyConflict("Necesitas tener el artículo en tu inventario.")
+            db.execute(
+                """INSERT INTO economy_equipped_items(uid,category,item_key,equipped_at)
+                   VALUES(?,?,?,?)
+                   ON CONFLICT(uid,category) DO UPDATE SET
+                       item_key=excluded.item_key,equipped_at=excluded.equipped_at""",
+                (str(uid), item.category, key, float(self.clock())),
+            )
+        return item
+
+    def equipped(self, uid: str) -> list[StoreItem]:
+        with self.db_session() as db:
+            rows = db.execute(
+                """SELECT s.* FROM economy_equipped_items AS e
+                   JOIN economy_store_items AS s ON s.item_key=e.item_key
+                   WHERE e.uid=? ORDER BY e.category""",
+                (str(uid),),
+            ).fetchall()
+        return [self._item_from_row(row) for row in rows]
+
+    def unequip(self, uid: str, category: str = "cosmetic") -> bool:
+        with self.db_session() as db:
+            cursor = db.execute(
+                "DELETE FROM economy_equipped_items WHERE uid=? AND category=?",
+                (str(uid), str(category)),
+            )
+        return cursor.rowcount > 0
+
     def leaderboard(self, *, scope_prefix: str = "", limit: int = 10) -> list[Wallet]:
         count = max(1, min(_MAX_PAGE_SIZE, int(limit)))
         sql = "SELECT uid,nickname,points FROM users"
@@ -607,8 +654,6 @@ def seed_default_store(service: EconomyService) -> int:
         ("namecard_sumeru", "Tarjeta de Sumeru", "Marco de perfil temático de Sumeru.", 180, "cosmetic", None, 1),
         ("namecard_fontaine", "Tarjeta de Fontaine", "Marco de perfil temático de Fontaine.", 180, "cosmetic", None, 1),
         ("namecard_natlan", "Tarjeta de Natlan", "Marco de perfil temático de Natlan.", 180, "cosmetic", None, 1),
-        ("expedition_ticket", "Pase de expedición", "Objeto coleccionable para actividades comunitarias.", 75, "utility", 500, 5),
-        ("resin_snack", "Tentempié de resina", "Objeto funcional reservado para futuras dinámicas del bot.", 60, "utility", 500, 10),
         ("lucky_charm", "Amuleto de la suerte", "Coleccionable de buena fortuna.", 120, "collectible", 250, 10),
         ("primogem_badge", "Insignia de protogema", "Insignia decorativa de colección, no representa moneda real.", 300, "collectible", 100, 3),
         ("friendship_flower", "Flor de amistad", "Regalo simbólico para la comunidad.", 45, "social", None, 20),
