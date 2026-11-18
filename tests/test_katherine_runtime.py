@@ -62,6 +62,7 @@ def test_runtime_failure_records_only_exception_type_not_message():
     assert not hasattr(failed, "last_error")
     runtime.begin_shutdown()
     assert runtime.mark_stopped().phase is RuntimePhase.STOPPED
+    assert runtime.mark_stopped().phase is RuntimePhase.STOPPED
 
 
 def test_runtime_can_start_a_new_cycle_after_clean_shutdown():
