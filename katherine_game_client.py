@@ -12,7 +12,7 @@ from katherine_game_queries import strip_game_scope_qualifier, unwrap_genshin_db
 
 RequestCallable = Callable[..., Awaitable[Any]]
 _EMPTY = object()
-_FOLDER_PATTERN = re.compile(r"[a-z0-9_-]{1,40}\\Z")
+_FOLDER_PATTERN = re.compile(r"[a-z0-9_-]{1,40}\Z")
 
 
 class GameAPIClient:
@@ -70,7 +70,7 @@ class GameAPIClient:
         folder_name = self._validate_folder(folder)
         clean_query = strip_game_scope_qualifier(query)
         clean_query = clean_query or str(query or "").strip()
-        clean_query = re.sub(r"\\s+", " ", clean_query).strip()
+        clean_query = re.sub(r"\s+", " ", clean_query).strip()
         if not clean_query or len(clean_query) > 200:
             return None
 
@@ -124,7 +124,7 @@ class GameAPIClient:
     async def stats(self, folder: str, query: str) -> Any:
         """Fetch normalized game statistics and cache successful dictionaries."""
         folder_name = self._validate_folder(folder)
-        clean_query = re.sub(r"\\s+", " ", str(query or "")).strip()
+        clean_query = re.sub(r"\s+", " ", str(query or "")).strip()
         if not clean_query or len(clean_query) > 200:
             return None
 
