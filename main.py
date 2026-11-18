@@ -36,6 +36,9 @@ from katherine_runtime import RuntimeLifecycle, RuntimePhase, TaskSupervisor
 from katherine_game_client import GameAPIClient
 from katherine_settings import ChatSettingsStore
 from katherine_community_repository import CommunityRepository
+from katherine_economy import EconomyService, EconomyError, seed_default_store
+from katherine_polls import PollRepository, PollError, PollClosed
+from katherine_progression import ProgressionService
 from katherine_moderation import (
     AntiSpamSettings, bounded_expiry_keys, bounded_oldest_keys,
     derive_message_signals, evaluate_antispam, is_platform_bot_author,
@@ -369,6 +372,12 @@ def db_session():
 
 def init_db():
     initialize_database(db_session)
+    seed_default_store(ECONOMY)
+    POLLS.close_expired()
+    POLLS.purge_expired()
+    PROGRESSION.purge_expired_daily_state(keep_days=14)
+    PROGRESSION.purge_inactive_progress(retention_days=90)
+    ECONOMY.purge_expired_ledger(retention_days=90)
 
 
 def record_user_and_chat_activity(
@@ -802,8 +811,14 @@ def update_user_field(uid: str, field: str, value: str):
 
 
 def add_points(uid: str, amount: int):
-    with db_session() as db:
-        db.execute("UPDATE users SET points=points+? WHERE uid=?", (int(amount), uid))
+    """Compatibility wrapper; all wallet mutations pass through the ledger."""
+    value = int(amount)
+    if value == 0:
+        return ECONOMY.wallet(uid)
+    return ECONOMY.apply(
+        uid, value, operation="credit" if value > 0 else "debit",
+        reason="Recompensa o actividad comunitaria",
+    )
 
 
 def claim_reward(uid: str, action: str, cooldown: int, low: int, high: int):
@@ -829,25 +844,22 @@ def claim_reward(uid: str, action: str, cooldown: int, low: int, high: int):
     return random.randint(low, high), 0
 
 
-def transfer_points(sender_uid: str, target_uid: str, amount: int) -> str:
-    """Transfiere puntos atómicamente y nunca permite un saldo negativo."""
-    if amount <= 0 or sender_uid == target_uid:
-        return "invalid"
-    with db_session() as db:
-        db.execute("BEGIN IMMEDIATE")
-        sender = db.execute(
-            "SELECT points FROM users WHERE uid=?", (sender_uid,)
-        ).fetchone()
-        target = db.execute(
-            "SELECT points FROM users WHERE uid=?", (target_uid,)
-        ).fetchone()
-        if not sender or not target:
-            return "missing"
-        if int(sender["points"]) < amount:
+def transfer_points(
+    sender_uid: str, target_uid: str, amount: int, *, idempotency_key: str = ""
+) -> str:
+    """Compatibility wrapper for a room-scoped, ledger-backed transfer."""
+    try:
+        ECONOMY.transfer(
+            sender_uid, target_uid, amount, idempotency_key=idempotency_key
+        )
+        return "ok"
+    except EconomyError as exc:
+        message = str(exc)
+        if "saldo suficiente" in message:
             return "insufficient"
-        db.execute("UPDATE users SET points=points-? WHERE uid=?", (amount, sender_uid))
-        db.execute("UPDATE users SET points=points+? WHERE uid=?", (amount, target_uid))
-    return "ok"
+        if "registrado" in message:
+            return "missing"
+        return "invalid"
 
 
 def get_affinity(uid: str, target_uid: str) -> int:
@@ -951,7 +963,6 @@ send_history_chat = defaultdict(deque)
 
 cache: dict[str, tuple[float, Any]] = {}
 # Genshin API cache and request coalescing live in GameAPIClient below.
-polls: dict[str, dict] = {}
 AUTO_REPLY_CHAT_COOLDOWN: dict[str, float] = {}
 AUTO_REPLY_USER_COOLDOWN: dict[tuple[str, str], float] = {}
 AUTO_REPLY_RULE_CACHE: dict[str, tuple[float, tuple[tuple[dict, Any], ...]]] = {}
@@ -1056,7 +1067,6 @@ def external_host_resources(
     return state, semaphore
 
 
-poll_button_map: dict[str, str] = {}
 BUTTON_ACTIONS: dict[str, dict] = {}
 COMMUNITY_EVENTS: dict[str, dict] = {}
 DJ_ROOMS: dict[str, dict] = {}
@@ -1240,6 +1250,16 @@ COMMUNITY_REPOSITORY = CommunityRepository(
     db_session=lambda: db_session(),
     activity_clock_bucket=lambda: get_chat_activity_clock_bucket(),
 )
+ECONOMY = EconomyService(
+    db_session=lambda: db_session(),
+    max_transfer=10_000,
+    max_purchase_quantity=99,
+)
+POLLS = PollRepository(db_session=lambda: db_session())
+PROGRESSION = ProgressionService(
+    db_session=lambda: db_session(),
+    timezone="America/Santiago",
+)
 USER_MESSAGE_ACTIVITY = defaultdict(deque)
 USER_SPAM_WARNED_UNTIL = {}
 metrics["api_latency_total_ms"] = 0.0
@@ -1414,7 +1434,7 @@ def cleanup_expired_state():
         for key, item in list(store.items()):
             if not isinstance(item, tuple) or len(item) < 2 or item[0] <= now:
                 store.pop(key, None)
-    for store in (trivia, number_games, polls):
+    for store in (trivia, number_games):
         for key, item in list(store.items()):
             if item.get("expires", now + 1) <= now:
                 store.pop(key, None)
@@ -1483,10 +1503,16 @@ def cleanup_expired_state():
             logging.info("[PRIVACY] Retención aplicada: %s registros caducados/anónimos", expired_total)
     except (sqlite3.Error, OSError, ValueError):
         logging.exception("[PRIVACY] Falló la limpieza de retención; se reintentará.")
-    active_poll_ids = set(polls)
-    for button_key, poll_id in list(poll_button_map.items()):
-        if poll_id not in active_poll_ids:
-            poll_button_map.pop(button_key, None)
+    try:
+        PROGRESSION.purge_expired_daily_state(keep_days=14)
+        PROGRESSION.purge_inactive_progress(retention_days=90)
+        ECONOMY.purge_expired_ledger(retention_days=90)
+        POLLS.close_expired(now=time.time())
+        expired_polls = POLLS.purge_expired(now=time.time())
+        if expired_polls["polls"]:
+            logging.info("[PRIVACY] Encuestas caducadas eliminadas: %s", expired_polls["polls"])
+    except (sqlite3.Error, OSError, ValueError):
+        logging.exception("[PRIVACY] No se pudo limpiar el estado de encuestas.")
     monotonic_now = time.monotonic()
     for store in (CHAT_SETTING_CACHE, AUTO_REPLY_RULE_CACHE):
         for key, item in list(store.items()):
@@ -1632,7 +1658,7 @@ async def build_status_message(source: str, nickname: str, thread_id: str | None
         f"• Tareas activas: {sum(1 for task in background_tasks if not task.done())}",
         f"• Limpieza automática: {'activa' if CLEANUP_TASK is not None and not CLEANUP_TASK.done() else 'inactiva'}",
         f"• Trivias / juegos: {len(trivia)} / {len(number_games)}",
-        f"• Encuestas activas: {len(polls)}",
+        f"• Encuestas activas: {POLLS.count_active()}",
         f"• Caché: {len(cache)} entradas",
         f"• Eventos recientes: {len(seen_events)}",
         "",
@@ -12399,6 +12425,7 @@ Uso: !enciclopedia <nombre>""",
 
         if choice == game["q"][2]:
             add_points(uid, 10)
+            PROGRESSION.record_action(uid, "trivia_correct")
             trivia.pop(game_key, None)
             answer = "¡Correcto! Ganaste 10 puntos."
 
@@ -12457,6 +12484,7 @@ Uso: !enciclopedia <nombre>""",
 
             if n == game["number"]:
                 add_points(uid, 15)
+                PROGRESSION.record_action(uid, "guess_win")
                 answer = f"¡Correcto! Era {n}. Ganaste 15 puntos."
                 number_games.pop(game_key, None)
 
@@ -12467,6 +12495,154 @@ Uso: !enciclopedia <nombre>""",
             else:
                 answer = "Es mayor." if n < game["number"] else "Es menor."
 
+        await send_message(thread, answer, source, reply)
+        return
+
+    # -----------------------------------------------------------------------
+    # PROGRESIÓN, MISIONES Y LOGROS
+    # -----------------------------------------------------------------------
+    if command == "!rankingprogreso":
+        top = PROGRESSION.leaderboard(limit=10, scope_prefix=f"{scope_key}:")
+        if not top:
+            answer = "Todavía no hay viajeros en el ranking de experiencia."
+        else:
+            rows = ["RANKING DE EXPERIENCIA"]
+            for position, item in enumerate(top, 1):
+                profile = get_user(item.uid) or {}
+                rows.append(
+                    f"{position}. {profile.get('nickname') or 'Viajero'} "
+                    f"— nivel {item.level} · {item.xp} XP"
+                )
+            answer = "\n".join(rows)
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!progreso":
+        snapshot = PROGRESSION.snapshot(uid)
+        achievements = ", ".join(snapshot.unlocked_achievements) or "Todavía no hay logros."
+        answer = (
+            f"PROGRESO DE {nickname}\n"
+            f"Nivel {snapshot.level} · {snapshot.xp} XP\n"
+            f"Progreso del nivel: {snapshot.current_level_xp}/{snapshot.next_level_xp} XP\n"
+            f"Acciones de hoy: {snapshot.total_actions_today}\n"
+            f"Logros: {achievements}"
+        )
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!misiones":
+        quests = PROGRESSION.daily_quests(uid)
+        rows = ["MISIONES DIARIAS"]
+        for quest in quests:
+            status = "reclamada" if quest.claimed else "completada" if quest.completed else "en progreso"
+            rows.append(
+                f"• {quest.title}: {quest.progress}/{quest.goal} · {status}\n"
+                f"  {quest.description} · +{quest.bonus_xp} XP · !reclamar {quest.quest_id}"
+            )
+        await send_message(thread, "\n".join(rows), source, reply)
+        return
+
+    if command == "!reclamar":
+        quest_id = args[0].casefold() if args else ""
+        try:
+            snapshot = PROGRESSION.claim_quest(uid, quest_id)
+            answer = (
+                f"✦ Misión reclamada. Ahora tienes {snapshot.xp} XP "
+                f"y estás en el nivel {snapshot.level}."
+            )
+        except ValueError as exc:
+            answer = str(exc)
+        await send_message(thread, answer, source, reply)
+        return
+
+    # -----------------------------------------------------------------------
+    # ECONOMÍA, TIENDA E INVENTARIO
+    # -----------------------------------------------------------------------
+    if command == "!tienda":
+        items = ECONOMY.list_items()
+        if not items:
+            answer = "La tienda de Katheryne está temporalmente vacía."
+        else:
+            rows = ["TIENDA DE KATHERYNE"]
+            for item in items[:25]:
+                stock = "∞" if item.stock is None else str(item.stock)
+                rows.append(
+                    f"• {item.name} [{item.key}] — {item.price} puntos · stock {stock}"
+                    + (f"\n  {item.description}" if item.description else "")
+                )
+            rows.append("\nCompra con !comprar clave [cantidad].")
+            answer = "\n".join(rows)
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!comprar":
+        item_key = args[0].casefold() if args else ""
+        try:
+            quantity = int(args[1]) if len(args) > 1 else 1
+            purchase = ECONOMY.buy(
+                uid, item_key, quantity,
+                idempotency_key=str(message_id or ""),
+            )
+            answer = (
+                f"Compra realizada: {purchase.quantity} × {purchase.item.name}. "
+                f"Total: {purchase.total_cost} puntos. "
+                f"Saldo restante: {purchase.remaining_balance}."
+            )
+        except (ValueError, EconomyError) as exc:
+            answer = f"No se pudo completar la compra: {str(exc) or 'cantidad inválida'}"
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!equipar":
+        item_key = args[0].casefold() if args else ""
+        try:
+            item = ECONOMY.equip(uid, item_key)
+            answer = f"✦ Equipaste {item.name} en tu perfil."
+        except EconomyError as exc:
+            answer = str(exc)
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!equipamiento":
+        items = ECONOMY.equipped(uid)
+        answer = (
+            "EQUIPAMIENTO\n" + "\n".join(f"• {item.name}" for item in items)
+            if items else "No tienes artículos cosméticos equipados."
+        )
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!desequipar":
+        removed = ECONOMY.unequip(uid)
+        answer = "Se retiró tu artículo cosmético." if removed else "No tenías artículos equipados."
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!inventario":
+        inventory = ECONOMY.inventory(uid)
+        if not inventory:
+            answer = f"{nickname}, tu inventario está vacío. Visita !tienda."
+        else:
+            answer = "INVENTARIO\n" + "\n".join(
+                f"• {item.get('name') or item['item_key']} × {item['quantity']}"
+                for item in inventory[:40]
+            )
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!historial":
+        entries = ECONOMY.history(uid, limit=12)
+        if not entries:
+            answer = "Todavía no tienes movimientos en el historial de puntos."
+        else:
+            rows = ["HISTORIAL DE PUNTOS"]
+            for entry in entries:
+                sign = "+" if entry.delta > 0 else ""
+                rows.append(
+                    f"• {sign}{entry.delta} · {entry.operation} · "
+                    f"{entry.reason[:70]} · saldo {entry.balance_after}"
+                )
+            answer = "\n".join(rows)
         await send_message(thread, answer, source, reply)
         return
 
@@ -12504,6 +12680,7 @@ Uso: !enciclopedia <nombre>""",
             answer = f"Ya reclamaste tu recompensa diaria. Vuelve en {format_duration(remaining)}."
         else:
             add_points(uid, amount)
+            PROGRESSION.record_action(uid, "daily_claim")
             answer = (
                 f"🎁 Recompensa diaria: +{amount} puntos. "
                 f"Ahora tienes {(get_user(uid) or {}).get('points', 0)} puntos."
@@ -12517,6 +12694,7 @@ Uso: !enciclopedia <nombre>""",
             answer = f"Ya trabajaste recientemente. Vuelve en {format_duration(remaining)}."
         else:
             add_points(uid, amount)
+            PROGRESSION.record_action(uid, "work")
             answer = f"🛠️ Terminaste tu jornada y ganaste {amount} puntos."
         await send_message(thread, answer, source, reply)
         return
@@ -12531,7 +12709,10 @@ Uso: !enciclopedia <nombre>""",
         elif amount > 10000:
             answer = "El límite por transferencia es de 10.000 puntos."
         else:
-            result = transfer_points(uid, target_uid, amount)
+            result = transfer_points(
+                uid, target_uid, amount,
+                idempotency_key=f"transfer:{message_id}" if message_id else "",
+            )
             if result == "ok":
                 answer = f"💸 Transferiste {amount} puntos a @{target_name}."
             elif result == "insufficient":
@@ -12551,15 +12732,7 @@ Uso: !enciclopedia <nombre>""",
                 await send_message(thread, "Uso: !encuesta resultados ID o !encuesta cerrar ID.", source, reply)
                 return
             code = args[1]
-            selected = next(
-                (
-                    item for item in polls.values()
-                    if item.get("code") == code
-                    and item.get("source") == source
-                    and item.get("thread") == thread
-                ),
-                None
-            )
+            selected = POLLS.get_by_code(code, source=source, thread_id=thread)
             if not selected:
                 await send_message(thread, "No encontré esa encuesta en esta sala; pudo haber caducado o Katherine reinició.", source, reply)
                 return
@@ -12567,7 +12740,14 @@ Uso: !enciclopedia <nombre>""",
                 if selected.get("creator_uid") != raw_uid and not is_privileged_uid(admin_uid):
                     await send_message(thread, "Solo quien creó la encuesta o un administrador puede cerrarla.", source, reply)
                     return
-                selected["closed"] = True
+                try:
+                    selected = POLLS.close(
+                        selected["id"], raw_uid, source=source, thread_id=thread,
+                        is_admin=is_privileged_uid(admin_uid),
+                    )
+                except PollError as exc:
+                    await send_message(thread, str(exc), source, reply)
+                    return
                 await send_message(thread, "Encuesta cerrada.\n\n" + format_poll_results(selected), source, reply)
             else:
                 await send_message(thread, format_poll_results(selected), source, reply)
@@ -12604,37 +12784,33 @@ Uso: !enciclopedia <nombre>""",
             await send_message(thread, "La duración debe estar entre 1 minuto y 7 días.", source, reply)
             return
 
-        created_at = time.time()
-        closes_at = created_at + duration_seconds
         poll_nonce = str(time.time_ns())[-15:]
         poll_id = f"{source}:{thread}:{poll_nonce}"
         poll_code = str(secrets.randbelow(900000) + 100000)
-        while any(item.get("code") == poll_code for item in polls.values()):
+        while POLLS.get_by_code(poll_code, source=source, thread_id=thread):
             poll_code = str(secrets.randbelow(900000) + 100000)
-        polls[poll_id] = {
-            "code": poll_code,
-            "question": question,
-            "options": options,
-            "votes": {},
-            "source": source,
-            "thread": thread,
-            "creator_uid": raw_uid,
-            "creator_name": nickname,
-            "anonymous": anonymous,
-            "closed": False,
-            "created_at": created_at,
-            "closes_at": closes_at,
-            "expires": closes_at + 86400
-        }
-        if len(polls) > 500:
-            oldest_id = min(polls, key=lambda key: polls[key].get("created_at", 0))
-            polls.pop(oldest_id, None)
+        try:
+            selected = POLLS.create(
+                poll_id=poll_id,
+                code=poll_code,
+                source=source,
+                thread_id=thread,
+                question=question,
+                options=options,
+                creator_uid=raw_uid,
+                creator_name=nickname,
+                anonymous=anonymous,
+                duration_seconds=duration_seconds,
+                button_key=poll_nonce,
+            )
+        except PollError as exc:
+            await send_message(thread, f"No se pudo crear la encuesta: {exc}", source, reply)
+            return
 
         buttons = [
             {"id": f"p{poll_nonce}_{index}", "label": option}
             for index, option in enumerate(options)
         ]
-        poll_button_map[poll_nonce] = poll_id
         minutes = max(1, int(duration_seconds // 60))
         mode = "anónima" if anonymous else "pública"
         await send_message(
@@ -12646,57 +12822,6 @@ Uso: !enciclopedia <nombre>""",
         )
         return
 
-        parts = [
-            x.strip()
-            for x in query.split("|")
-            if x.strip()
-        ]
-
-        if len(parts) < 3:
-            await send_message(
-                thread,
-                "Uso: !encuesta Pregunta | Opción 1 | Opción 2 [| Opción 3...]",
-                source,
-                reply
-            )
-            return
-
-        question = parts[0]
-        options = parts[1:6]
-        poll_nonce = str(time.time_ns())[-15:]
-        poll_id = f"{source}:{thread}:{poll_nonce}"
-
-        polls[poll_id] = {
-            "question": question,
-            "options": options,
-            "votes": {},
-            "source": source,
-            "thread": thread,
-            "created_at": time.time(),
-            "expires": time.time() + 86400
-        }
-        if len(polls) > 500:
-            oldest_id = min(polls, key=lambda key: polls[key].get("created_at", 0))
-            polls.pop(oldest_id, None)
-
-        buttons = [
-            {
-                "id": f"p{poll_id.split(':')[-1]}_{i}",
-                "label": opt
-            }
-            for i, opt in enumerate(options)
-        ]
-
-        poll_button_map[poll_id.split(":")[-1]] = poll_id
-
-        await send_message(
-            thread,
-            "ENCUESTA\n" + question + "\nElige una opción:",
-            source,
-            reply,
-            buttons
-        )
-        return
 
     # -----------------------------------------------------------------------
     # ENTRETENIMIENTO
@@ -14514,16 +14639,16 @@ async def handle_interaction(event: dict, source: str):
     # Las encuestas permiten cambiar el voto hasta el cierre.
     match = re.fullmatch(r"p(\d+)_(\d+)", button_id)
     if match:
-        poll = polls.get(poll_button_map.get(match.group(1), ""))
+        poll = POLLS.get_by_button_key(
+            match.group(1), source=source, thread_id=thread_id
+        )
         if not poll:
             return
-        if (
-            poll.get("source") != source
-            or str(event.get("threadId") or "") != poll.get("thread")
-        ):
-            return
         if poll.get("closed") or float(poll.get("closes_at", 0)) <= time.time():
-            poll["closed"] = True
+            POLLS.close_expired()
+            poll = POLLS.get_by_button_key(
+                match.group(1), source=source, thread_id=thread_id
+            ) or poll
             await remove_pressed_buttons(event, source, remove=True)
             await send_message(
                 thread_id,
@@ -14533,13 +14658,25 @@ async def handle_interaction(event: dict, source: str):
             return
 
         index = int(match.group(2))
-        if index >= len(poll["options"]):
+        try:
+            poll = POLLS.vote(
+                poll["id"], raw_user_uid, index, source=source, thread_id=thread_id
+            )
+        except PollClosed:
+            POLLS.close_expired()
+            poll = POLLS.get_by_button_key(
+                match.group(1), source=source, thread_id=thread_id
+            ) or poll
+            await remove_pressed_buttons(event, source, remove=True)
+            await send_message(
+                thread_id,
+                f"La encuesta {poll.get('code')} ya está cerrada.\n\n" + format_poll_results(poll),
+                source,
+            )
             return
-        voter_key = (
-            hashlib.sha256(f"{poll.get('code')}:{raw_user_uid}".encode("utf-8")).hexdigest()
-            if poll.get("anonymous") else raw_user_uid
-        )
-        poll["votes"][voter_key] = index
+        except PollError as exc:
+            await send_message(thread_id, str(exc), source)
+            return
         await send_message(thread_id, format_poll_results(poll), source)
         return
 

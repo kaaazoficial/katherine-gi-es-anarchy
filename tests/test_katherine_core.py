@@ -35,7 +35,73 @@ def test_database_initializes_expected_core_tables(database):
         "chat_activity_daily",
         "admin_audit_log",
         "auto_reply_rules",
+        "economy_ledger",
+        "economy_store_items",
+        "economy_inventory",
+        "economy_equipped_items",
+        "community_polls",
+        "community_poll_votes",
+        "community_progress",
+        "community_daily_actions",
+        "community_quest_claims",
+        "community_achievements",
     }.issubset(names)
+
+
+def test_persistent_polls_survive_repository_reloads_and_expire(database):
+    created = database.POLLS.create(
+        poll_id="community:room:persisted",
+        code="654321",
+        source="community",
+        thread_id="room",
+        question="¿Qué región prefieres?",
+        options=["Mondstadt", "Liyue"],
+        creator_uid="creator",
+        creator_name="Creador",
+        anonymous=True,
+        duration_seconds=3600,
+        button_key="987654321",
+    )
+    database.POLLS.vote(
+        created["id"], "user-secret", 1, source="community", thread_id="room"
+    )
+
+    reloaded = database.POLLS.get_by_button_key(
+        "987654321", source="community", thread_id="room"
+    )
+    assert reloaded is not None
+    assert reloaded["votes"] == {
+        __import__("hashlib").sha256(
+            f"{created['id']}:{created['code']}:user-secret".encode()
+        ).hexdigest(): 1
+    }
+
+
+def test_legacy_point_awards_are_recorded_in_economy_ledger(database):
+    database.record_user("community:room:ledger-user", "Ledger User")
+    database.add_points("community:room:ledger-user", 35)
+
+    wallet = database.ECONOMY.wallet("community:room:ledger-user")
+    history = database.ECONOMY.history("community:room:ledger-user")
+
+    assert wallet is not None
+    assert wallet.balance == 35
+    assert len(history) == 1
+    assert history[0].delta == 35
+    assert history[0].operation == "credit"
+
+
+def test_default_store_seed_does_not_restore_consumed_stock(database):
+    item = database.ECONOMY.item("celebration_cake")
+    assert item is not None and item.stock is not None
+    with database.db_session() as db:
+        db.execute(
+            "UPDATE economy_store_items SET stock=7 WHERE item_key='celebration_cake'"
+        )
+
+    database.init_db()
+
+    assert database.ECONOMY.item("celebration_cake").stock == 7
 
 
 def test_user_upsert_updates_nickname_and_counts_messages(database):
