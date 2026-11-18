@@ -12593,6 +12593,31 @@ Uso: !enciclopedia <nombre>""",
         await send_message(thread, answer, source, reply)
         return
 
+    if command == "!equipar":
+        item_key = args[0].casefold() if args else ""
+        try:
+            item = ECONOMY.equip(uid, item_key)
+            answer = f"✦ Equipaste {item.name} en tu perfil."
+        except EconomyError as exc:
+            answer = str(exc)
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!equipamiento":
+        items = ECONOMY.equipped(uid)
+        answer = (
+            "EQUIPAMIENTO\n" + "\n".join(f"• {item.name}" for item in items)
+            if items else "No tienes artículos cosméticos equipados."
+        )
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!desequipar":
+        removed = ECONOMY.unequip(uid)
+        answer = "Se retiró tu artículo cosmético." if removed else "No tenías artículos equipados."
+        await send_message(thread, answer, source, reply)
+        return
+
     if command == "!inventario":
         inventory = ECONOMY.inventory(uid)
         if not inventory:
