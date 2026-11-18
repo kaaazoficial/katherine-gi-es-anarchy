@@ -15,7 +15,7 @@ Katheryne utiliza una sola identidad: el bot comunitario. Configura `COMMUNITY_B
 - `katherine_research.py`: búsqueda y preparación de fuentes públicas.
 - `katherine_link_analysis.py`, `katherine_images.py`, `katherine_utilities.py`: inspección automática de enlaces, validación de imágenes y cálculo seguro.
 - `katherine_config.py`, `katherine_matching.py`, `katherine_metrics.py`: configuración, coincidencias y métricas.
-- `katherine_economy.py`: monedero transaccional, libro mayor, transferencias, tienda e inventario.
+- `katherine_economy.py`: monedero transaccional, libro mayor, transferencias, tienda, inventario y equipamiento cosmético.
 - `katherine_polls.py`: encuestas persistentes por sala, votos anónimos y caducidad automática.
 - `katherine_progression.py`: experiencia, niveles, misiones diarias y logros con límites contra farmeo.
 - `tests/`: pruebas unitarias y de regresión.
