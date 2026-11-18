@@ -127,6 +127,21 @@ def test_store_purchase_enforces_stock_and_inventory_limits(economy):
         service.buy("community:room:bob", "expensive", 2)
 
 
+def test_purchase_idempotency_prevents_double_charge_and_stock_use(economy):
+    service, _, _ = economy
+    service.define_item("limited", "Limited", "Single purchase", 40, stock=3, max_per_user=3)
+    first = service.buy(
+        "community:room:alice", "limited", 2, idempotency_key="message-123"
+    )
+    replay = service.buy(
+        "community:room:alice", "limited", 2, idempotency_key="message-123"
+    )
+    assert first == replay
+    assert service.balance("community:room:alice") == 170
+    assert service.inventory("community:room:alice")[0]["quantity"] == 2
+    assert service.item("limited").stock == 1
+
+
 def test_inventory_consume_and_grant(economy):
     service, _, _ = economy
     service.define_item("flower", "Flower", "Gift", 5, max_per_user=20)
