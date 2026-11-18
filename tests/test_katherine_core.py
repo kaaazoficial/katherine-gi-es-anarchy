@@ -6,6 +6,7 @@ import asyncio
 import pytest
 
 import main as katherine
+from katherine_game_client import GameAPIClient
 
 
 @pytest.fixture
@@ -657,9 +658,10 @@ async def test_game_data_coalesces_concurrent_identical_requests(monkeypatch):
         await release.wait()
         return Response()
 
-    monkeypatch.setattr(katherine, "external_request", fake_request)
-    monkeypatch.setattr(katherine, "cache", {})
-    monkeypatch.setattr(katherine, "_GAME_REQUEST_INFLIGHT", __import__("weakref").WeakKeyDictionary())
+    client = GameAPIClient(
+        fake_request, base_url=katherine.GAME_API, metrics=katherine.metrics,
+    )
+    monkeypatch.setattr(katherine, "GAME_CLIENT", client)
 
     first = asyncio.create_task(katherine.game_data("characters", "Cyno"))
     await entered.wait()
@@ -691,16 +693,17 @@ async def test_game_data_does_not_coalesce_different_queries(monkeypatch):
         calls.append(params["query"])
         return Response(params["query"])
 
-    monkeypatch.setattr(katherine, "external_request", fake_request)
-    monkeypatch.setattr(katherine, "cache", {})
-    monkeypatch.setattr(katherine, "_GAME_REQUEST_INFLIGHT", __import__("weakref").WeakKeyDictionary())
+    client = GameAPIClient(
+        fake_request, base_url=katherine.GAME_API, metrics=katherine.metrics,
+    )
+    monkeypatch.setattr(katherine, "GAME_CLIENT", client)
 
     cyno, nahida = await asyncio.gather(
         katherine.game_data("characters", "Cyno"),
         katherine.game_data("characters", "Nahida"),
     )
 
-    assert calls == ["cyno", "nahida"]
+    assert sorted(calls) == ["cyno", "nahida"]
     assert cyno["name"] == "cyno"
     assert nahida["name"] == "nahida"
 
