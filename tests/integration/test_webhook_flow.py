@@ -361,7 +361,7 @@ async def test_health_endpoint_is_available_without_starting_external_clients(
         response = await client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "bot": "Katherine"}
+    assert response.json() == {"ok": True, "bot": "Katheryne"}
 
 
 @pytest.mark.asyncio
