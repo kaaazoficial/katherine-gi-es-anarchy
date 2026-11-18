@@ -1422,7 +1422,7 @@ def cleanup_expired_state():
         for key, item in list(store.items()):
             if not isinstance(item, tuple) or len(item) < 2 or item[0] <= now:
                 store.pop(key, None)
-    for store in (trivia, number_games, polls):
+    for store in (trivia, number_games):
         for key, item in list(store.items()):
             if item.get("expires", now + 1) <= now:
                 store.pop(key, None)
@@ -1643,7 +1643,7 @@ async def build_status_message(source: str, nickname: str, thread_id: str | None
         f"• Tareas activas: {sum(1 for task in background_tasks if not task.done())}",
         f"• Limpieza automática: {'activa' if CLEANUP_TASK is not None and not CLEANUP_TASK.done() else 'inactiva'}",
         f"• Trivias / juegos: {len(trivia)} / {len(number_games)}",
-        f"• Encuestas activas: {len(polls)}",
+        f"• Encuestas activas: {POLLS.count_active()}",
         f"• Caché: {len(cache)} entradas",
         f"• Eventos recientes: {len(seen_events)}",
         "",
@@ -12715,57 +12715,6 @@ Uso: !enciclopedia <nombre>""",
         )
         return
 
-        parts = [
-            x.strip()
-            for x in query.split("|")
-            if x.strip()
-        ]
-
-        if len(parts) < 3:
-            await send_message(
-                thread,
-                "Uso: !encuesta Pregunta | Opción 1 | Opción 2 [| Opción 3...]",
-                source,
-                reply
-            )
-            return
-
-        question = parts[0]
-        options = parts[1:6]
-        poll_nonce = str(time.time_ns())[-15:]
-        poll_id = f"{source}:{thread}:{poll_nonce}"
-
-        polls[poll_id] = {
-            "question": question,
-            "options": options,
-            "votes": {},
-            "source": source,
-            "thread": thread,
-            "created_at": time.time(),
-            "expires": time.time() + 86400
-        }
-        if len(polls) > 500:
-            oldest_id = min(polls, key=lambda key: polls[key].get("created_at", 0))
-            polls.pop(oldest_id, None)
-
-        buttons = [
-            {
-                "id": f"p{poll_id.split(':')[-1]}_{i}",
-                "label": opt
-            }
-            for i, opt in enumerate(options)
-        ]
-
-        poll_button_map[poll_id.split(":")[-1]] = poll_id
-
-        await send_message(
-            thread,
-            "ENCUESTA\n" + question + "\nElige una opción:",
-            source,
-            reply,
-            buttons
-        )
-        return
 
     # -----------------------------------------------------------------------
     # ENTRETENIMIENTO
