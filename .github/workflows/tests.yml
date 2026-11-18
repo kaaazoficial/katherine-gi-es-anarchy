@@ -4,6 +4,8 @@ on:
   push:
     paths:
       - "main.py"
+      - "katherine_economy.py"
+      - "katherine_database.py"
       - "katherine_runtime.py"
       - "katherine_cache.py"
       - "katherine_game_client.py"
@@ -121,7 +123,7 @@ jobs:
           PY
 
       - name: Run automated tests with coverage
-        run: python -m pytest -q --ignore=tests/integration --cov=main --cov=katherine_cache --cov=katherine_game_client --cov=katherine_moderation --cov=katherine_settings --cov=katherine_community_repository --cov=katherine_language --cov=katherine_identity --cov=katherine_ai --cov=katherine_nexus --cov=katherine_astra --cov=katherine_research --cov=katherine_retention --cov=katherine_help --cov=katherine_storage --cov=katherine_images --cov-report=term-missing --timeout=120
+        run: python -m pytest -q --ignore=tests/integration --cov=main --cov=katherine_cache --cov=katherine_game_client --cov=katherine_moderation --cov=katherine_settings --cov=katherine_economy --cov=katherine_community_repository --cov=katherine_language --cov=katherine_identity --cov=katherine_ai --cov=katherine_nexus --cov=katherine_astra --cov=katherine_research --cov=katherine_retention --cov=katherine_help --cov=katherine_storage --cov=katherine_images --cov-report=term-missing --timeout=120
 
 
   integration:
