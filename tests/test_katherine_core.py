@@ -92,16 +92,16 @@ def test_legacy_point_awards_are_recorded_in_economy_ledger(database):
 
 
 def test_default_store_seed_does_not_restore_consumed_stock(database):
-    item = database.ECONOMY.item("expedition_ticket")
+    item = database.ECONOMY.item("celebration_cake")
     assert item is not None and item.stock is not None
     with database.db_session() as db:
         db.execute(
-            "UPDATE economy_store_items SET stock=7 WHERE item_key='expedition_ticket'"
+            "UPDATE economy_store_items SET stock=7 WHERE item_key='celebration_cake'"
         )
 
     database.init_db()
 
-    assert database.ECONOMY.item("expedition_ticket").stock == 7
+    assert database.ECONOMY.item("celebration_cake").stock == 7
 
 
 def test_user_upsert_updates_nickname_and_counts_messages(database):
