@@ -84,6 +84,9 @@ jobs:
       - name: Compile bot source
         run: python -m compileall -q .
 
+      - name: Report production source size
+        run: python scripts/measure_source.py
+
       - name: Report top startup import costs
         run: |
           python -X importtime -c "import main" 2> /tmp/katherine-importtime.log
