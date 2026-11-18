@@ -1321,17 +1321,6 @@ CHAT_SETTINGS = ChatSettingsStore(db_session=db_session, metrics=metrics)
 CHAT_SETTING_CACHE = CHAT_SETTINGS.cache
 USER_MESSAGE_ACTIVITY = defaultdict(deque)
 USER_SPAM_WARNED_UNTIL = {}
-ANTI_SPAM = AntiSpamService(
-    get_configuration=anti_spam_configuration,
-    is_admin=is_admin_uid,
-    identity_getter=lambda source: BOT_IDENTITIES.get(source) or {},
-    scope_uid=scoped_uid,
-    create_warning=add_moderation_warning,
-    metrics=metrics,
-    max_tracked_users=MAX_ANTISPAM_TRACKED_USERS,
-)
-USER_MESSAGE_ACTIVITY = ANTI_SPAM.activity
-USER_SPAM_WARNED_UNTIL = ANTI_SPAM.warned_until
 metrics["api_latency_total_ms"] = 0.0
 metrics["api_latency_last_ms"] = 0.0
 metrics["api_latency_max_ms"] = 0.0
