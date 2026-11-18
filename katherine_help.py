@@ -100,6 +100,8 @@ def _command_help_sections(prefix: str):
             (False, f"• {prefix}tienda — Consulta el catálogo comunitario."),
             (False, f"• {prefix}comprar <clave> [cantidad] — Compra artículos con puntos."),
             (False, f"• {prefix}inventario — Consulta tus artículos."),
+            (False, f"• {prefix}equipar <clave> — Equipa un artículo cosmético."),
+            (False, f"• {prefix}equipamiento | {prefix}desequipar — Consulta o retira tu cosmético."),
             (False, f"• {prefix}historial — Consulta tus últimos movimientos."),
             (False, f"• {prefix}progreso — Consulta tu nivel, XP y logros."),
             (False, f"• {prefix}rankingprogreso — Clasificación de experiencia de esta sala."),
