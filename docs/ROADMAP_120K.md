@@ -35,7 +35,7 @@ Separar catálogo y proveedores, búsqueda, licencias, descarga, caché, decodif
 
 ### 4. Comunidad y moderación
 
-Separar perfiles, actividad agregada, ajustes por sala, permisos, advertencias, reglas automáticas, encuestas, recompensas y auditoría. Mantener consultas SQL parametrizadas y aplicar retención/anominización en cada nuevo dato persistente.
+Separar perfiles, actividad agregada, ajustes por sala, permisos, advertencias, reglas automáticas, encuestas, recompensas y auditoría. Mantener consultas SQL parametrizadas y aplicar retención/anonimización en cada nuevo dato persistente.
 
 ### 5. IA, investigación e integraciones
 
