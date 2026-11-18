@@ -133,3 +133,14 @@ def test_progression_leaderboard_is_room_scoped(progression):
     service.record_action("community:other:b", "guess_win")
     top = service.leaderboard(scope_prefix="community:room:")
     assert [item.uid for item in top] == ["community:room:a"]
+
+
+def test_inactive_progress_and_achievements_expire(progression):
+    service, clock = progression
+    service.record_action("inactive-user", "daily_claim")
+    assert service.snapshot("inactive-user").xp > 0
+    clock[0] += 91 * 86400
+    assert service.purge_inactive_progress(retention_days=90) == 1
+    snapshot = service.snapshot("inactive-user")
+    assert snapshot.xp == 0
+    assert snapshot.unlocked_achievements == ()
