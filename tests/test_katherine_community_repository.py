@@ -1,5 +1,14 @@
 """Tests for the dedicated community profile repository."""
 from katherine_community_repository import CommunityRepository
+import pytest
+import main as katherine
+
+
+@pytest.fixture
+def database(tmp_path, monkeypatch):
+    monkeypatch.setattr(katherine, "DB_PATH", tmp_path / "community.sqlite3")
+    katherine.init_db()
+    return katherine
 
 
 def test_repository_upserts_profile_and_counts_activity(database):
