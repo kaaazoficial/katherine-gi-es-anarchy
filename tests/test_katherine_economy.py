@@ -127,6 +127,24 @@ def test_store_purchase_enforces_stock_and_inventory_limits(economy):
         service.buy("community:room:bob", "expensive", 2)
 
 
+def test_cosmetic_equipment_requires_owned_item_and_replaces_slot(economy):
+    service, _, _ = economy
+    service.define_item("card-a", "Card A", "", 10, category="cosmetic")
+    service.define_item("card-b", "Card B", "", 10, category="cosmetic")
+    service.define_item("ticket", "Ticket", "", 10, category="utility")
+    with pytest.raises(EconomyConflict):
+        service.equip("community:room:alice", "card-a")
+    service.grant_item("community:room:alice", "card-a")
+    service.grant_item("community:room:alice", "card-b")
+    with pytest.raises(EconomyConflict):
+        service.equip("community:room:alice", "ticket")
+    assert service.equip("community:room:alice", "card-a").key == "card-a"
+    assert service.equip("community:room:alice", "card-b").key == "card-b"
+    assert [item.key for item in service.equipped("community:room:alice")] == ["card-b"]
+    assert service.unequip("community:room:alice")
+    assert service.equipped("community:room:alice") == []
+
+
 def test_purchase_idempotency_prevents_double_charge_and_stock_use(economy):
     service, _, _ = economy
     service.define_item("limited", "Limited", "Single purchase", 40, stock=3, max_per_user=3)
@@ -162,9 +180,9 @@ def test_leaderboard_can_be_filtered_by_community_scope(economy):
 
 def test_default_store_catalog_is_repeatable(economy):
     service, _, _ = economy
-    assert seed_default_store(service) == 12
+    assert seed_default_store(service) == 10
     assert seed_default_store(service) == 0
-    assert len(service.list_items()) == 12
+    assert len(service.list_items()) == 10
 
 
 def test_economy_ledger_entries_expire_after_retention_window(economy):
