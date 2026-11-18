@@ -38,7 +38,38 @@ def test_database_initializes_expected_core_tables(database):
         "economy_ledger",
         "economy_store_items",
         "economy_inventory",
+        "community_polls",
+        "community_poll_votes",
     }.issubset(names)
+
+
+def test_persistent_polls_survive_repository_reloads_and_expire(database):
+    created = database.POLLS.create(
+        poll_id="community:room:persisted",
+        code="654321",
+        source="community",
+        thread_id="room",
+        question="¿Qué región prefieres?",
+        options=["Mondstadt", "Liyue"],
+        creator_uid="creator",
+        creator_name="Creador",
+        anonymous=True,
+        duration_seconds=3600,
+        button_key="987654321",
+    )
+    database.POLLS.vote(
+        created["id"], "user-secret", 1, source="community", thread_id="room"
+    )
+
+    reloaded = database.POLLS.get_by_button_key(
+        "987654321", source="community", thread_id="room"
+    )
+    assert reloaded is not None
+    assert reloaded["votes"] == {
+        __import__("hashlib").sha256(
+            f"{created['id']}:{created['code']}:user-secret".encode()
+        ).hexdigest(): 1
+    }
 
 
 def test_legacy_point_awards_are_recorded_in_economy_ledger(database):
