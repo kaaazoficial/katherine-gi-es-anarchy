@@ -245,6 +245,22 @@ class PollRepository:
             raise PollNotFound("La encuesta dejó de estar disponible.")
         return result
 
+    def count_active(self, *, source: str | None = None,
+                     thread_id: str | None = None) -> int:
+        now = float(self.clock())
+        sql = """SELECT COUNT(*) AS total FROM community_polls
+                 WHERE closed=0 AND closes_at>?"""
+        params: list[Any] = [now]
+        if source is not None:
+            sql += " AND source=?"
+            params.append(str(source))
+        if thread_id is not None:
+            sql += " AND thread_id=?"
+            params.append(str(thread_id))
+        with self.db_session() as db:
+            row = db.execute(sql, tuple(params)).fetchone()
+        return int(row["total"] if row else 0)
+
     def close_expired(self, *, now: float | None = None) -> int:
         current = float(self.clock() if now is None else now)
         with self.db_session() as db:
