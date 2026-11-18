@@ -320,7 +320,7 @@ async def application_lifespan(application: FastAPI):
     try:
         await startup()
         yield
-    except BaseException as exc:
+    except Exception as exc:
         # Record only the exception type: error messages may contain user data
         # or provider payloads and must not become operational state.
         try:
@@ -1673,6 +1673,22 @@ async def cleanup_loop():
     while True:
         await asyncio.sleep(300)
         cleanup_expired_state()
+
+async def supervised_cleanup_loop():
+    """Keep cleanup failures visible to readiness without retaining exception data."""
+    try:
+        await cleanup_loop()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        phase = RUNTIME.snapshot().phase
+        if phase in {RuntimePhase.STARTING, RuntimePhase.READY}:
+            RUNTIME.mark_degraded()
+        logging.error(
+            "[RUNTIME] La tarea de limpieza terminó inesperadamente: %s",
+            type(exc).__name__,
+        )
+        raise
 
 
 def get_database_stats() -> tuple[float, int | None]:
@@ -15611,6 +15627,9 @@ async def readiness_check():
         "phase": snapshot.phase.value,
         "cycle": snapshot.cycle,
         "startup_seconds": snapshot.startup_seconds,
+        "background_tasks": TASK_SUPERVISOR.active_count,
+        "background_task_failures": TASK_SUPERVISOR.failure_count,
+        "last_background_failure_type": TASK_SUPERVISOR.last_failure_type,
     }
     return JSONResponse(status_code=200 if ready else 503, content=payload)
 
@@ -15688,7 +15707,7 @@ async def startup():
         time.perf_counter() - phase_started_at,
     )
     CLEANUP_TASK = TASK_SUPERVISOR.create_task(
-        cleanup_loop(),
+        supervised_cleanup_loop(),
         name="cleanup-loop",
     )
 
