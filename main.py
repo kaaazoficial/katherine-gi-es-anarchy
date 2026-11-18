@@ -11011,22 +11011,9 @@ async def _handle_command_impl(event: dict, source: str):
         if (
             has_deterministic_fallback
             and ai_result.get("kind") == "answer"
-            and provider_failed
         ):
-            logging.warning(
-                "[NEXUS] Proveedor IA no disponible; se usa respaldo explícito: %s",
-                fallback_command.split(maxsplit=1)[0],
-            )
-            await execute_ai_tool(event, source, session_key, fallback_command)
-            return
-        if (
-            has_deterministic_fallback
-            and ai_result.get("kind") == "answer"
-            and not provider_failed
-            and not str(ai_result.get("answer") or "").strip()
-        ):
-            logging.warning(
-                "[NEXUS] Respuesta vacía; se usa respaldo explícito: %s",
+            logging.info(
+                "[NEXUS] Acción explícita validada; se ejecuta comando determinista: %s",
                 fallback_command.split(maxsplit=1)[0],
             )
             await execute_ai_tool(event, source, session_key, fallback_command)
