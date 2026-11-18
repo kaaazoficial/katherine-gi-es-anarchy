@@ -102,6 +102,7 @@ def _command_help_sections(prefix: str):
             (False, f"• {prefix}inventario — Consulta tus artículos."),
             (False, f"• {prefix}historial — Consulta tus últimos movimientos."),
             (False, f"• {prefix}progreso — Consulta tu nivel, XP y logros."),
+            (False, f"• {prefix}rankingprogreso — Clasificación de experiencia de esta sala."),
             (False, f"• {prefix}misiones — Consulta tus misiones diarias."),
             (False, f"• {prefix}reclamar <misión> — Reclama una misión completada."),
 
