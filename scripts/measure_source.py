@@ -14,6 +14,7 @@ EXCLUDED_DIRECTORIES = {
     "venv",
     "__pycache__",
     "tests",
+    "docs",
     "scripts",
     "build",
     "dist",
