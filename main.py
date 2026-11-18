@@ -38,6 +38,7 @@ from katherine_settings import ChatSettingsStore
 from katherine_community_repository import CommunityRepository
 from katherine_economy import EconomyService, EconomyError, seed_default_store
 from katherine_polls import PollRepository, PollError, PollClosed
+from katherine_progression import ProgressionService
 from katherine_moderation import (
     AntiSpamSettings, bounded_expiry_keys, bounded_oldest_keys,
     derive_message_signals, evaluate_antispam, is_platform_bot_author,
@@ -374,6 +375,7 @@ def init_db():
     seed_default_store(ECONOMY)
     POLLS.close_expired()
     POLLS.purge_expired()
+    PROGRESSION.purge_expired_daily_state(keep_days=14)
 
 
 def record_user_and_chat_activity(
@@ -1248,6 +1250,10 @@ ECONOMY = EconomyService(
     max_purchase_quantity=99,
 )
 POLLS = PollRepository(db_session=lambda: db_session())
+PROGRESSION = ProgressionService(
+    db_session=lambda: db_session(),
+    timezone="America/Santiago",
+)
 USER_MESSAGE_ACTIVITY = defaultdict(deque)
 USER_SPAM_WARNED_UNTIL = {}
 metrics["api_latency_total_ms"] = 0.0
@@ -12410,6 +12416,7 @@ Uso: !enciclopedia <nombre>""",
 
         if choice == game["q"][2]:
             add_points(uid, 10)
+            PROGRESSION.record_action(uid, "trivia_correct")
             trivia.pop(game_key, None)
             answer = "¡Correcto! Ganaste 10 puntos."
 
@@ -12468,6 +12475,7 @@ Uso: !enciclopedia <nombre>""",
 
             if n == game["number"]:
                 add_points(uid, 15)
+                PROGRESSION.record_action(uid, "guess_win")
                 answer = f"¡Correcto! Era {n}. Ganaste 15 puntos."
                 number_games.pop(game_key, None)
 
@@ -12478,6 +12486,47 @@ Uso: !enciclopedia <nombre>""",
             else:
                 answer = "Es mayor." if n < game["number"] else "Es menor."
 
+        await send_message(thread, answer, source, reply)
+        return
+
+    # -----------------------------------------------------------------------
+    # PROGRESIÓN, MISIONES Y LOGROS
+    # -----------------------------------------------------------------------
+    if command == "!progreso":
+        snapshot = PROGRESSION.snapshot(uid)
+        achievements = ", ".join(snapshot.unlocked_achievements) or "Todavía no hay logros."
+        answer = (
+            f"PROGRESO DE {nickname}\n"
+            f"Nivel {snapshot.level} · {snapshot.xp} XP\n"
+            f"Progreso del nivel: {snapshot.current_level_xp}/{snapshot.next_level_xp} XP\n"
+            f"Acciones de hoy: {snapshot.total_actions_today}\n"
+            f"Logros: {achievements}"
+        )
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!misiones":
+        quests = PROGRESSION.daily_quests(uid)
+        rows = ["MISIONES DIARIAS"]
+        for quest in quests:
+            status = "reclamada" if quest.claimed else "completada" if quest.completed else "en progreso"
+            rows.append(
+                f"• {quest.title}: {quest.progress}/{quest.goal} · {status}\n"
+                f"  {quest.description} · +{quest.bonus_xp} XP · !reclamar {quest.quest_id}"
+            )
+        await send_message(thread, "\n".join(rows), source, reply)
+        return
+
+    if command == "!reclamar":
+        quest_id = args[0].casefold() if args else ""
+        try:
+            snapshot = PROGRESSION.claim_quest(uid, quest_id)
+            answer = (
+                f"✦ Misión reclamada. Ahora tienes {snapshot.xp} XP "
+                f"y estás en el nivel {snapshot.level}."
+            )
+        except ValueError as exc:
+            answer = str(exc)
         await send_message(thread, answer, source, reply)
         return
 
@@ -12578,6 +12627,7 @@ Uso: !enciclopedia <nombre>""",
             answer = f"Ya reclamaste tu recompensa diaria. Vuelve en {format_duration(remaining)}."
         else:
             add_points(uid, amount)
+            PROGRESSION.record_action(uid, "daily_claim")
             answer = (
                 f"🎁 Recompensa diaria: +{amount} puntos. "
                 f"Ahora tienes {(get_user(uid) or {}).get('points', 0)} puntos."
@@ -12591,6 +12641,7 @@ Uso: !enciclopedia <nombre>""",
             answer = f"Ya trabajaste recientemente. Vuelve en {format_duration(remaining)}."
         else:
             add_points(uid, amount)
+            PROGRESSION.record_action(uid, "work")
             answer = f"🛠️ Terminaste tu jornada y ganaste {amount} puntos."
         await send_message(thread, answer, source, reply)
         return
