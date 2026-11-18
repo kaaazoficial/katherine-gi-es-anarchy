@@ -32,6 +32,7 @@ from typing import Any
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urljoin, quote, urlparse, urlsplit, urlunsplit
 from katherine_boot import IMPORT_STARTED_AT
+from katherine_runtime import RuntimeLifecycle, RuntimePhase, TaskSupervisor
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
@@ -315,10 +316,18 @@ if not COMMUNITY_SECRET:
 
 @asynccontextmanager
 async def application_lifespan(application: FastAPI):
-    """Manage process-scoped resources with FastAPI's supported lifespan API."""
+    """Manage process resources and publish failures through the runtime state."""
     try:
         await startup()
         yield
+    except BaseException as exc:
+        # Record only the exception type: error messages may contain user data
+        # or provider payloads and must not become operational state.
+        try:
+            RUNTIME.mark_failed(exc)
+        except Exception:
+            logging.exception("[RUNTIME] No se pudo registrar el fallo del ciclo de vida.")
+        raise
     finally:
         await shutdown()
 
@@ -1410,6 +1419,8 @@ webhook_tasks: set[asyncio.Task] = set()
 MAX_WEBHOOK_BODY_BYTES = 1_048_576
 MAX_WEBHOOK_BACKGROUND_TASKS = 100
 CLEANUP_TASK: asyncio.Task | None = None
+RUNTIME = RuntimeLifecycle()
+TASK_SUPERVISOR = TaskSupervisor(max_tasks=64)
 
 trivia = {}
 number_games = {}
@@ -15585,6 +15596,20 @@ async def health_check():
         "bot": "Katherine"
     }
 
+@app.get("/ready")
+async def readiness_check():
+    """Readiness is distinct from liveness so deploy monitors stay compatible."""
+    snapshot = RUNTIME.snapshot()
+    ready = snapshot.is_ready and HTTP_CLIENT is not None and not HTTP_CLIENT.is_closed
+    payload = {
+        "ok": ready,
+        "bot": "Katheryne",
+        "phase": snapshot.phase.value,
+        "cycle": snapshot.cycle,
+        "startup_seconds": snapshot.startup_seconds,
+    }
+    return JSONResponse(status_code=200 if ready else 503, content=payload)
+
 
 @app.get("/metrics", include_in_schema=False)
 async def prometheus_metrics_endpoint(request: Request):
@@ -15628,6 +15653,7 @@ async def health_head():
 # ---------------------------------------------------------------------------
 async def startup():
     global HTTP_CLIENT, CLEANUP_TASK
+    RUNTIME.begin_startup()
     startup_started_at = time.perf_counter()
     logging.info(
         "[STARTUP_TIMING] python_import_to_lifespan=%.3fs",
@@ -15657,7 +15683,10 @@ async def startup():
         "[STARTUP_TIMING] cleanup_inicial=%.3fs",
         time.perf_counter() - phase_started_at,
     )
-    CLEANUP_TASK = asyncio.create_task(cleanup_loop())
+    CLEANUP_TASK = TASK_SUPERVISOR.create_task(
+        cleanup_loop(),
+        name="cleanup-loop",
+    )
 
     logging.info("SQLite activo en %s", DB_PATH)
     DJ_MUSIC_DIR.mkdir(parents=True, exist_ok=True)
@@ -15728,22 +15757,40 @@ async def startup():
         "[STARTUP_TIMING] startup_preparacion=%.3fs",
         time.perf_counter() - startup_started_at,
     )
+    snapshot = RUNTIME.mark_ready()
+    logging.info(
+        "[RUNTIME] fase=%s ciclo=%s startup=%.3fs tareas_supervisadas=%s",
+        snapshot.phase.value,
+        snapshot.cycle,
+        snapshot.startup_seconds or 0.0,
+        TASK_SUPERVISOR.active_count,
+    )
 
 
 async def shutdown():
     global HTTP_CLIENT, CLEANUP_TASK
+    RUNTIME.begin_shutdown()
     for thread_id in list(DJ_ROOMS):
         await stop_dj_room(thread_id, request_leave=False)
     if CLEANUP_TASK is not None:
-        CLEANUP_TASK.cancel()
-        try:
-            await CLEANUP_TASK
-        except asyncio.CancelledError:
-            pass
+        report = await TASK_SUPERVISOR.cancel_all(timeout=5.0)
+        logging.info(
+            "[RUNTIME] tareas_canceladas=%s expiradas=%s restantes=%s",
+            report.cancelled,
+            report.timed_out,
+            report.remaining,
+        )
         CLEANUP_TASK = None
     if HTTP_CLIENT is not None:
         await HTTP_CLIENT.aclose()
         HTTP_CLIENT = None
+    snapshot = RUNTIME.mark_stopped()
+    logging.info(
+        "[RUNTIME] fase=%s ciclo=%s fallos=%s",
+        snapshot.phase.value,
+        snapshot.cycle,
+        snapshot.failure_count,
+    )
 
 
 if __name__ == "__main__":
