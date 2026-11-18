@@ -36,6 +36,8 @@ on:
     paths:
       - "main.py"
       - "katherine_runtime.py"
+      - "katherine_cache.py"
+      - "katherine_game_client.py"
       - "katherine_identity.py"
       - "katherine_language.py"
       - "requirements.txt"
