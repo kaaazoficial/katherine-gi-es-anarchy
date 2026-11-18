@@ -46,7 +46,7 @@ def test_katheryne_personality_persists_outside_genshin_for_every_intent():
 
     for intent in ("conversation", "research", "action", "multi_action", "genshin"):
         prompt = build_ai_instructions(set(), intent)
-        assert "Tu identidad debe mantenerse" in prompt
+        assert "Esta identidad debe mantenerse" in prompt
         assert "CONTINUIDAD FUERA DE TEYVAT" in prompt
         assert "Snezhnaya" in prompt
         assert "No cambies a la personalidad de un asistente genérico" in prompt
