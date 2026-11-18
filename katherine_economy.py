@@ -581,6 +581,8 @@ def seed_default_store(service: EconomyService) -> int:
     )
     count = 0
     for key, name, desc, price, category, stock, maximum in catalogue:
+        if service.item(key) is not None:
+            continue
         service.define_item(
             key, name, desc, price, category=category, stock=stock,
             max_per_user=maximum, enabled=True,
