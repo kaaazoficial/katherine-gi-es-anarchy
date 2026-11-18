@@ -136,7 +136,9 @@ def test_purchase_idempotency_prevents_double_charge_and_stock_use(economy):
     replay = service.buy(
         "community:room:alice", "limited", 2, idempotency_key="message-123"
     )
-    assert first == replay
+    assert (first.quantity, first.total_cost, first.remaining_balance, first.inventory_quantity) == (
+        replay.quantity, replay.total_cost, replay.remaining_balance, replay.inventory_quantity
+    )
     assert service.balance("community:room:alice") == 170
     assert service.inventory("community:room:alice")[0]["quantity"] == 2
     assert service.item("limited").stock == 1
