@@ -181,10 +181,10 @@ def should_execute_deterministic_fallback(
     text = _normalize(raw)
     if not text:
         return False
-    # When the provider is unavailable, retain the deterministic fallback.
-    # The caller still validates the command and the original handler checks
-    # permissions, while the interpreter below filters generic Teyvat queries.
-    if provider_failed:
+    is_assistant_fallback = invocation.casefold().startswith("asistente ")
+    # A provider failure permits a real deterministic command, but not a
+    # generic assistant echo. Explicit actions may still override that echo.
+    if provider_failed and not is_assistant_fallback:
         return True
     explicit_starters = (
         "ayuda", "comandos disponibles", "que puedes hacer", "que sabes hacer",
