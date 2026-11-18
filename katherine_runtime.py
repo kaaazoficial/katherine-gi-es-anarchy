@@ -15,7 +15,7 @@ from enum import Enum
 from typing import Any, ClassVar, TypeVar
 
 _T = TypeVar("_T")
-_TASK_NAME = re.compile(r"[A-Za-z0-9_.:-]{1,64}\\Z")
+_TASK_NAME = re.compile(r"[A-Za-z0-9_.:-]{1,64}\Z")
 
 
 class RuntimePhase(str, Enum):
@@ -59,7 +59,7 @@ class RuntimeLifecycle:
     """Thread-safe state machine for the process startup and shutdown lifecycle."""
 
     _ALLOWED: ClassVar[dict[RuntimePhase, frozenset[RuntimePhase]]] = {
-        RuntimePhase.NEW: frozenset({RuntimePhase.STARTING}),
+        RuntimePhase.NEW: frozenset({RuntimePhase.STARTING, RuntimePhase.STOPPING}),
         RuntimePhase.STARTING: frozenset({
             RuntimePhase.READY,
             RuntimePhase.DEGRADED,
@@ -154,6 +154,8 @@ class RuntimeLifecycle:
 
     def mark_stopped(self) -> RuntimeSnapshot:
         with self._lock:
+            if self._phase is RuntimePhase.STOPPED:
+                return self._snapshot_locked(self._clock())
             self._transition(RuntimePhase.STOPPED)
             self._stopped_at = self._last_transition_at
             return self._snapshot_locked(self._last_transition_at)
