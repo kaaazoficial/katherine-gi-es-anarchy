@@ -34,9 +34,12 @@ from urllib.parse import parse_qs, urljoin, quote, urlparse, urlsplit, urlunspli
 from katherine_boot import IMPORT_STARTED_AT
 from katherine_runtime import RuntimeLifecycle, RuntimePhase, TaskSupervisor
 from katherine_game_client import GameAPIClient
-from katherine_moderation import AntiSpamService
 from katherine_settings import ChatSettingsStore
-from katherine_moderation import AntiSpamService
+from katherine_moderation import (
+    AntiSpamSettings, bounded_expiry_keys, bounded_oldest_keys,
+    derive_message_signals, evaluate_antispam, is_platform_bot_author,
+    prune_activity_history,
+)
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
@@ -766,13 +769,76 @@ MAX_ANTISPAM_TRACKED_USERS = 5000
 
 
 def prune_antispam_tracking(now: float | None = None) -> None:
-    """Prune ephemeral moderation counters without retaining message content."""
-    ANTI_SPAM.prune(now=now)
+    """Prune timestamp and cooldown state without retaining message bodies."""
+    current = time.time() if now is None else float(now)
+    cutoff = current - 300
+    for key, history in tuple(USER_MESSAGE_ACTIVITY.items()):
+        prune_activity_history(history, cutoff=cutoff)
+        if not history:
+            USER_MESSAGE_ACTIVITY.pop(key, None)
+    if len(USER_MESSAGE_ACTIVITY) > MAX_ANTISPAM_TRACKED_USERS:
+        excess = len(USER_MESSAGE_ACTIVITY) - MAX_ANTISPAM_TRACKED_USERS
+        for key in bounded_oldest_keys(USER_MESSAGE_ACTIVITY, excess):
+            USER_MESSAGE_ACTIVITY.pop(key, None)
+    for key, expiry in tuple(USER_SPAM_WARNED_UNTIL.items()):
+        if expiry <= current:
+            USER_SPAM_WARNED_UNTIL.pop(key, None)
+    if len(USER_SPAM_WARNED_UNTIL) > MAX_ANTISPAM_TRACKED_USERS:
+        excess = len(USER_SPAM_WARNED_UNTIL) - MAX_ANTISPAM_TRACKED_USERS
+        for key in bounded_expiry_keys(USER_SPAM_WARNED_UNTIL, excess):
+            USER_SPAM_WARNED_UNTIL.pop(key, None)
 
 
 def check_antispam_message(event: dict, source: str):
-    """Compatibility wrapper for the isolated moderation service."""
-    return ANTI_SPAM.check(event, source)
+    """Apply isolated moderation policy to one community message."""
+    if source != "community":
+        return False, None
+    thread_id = str(event.get("threadId") or "")
+    message = event.get("message") or {}
+    if not isinstance(message, dict):
+        return False, None
+    author = message.get("author") or {}
+    if not isinstance(author, dict):
+        return False, None
+    uid = str(author.get("uid") or author.get("userId") or "")
+    nickname = str(author.get("nickname") or author.get("name") or "Usuario")[:80]
+    if (
+        not thread_id or not uid or is_admin_uid(uid)
+        or uid == str((BOT_IDENTITIES.get(source) or {}).get("uid") or "")
+        or is_platform_bot_author(author)
+    ):
+        return False, None
+    signals = derive_message_signals(message.get("content"), message.get("mentions"))
+    if not signals.normalized_content:
+        return False, None
+    config = AntiSpamSettings(**anti_spam_configuration(thread_id))
+    if not config.enabled:
+        return False, None
+    now = time.time()
+    key = (thread_id, uid)
+    if key not in USER_MESSAGE_ACTIVITY and len(USER_MESSAGE_ACTIVITY) >= MAX_ANTISPAM_TRACKED_USERS:
+        prune_antispam_tracking(now)
+    activity = USER_MESSAGE_ACTIVITY[key]
+    prune_activity_history(activity, cutoff=now - config.window_seconds)
+    activity.append((now, signals.content_digest))
+    repeated = sum(1 for _, digest in activity if digest == signals.content_digest)
+    decision = evaluate_antispam(
+        settings=config, message_count=len(activity), repeated_count=repeated,
+        link_count=signals.link_count, mention_count=signals.mention_count,
+    )
+    if not decision.blocked:
+        return False, None
+    warn_key = f"{thread_id}:{uid}"
+    if USER_SPAM_WARNED_UNTIL.get(warn_key, 0) > now:
+        return True, None
+    USER_SPAM_WARNED_UNTIL[warn_key] = now + 60
+    warning_id = add_moderation_warning(
+        thread_id, scoped_uid(f"community:{thread_id}", uid), nickname,
+        "Katheryne", "Katheryne", decision.reason, automatic=True,
+    )
+    metrics["antispam_blocked"] += 1
+    logging.warning("[MODERACION] Antispam automático | advertencia=%s", warning_id)
+    return True, {"warning_id": warning_id, "nickname": nickname}
 
 
 def get_wish_state(uid: str) -> dict:
@@ -1251,19 +1317,10 @@ IA_ALLOWED_LICENSES = {
 
 # Contadores del proceso actual. Se reinician cuando Render reinicia el servicio.
 metrics = defaultdict(int)
-ANTI_SPAM = AntiSpamService(
-    get_configuration=anti_spam_configuration,
-    is_admin=is_admin_uid,
-    identity_getter=lambda source: BOT_IDENTITIES.get(source) or {},
-    scope_uid=scoped_uid,
-    create_warning=add_moderation_warning,
-    metrics=metrics,
-    max_tracked_users=MAX_ANTISPAM_TRACKED_USERS,
-)
-USER_MESSAGE_ACTIVITY = ANTI_SPAM.activity
-USER_SPAM_WARNED_UNTIL = ANTI_SPAM.warned_until
 CHAT_SETTINGS = ChatSettingsStore(db_session=db_session, metrics=metrics)
 CHAT_SETTING_CACHE = CHAT_SETTINGS.cache
+USER_MESSAGE_ACTIVITY = defaultdict(deque)
+USER_SPAM_WARNED_UNTIL = {}
 ANTI_SPAM = AntiSpamService(
     get_configuration=anti_spam_configuration,
     is_admin=is_admin_uid,
