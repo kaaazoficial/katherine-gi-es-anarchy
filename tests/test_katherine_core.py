@@ -40,6 +40,10 @@ def test_database_initializes_expected_core_tables(database):
         "economy_inventory",
         "community_polls",
         "community_poll_votes",
+        "community_progress",
+        "community_daily_actions",
+        "community_quest_claims",
+        "community_achievements",
     }.issubset(names)
 
 
