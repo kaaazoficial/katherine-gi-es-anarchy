@@ -15,10 +15,13 @@ Katheryne utiliza una sola identidad: el bot comunitario. Configura `COMMUNITY_B
 - `katherine_research.py`: búsqueda y preparación de fuentes públicas.
 - `katherine_link_analysis.py`, `katherine_images.py`, `katherine_utilities.py`: inspección automática de enlaces, validación de imágenes y cálculo seguro.
 - `katherine_config.py`, `katherine_matching.py`, `katherine_metrics.py`: configuración, coincidencias y métricas.
+- `katherine_economy.py`: monedero transaccional, libro mayor, transferencias, tienda e inventario.
+- `katherine_polls.py`: encuestas persistentes por sala, votos anónimos y caducidad automática.
+- `katherine_progression.py`: experiencia, niveles, misiones diarias y logros con límites contra farmeo.
 - `tests/`: pruebas unitarias y de regresión.
 
 ## Privacidad
-Katheryne no crea memoria personal permanente ni almacena conversaciones como historial a largo plazo. El contexto de IA es temporal y en memoria; no se recopilan mensajes de sala para resúmenes ni se registran preguntas y respuestas de IA. Los registros operativos deben evitar secretos y minimizar datos personales.
+Katheryne no crea memoria personal permanente ni almacena conversaciones como historial a largo plazo. El contexto de IA es temporal y en memoria; no se recopilan mensajes de sala para resúmenes ni se registran preguntas y respuestas de IA. Los registros operativos deben evitar secretos y minimizar datos personales. Las encuestas se eliminan tras su cierre y un periodo de gracia de 24 horas; los votos anónimos almacenan un hash del votante. Los contadores de misiones se purgan tras 14 días; el progreso XP es estado de juego, no memoria conversacional.
 
 ## Desarrollo y pruebas
 
