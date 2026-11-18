@@ -168,7 +168,7 @@ def should_execute_deterministic_fallback(
     speculative command inferred from broad words such as "what is".
     """
     invocation = re.sub(r"\s+", " ", str(fallback_command or "")).strip()
-    if not invocation or invocation.casefold().startswith("asistente "):
+    if not invocation:
         return False
     raw = re.sub(r"\s+", " ", str(request_text or "")).strip()
     addressed = re.match(
