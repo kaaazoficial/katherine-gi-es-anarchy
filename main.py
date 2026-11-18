@@ -35,6 +35,7 @@ from katherine_boot import IMPORT_STARTED_AT
 from katherine_runtime import RuntimeLifecycle, RuntimePhase, TaskSupervisor
 from katherine_game_client import GameAPIClient
 from katherine_moderation import AntiSpamService
+from katherine_moderation import AntiSpamService
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
@@ -1332,6 +1333,17 @@ IA_ALLOWED_LICENSES = {
 
 # Contadores del proceso actual. Se reinician cuando Render reinicia el servicio.
 metrics = defaultdict(int)
+ANTI_SPAM = AntiSpamService(
+    get_configuration=anti_spam_configuration,
+    is_admin=is_admin_uid,
+    identity_getter=lambda source: BOT_IDENTITIES.get(source) or {},
+    scope_uid=scoped_uid,
+    create_warning=add_moderation_warning,
+    metrics=metrics,
+    max_tracked_users=MAX_ANTISPAM_TRACKED_USERS,
+)
+USER_MESSAGE_ACTIVITY = ANTI_SPAM.activity
+USER_SPAM_WARNED_UNTIL = ANTI_SPAM.warned_until
 ANTI_SPAM = AntiSpamService(
     get_configuration=anti_spam_configuration,
     is_admin=is_admin_uid,
