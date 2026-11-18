@@ -308,6 +308,24 @@ class ProgressionService:
             ))
         return results
 
+    def purge_inactive_progress(self, *, retention_days: int = 90) -> int:
+        """Expire long-idle XP and achievements instead of building a permanent user memory."""
+        days = max(30, min(365, int(retention_days)))
+        cutoff = float(self.clock()) - days * 86400
+        with self.db_session() as db:
+            db.execute("BEGIN IMMEDIATE")
+            inactive = [
+                str(row["uid"])
+                for row in db.execute(
+                    "SELECT uid FROM community_progress WHERE updated_at<?",
+                    (cutoff,),
+                ).fetchall()
+            ]
+            for uid in inactive:
+                db.execute("DELETE FROM community_achievements WHERE uid=?", (uid,))
+                db.execute("DELETE FROM community_progress WHERE uid=?", (uid,))
+        return len(inactive)
+
     def purge_expired_daily_state(self, *, keep_days: int = 14) -> int:
         """Remove per-action quest counters and claims after a short retention window."""
         days = max(1, min(30, int(keep_days)))
