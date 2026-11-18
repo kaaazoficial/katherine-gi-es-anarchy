@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - "main.py"
+      - "katherine_runtime.py"
       - "katherine_identity.py"
       - "katherine_language.py"
       - "requirements.txt"
@@ -30,6 +31,7 @@ on:
       - main
     paths:
       - "main.py"
+      - "katherine_runtime.py"
       - "katherine_identity.py"
       - "katherine_language.py"
       - "requirements.txt"
