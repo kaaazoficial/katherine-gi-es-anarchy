@@ -245,6 +245,16 @@ def initialize_database(session_factory):
         )""")
         db.execute("""CREATE INDEX IF NOT EXISTS idx_economy_inventory_user
             ON economy_inventory(uid,updated_at DESC)""")
+        db.execute("""CREATE TABLE IF NOT EXISTS economy_equipped_items (
+            uid TEXT NOT NULL,
+            category TEXT NOT NULL,
+            item_key TEXT NOT NULL,
+            equipped_at REAL NOT NULL,
+            PRIMARY KEY(uid,category),
+            FOREIGN KEY(item_key) REFERENCES economy_store_items(item_key)
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_economy_equipped_user ON economy_equipped_items(uid)")
+
 
         # Polls are short-lived operational state, never a conversation archive.
         db.execute("""CREATE TABLE IF NOT EXISTS community_polls (
