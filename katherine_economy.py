@@ -404,19 +404,43 @@ class EconomyService:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def buy(self, uid: str, item_key: str, quantity: int = 1) -> PurchaseResult:
+    def buy(
+        self, uid: str, item_key: str, quantity: int = 1, *,
+        idempotency_key: str = "",
+    ) -> PurchaseResult:
         amount = _positive_int(quantity, maximum=self.max_purchase_quantity)
         key = str(item_key or "").strip().casefold()
         now = float(self.clock())
         with self.db_session() as db:
             db.execute("BEGIN IMMEDIATE")
             item_row = db.execute(
-                "SELECT * FROM economy_store_items WHERE item_key=? AND enabled=1",
+                "SELECT * FROM economy_store_items WHERE item_key=?",
                 (key,),
             ).fetchone()
             if item_row is None:
                 raise EconomyConflict("El artículo no está disponible.")
             item = self._item_from_row(item_row)
+            idem = f"purchase:{str(idempotency_key).strip()[:100]}" if idempotency_key else ""
+            previous = self._existing_idempotent(db, str(uid), idem) if idem else None
+            if previous is not None:
+                account = db.execute(
+                    "SELECT points FROM users WHERE uid=?", (str(uid),)
+                ).fetchone()
+                owned = db.execute(
+                    "SELECT quantity FROM economy_inventory WHERE uid=? AND item_key=?",
+                    (str(uid), key),
+                ).fetchone()
+                try:
+                    previous_quantity = int(previous.reference.rsplit(":", 1)[1])
+                except (ValueError, IndexError):
+                    previous_quantity = amount
+                return PurchaseResult(
+                    item, previous_quantity, -previous.delta,
+                    int(account["points"]) if account else previous.balance_after,
+                    int(owned["quantity"]) if owned else 0,
+                )
+            if not item.enabled:
+                raise EconomyConflict("El artículo no está disponible.")
             if amount > item.max_per_user:
                 raise EconomyInvalidAmount("La cantidad supera el límite por viajero.")
             stock = item.stock
@@ -459,7 +483,8 @@ class EconomyService:
             self._insert_ledger(
                 db, uid=str(uid), delta=-total, balance_after=remaining,
                 operation="purchase", reason=f"Compra: {item.name}",
-                reference=key,
+                reference=f"{key}:{amount}",
+                idempotency_key=idem,
             )
             current_owned = owned + amount
         return PurchaseResult(item, amount, total, remaining, current_owned)
