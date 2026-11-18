@@ -34,6 +34,13 @@ from urllib.parse import parse_qs, urljoin, quote, urlparse, urlsplit, urlunspli
 from katherine_boot import IMPORT_STARTED_AT
 from katherine_runtime import RuntimeLifecycle, RuntimePhase, TaskSupervisor
 from katherine_game_client import GameAPIClient
+from katherine_settings import ChatSettingsStore
+from katherine_community_repository import CommunityRepository
+from katherine_moderation import (
+    AntiSpamSettings, bounded_expiry_keys, bounded_oldest_keys,
+    derive_message_signals, evaluate_antispam, is_platform_bot_author,
+    prune_activity_history,
+)
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
@@ -365,59 +372,17 @@ def init_db():
 
 
 def record_user_and_chat_activity(
-    uid: str,
-    nickname: str,
-    thread_id: str,
-    *,
-    count_message: bool = True,
+    uid: str, nickname: str, thread_id: str, *, count_message: bool = True
 ) -> None:
-    """Persist user presence and chat activity in one short SQLite transaction."""
-    now = time.time()
-    day_key, hour = get_chat_activity_clock_bucket()
-    safe_uid = str(uid)
-    safe_nickname = str(nickname or "Viajero")[:80]
-    with db_session() as db:
-        db.execute(
-            """INSERT INTO users(uid,nickname,created_at,last_seen,message_count)
-               VALUES(?,?,?,?,?)
-               ON CONFLICT(uid) DO UPDATE SET
-               nickname=excluded.nickname,
-               last_seen=excluded.last_seen,
-               message_count=users.message_count + excluded.message_count""",
-            (safe_uid, safe_nickname, now, now, 1 if count_message else 0),
-        )
-        if thread_id:
-            db.execute(
-                """INSERT INTO chat_activity_daily(
-                       thread_id,uid,nickname,day_key,message_count
-                   ) VALUES(?,?,?,?,1)
-                   ON CONFLICT(thread_id,uid,day_key) DO UPDATE SET
-                   nickname=excluded.nickname,
-                   message_count=chat_activity_daily.message_count+1""",
-                (str(thread_id), safe_uid, safe_nickname, day_key),
-            )
-            db.execute(
-                """INSERT INTO chat_activity_hourly(
-                       thread_id,day_key,hour_of_day,message_count
-                   ) VALUES(?,?,?,1)
-                   ON CONFLICT(thread_id,day_key,hour_of_day) DO UPDATE SET
-                   message_count=chat_activity_hourly.message_count+1""",
-                (str(thread_id), day_key, hour),
-            )
+    """Compatibility wrapper for community activity persistence."""
+    COMMUNITY_REPOSITORY.record_user_and_chat_activity(
+        uid, nickname, thread_id, count_message=count_message
+    )
 
 
 def record_user(uid: str, nickname: str, count_message: bool = False):
     """Compatibility wrapper for non-message user updates."""
-    now = time.time()
-    with db_session() as db:
-        db.execute(
-            """INSERT INTO users(uid,nickname,created_at,last_seen,message_count)
-               VALUES(?,?,?,?,?)
-               ON CONFLICT(uid) DO UPDATE SET nickname=excluded.nickname,
-               last_seen=excluded.last_seen,
-               message_count=users.message_count + excluded.message_count""",
-            (uid, nickname[:80], now, now, 1 if count_message else 0),
-        )
+    return COMMUNITY_REPOSITORY.record_user(uid, nickname, count_message)
 
 
 def scoped_uid(scope_key: str, uid: str) -> str:
@@ -425,160 +390,38 @@ def scoped_uid(scope_key: str, uid: str) -> str:
 
 
 def get_user(uid: str):
-    with db_session() as db:
-        row = db.execute("SELECT * FROM users WHERE uid=?", (uid,)).fetchone()
-        return dict(row) if row else None
+    return COMMUNITY_REPOSITORY.get_user(uid)
 
 
 def get_user_profile(uid: str, viewer_uid: str) -> tuple[dict | None, int]:
-    """Read a profile and its viewer-relative affinity in one SQLite query."""
-    with db_session() as db:
-        row = db.execute(
-            """SELECT u.*, COALESCE(a.score,0) AS viewer_affinity
-               FROM users AS u
-               LEFT JOIN affinities AS a
-                 ON a.uid=? AND a.target_uid=u.uid
-               WHERE u.uid=?""",
-            (str(viewer_uid), str(uid)),
-        ).fetchone()
-    if row is None:
-        return None, 0
-    profile = dict(row)
-    affinity = int(profile.pop("viewer_affinity", 0) or 0)
-    return profile, affinity
+    return COMMUNITY_REPOSITORY.get_user_profile(uid, viewer_uid)
 
 
 def find_user_profile_by_nickname(
     nickname: str, scope_key: str | None, viewer_uid: str
 ) -> tuple[dict | None, int]:
-    """Resolve a local nickname and its affinity without a second DB session."""
-    params: list[Any] = [str(viewer_uid), str(nickname).lstrip("@")]
-    sql = (
-        "SELECT u.*, COALESCE(a.score,0) AS viewer_affinity "
-        "FROM users AS u LEFT JOIN affinities AS a "
-        "ON a.uid=? AND a.target_uid=u.uid "
-        "WHERE lower(u.nickname)=lower(?)"
+    return COMMUNITY_REPOSITORY.find_user_profile_by_nickname(
+        nickname, scope_key, viewer_uid
     )
-    if scope_key:
-        prefix = str(scope_key) + ":"
-        sql += " AND substr(u.uid,1,?)=?"
-        params.extend([len(prefix), prefix])
-    sql += " ORDER BY u.last_seen DESC LIMIT 1"
-    with db_session() as db:
-        row = db.execute(sql, tuple(params)).fetchone()
-    if row is None:
-        return None, 0
-    profile = dict(row)
-    affinity = int(profile.pop("viewer_affinity", 0) or 0)
-    return profile, affinity
 
 
 def find_user_by_nickname(nickname: str, scope_key: str | None = None):
-    with db_session() as db:
-        sql = "SELECT * FROM users WHERE lower(nickname)=lower(?)"
-        params = [nickname.lstrip("@")]
-        if scope_key:
-            prefix = scope_key + ":"
-            sql += " AND substr(uid,1,?)=?"
-            params.extend([len(prefix), prefix])
-        sql += " ORDER BY last_seen DESC LIMIT 1"
-        row = db.execute(sql, tuple(params)).fetchone()
-        return dict(row) if row else None
+    return COMMUNITY_REPOSITORY.find_user_by_nickname(nickname, scope_key)
 
 
 def get_chat_setting(thread_id: str, key: str, default: str = "") -> str:
-    cache_key = (str(thread_id), str(key))
-    now = time.monotonic()
-    cached = CHAT_SETTING_CACHE.get(cache_key)
-    if cached is not None and cached[0] > now:
-        metrics["chat_setting_cache_hits"] += 1
-        return str(cached[1]) if cached[1] is not None else str(default)
-
-    metrics["chat_setting_cache_misses"] += 1
-    with db_session() as db:
-        row = db.execute(
-            "SELECT setting_value FROM chat_settings WHERE thread_id=? AND setting_key=?",
-            cache_key
-        ).fetchone()
-    stored_value = str(row["setting_value"]) if row else None
-    if cache_key not in CHAT_SETTING_CACHE and len(CHAT_SETTING_CACHE) >= CHAT_SETTING_CACHE_MAX_ENTRIES:
-        CHAT_SETTING_CACHE.pop(next(iter(CHAT_SETTING_CACHE)), None)
-    CHAT_SETTING_CACHE[cache_key] = (now + CHAT_SETTING_CACHE_TTL, stored_value)
-    return stored_value if stored_value is not None else str(default)
+    """Compatibility wrapper backed by the room settings repository."""
+    return CHAT_SETTINGS.get(thread_id, key, default)
 
 
 def get_chat_settings(thread_id: str, defaults: dict[str, str]) -> dict[str, str]:
-    """Read a group of room settings with one SQLite session for cache misses."""
-    room_id = str(thread_id)
-    normalized_defaults = {
-        str(key): str(default) for key, default in defaults.items()
-    }
-    if not normalized_defaults:
-        return {}
-
-    now = time.monotonic()
-    values: dict[str, str] = {}
-    missing: list[str] = []
-    for key, default in normalized_defaults.items():
-        cache_key = (room_id, key)
-        cached = CHAT_SETTING_CACHE.get(cache_key)
-        if cached is not None and cached[0] > now:
-            metrics["chat_setting_cache_hits"] += 1
-            values[key] = str(cached[1]) if cached[1] is not None else default
-        else:
-            metrics["chat_setting_cache_misses"] += 1
-            missing.append(key)
-
-    if not missing:
-        return values
-
-    stored_values: dict[str, str] = {}
-    # Respect SQLite's conservative bind-variable limit while keeping ordinary
-    # room-configuration reads to a single indexed query.
-    for offset in range(0, len(missing), 500):
-        chunk = missing[offset:offset + 500]
-        placeholders = ",".join("?" for _ in chunk)
-        with db_session() as db:
-            rows = db.execute(
-                "SELECT setting_key,setting_value FROM chat_settings "
-                f"WHERE thread_id=? AND setting_key IN ({placeholders})",
-                (room_id, *chunk),
-            ).fetchall()
-        stored_values.update({
-            str(row["setting_key"]): str(row["setting_value"])
-            for row in rows
-        })
-
-    for key in missing:
-        cache_key = (room_id, key)
-        stored_value = stored_values.get(key)
-        if (
-            cache_key not in CHAT_SETTING_CACHE
-            and len(CHAT_SETTING_CACHE) >= CHAT_SETTING_CACHE_MAX_ENTRIES
-        ):
-            CHAT_SETTING_CACHE.pop(next(iter(CHAT_SETTING_CACHE)), None)
-        CHAT_SETTING_CACHE[cache_key] = (now + CHAT_SETTING_CACHE_TTL, stored_value)
-        values[key] = (
-            stored_value if stored_value is not None else normalized_defaults[key]
-        )
-    return values
+    """Read multiple room settings through the dedicated repository."""
+    return CHAT_SETTINGS.get_many(thread_id, defaults)
 
 
 def set_chat_setting(thread_id: str, key: str, value: str):
-    cache_key = (str(thread_id), str(key))
-    stored_value = str(value)
-    with db_session() as db:
-        db.execute(
-            """INSERT INTO chat_settings(thread_id,setting_key,setting_value,updated_at)
-               VALUES(?,?,?,?)
-               ON CONFLICT(thread_id,setting_key) DO UPDATE SET
-               setting_value=excluded.setting_value, updated_at=excluded.updated_at""",
-            (cache_key[0], cache_key[1], stored_value, time.time())
-        )
-    CHAT_SETTING_CACHE[cache_key] = (
-        time.monotonic() + CHAT_SETTING_CACHE_TTL,
-        stored_value,
-    )
+    """Compatibility wrapper for room setting updates."""
+    return CHAT_SETTINGS.set(thread_id, key, value)
 
 
 def is_admin_uid(uid: str) -> bool:
@@ -843,86 +686,72 @@ MAX_ANTISPAM_TRACKED_USERS = 5000
 
 
 def prune_antispam_tracking(now: float | None = None) -> None:
-    """Bound per-user in-memory anti-spam state without persisting message content."""
+    """Prune timestamp and cooldown state without retaining message bodies."""
     current = time.time() if now is None else float(now)
-    for key, history in list(USER_MESSAGE_ACTIVITY.items()):
-        if not history or current - history[-1][0] > 300:
+    cutoff = current - 300
+    for key, history in tuple(USER_MESSAGE_ACTIVITY.items()):
+        prune_activity_history(history, cutoff=cutoff)
+        if not history:
             USER_MESSAGE_ACTIVITY.pop(key, None)
     if len(USER_MESSAGE_ACTIVITY) >= MAX_ANTISPAM_TRACKED_USERS:
         excess = len(USER_MESSAGE_ACTIVITY) - MAX_ANTISPAM_TRACKED_USERS + 1
-        oldest = sorted(
-            USER_MESSAGE_ACTIVITY,
-            key=lambda key: USER_MESSAGE_ACTIVITY[key][-1][0]
-            if USER_MESSAGE_ACTIVITY[key] else 0,
-        )[:excess]
-        for key in oldest:
+        for key in bounded_oldest_keys(USER_MESSAGE_ACTIVITY, excess):
             USER_MESSAGE_ACTIVITY.pop(key, None)
-
-    for key, expiry in list(USER_SPAM_WARNED_UNTIL.items()):
+    for key, expiry in tuple(USER_SPAM_WARNED_UNTIL.items()):
         if expiry <= current:
             USER_SPAM_WARNED_UNTIL.pop(key, None)
     if len(USER_SPAM_WARNED_UNTIL) > MAX_ANTISPAM_TRACKED_USERS:
         excess = len(USER_SPAM_WARNED_UNTIL) - MAX_ANTISPAM_TRACKED_USERS
-        for key, _ in sorted(USER_SPAM_WARNED_UNTIL.items(), key=lambda item: item[1])[:excess]:
+        for key in bounded_expiry_keys(USER_SPAM_WARNED_UNTIL, excess):
             USER_SPAM_WARNED_UNTIL.pop(key, None)
 
 
 def check_antispam_message(event: dict, source: str):
+    """Apply isolated moderation policy to one community message."""
     if source != "community":
         return False, None
     thread_id = str(event.get("threadId") or "")
     message = event.get("message") or {}
+    if not isinstance(message, dict):
+        return False, None
     author = message.get("author") or {}
+    if not isinstance(author, dict):
+        return False, None
     uid = str(author.get("uid") or author.get("userId") or "")
-    nickname = str(author.get("nickname") or author.get("name") or "Usuario")
-    content = re.sub(r"\s+", " ", str(message.get("content") or "")).strip().casefold()
-    identity = BOT_IDENTITIES.get(source) or {}
+    nickname = str(author.get("nickname") or author.get("name") or "Usuario")[:80]
     if (
-        not thread_id or not uid or not content or is_admin_uid(uid)
-        or uid == str(identity.get("uid") or "")
-        or any(
-            str(author.get(key, "")).lower() in ("true", "1", "yes")
-            for key in ("bot", "isBot", "is_bot")
-        )
+        not thread_id or not uid or is_admin_uid(uid)
+        or uid == str((BOT_IDENTITIES.get(source) or {}).get("uid") or "")
+        or is_platform_bot_author(author)
     ):
         return False, None
-
-    config = anti_spam_configuration(thread_id)
-    if not config["enabled"]:
+    signals = derive_message_signals(message.get("content"), message.get("mentions"))
+    if not signals.normalized_content:
         return False, None
-
+    config = AntiSpamSettings(**anti_spam_configuration(thread_id))
+    if not config.enabled:
+        return False, None
     now = time.time()
     key = (thread_id, uid)
     if key not in USER_MESSAGE_ACTIVITY and len(USER_MESSAGE_ACTIVITY) >= MAX_ANTISPAM_TRACKED_USERS:
         prune_antispam_tracking(now)
     activity = USER_MESSAGE_ACTIVITY[key]
-    cutoff = now - config["window_seconds"]
-    while activity and activity[0][0] < cutoff:
-        activity.popleft()
-    digest = hashlib.sha256(content.encode("utf-8", errors="ignore")).hexdigest()
-    activity.append((now, digest))
-    repeated = sum(1 for _, item_digest in activity if item_digest == digest)
-    link_count = len(re.findall(r"(?:https?://|www\.)\S+", content, flags=re.I))
-    mention_count = len(message.get("mentions") or [])
-    reason = ""
-    if link_count > config["max_links"]:
-        reason = f"Exceso de enlaces en un mensaje ({link_count})."
-    elif mention_count > config["max_mentions"]:
-        reason = f"Menciones masivas en un mensaje ({mention_count})."
-    elif len(activity) >= config["max_messages"] or repeated >= config["repeat_limit"]:
-        reason = "Antispam automático: demasiados mensajes o contenido repetido."
-    if not reason:
+    prune_activity_history(activity, cutoff=now - config.window_seconds)
+    activity.append((now, signals.content_digest))
+    repeated = sum(1 for _, digest in activity if digest == signals.content_digest)
+    decision = evaluate_antispam(
+        settings=config, message_count=len(activity), repeated_count=repeated,
+        link_count=signals.link_count, mention_count=signals.mention_count,
+    )
+    if not decision.blocked:
         return False, None
-
     warn_key = f"{thread_id}:{uid}"
     if USER_SPAM_WARNED_UNTIL.get(warn_key, 0) > now:
         return True, None
     USER_SPAM_WARNED_UNTIL[warn_key] = now + 60
-    target_uid = scoped_uid(f"community:{thread_id}", uid)
     warning_id = add_moderation_warning(
-        thread_id, target_uid, nickname, "Katheryne", "Katheryne",
-        reason,
-        automatic=True
+        thread_id, scoped_uid(f"community:{thread_id}", uid), nickname,
+        "Katheryne", "Katheryne", decision.reason, automatic=True,
     )
     metrics["antispam_blocked"] += 1
     logging.warning("[MODERACION] Antispam automático | advertencia=%s", warning_id)
@@ -1125,9 +954,6 @@ cache: dict[str, tuple[float, Any]] = {}
 polls: dict[str, dict] = {}
 AUTO_REPLY_CHAT_COOLDOWN: dict[str, float] = {}
 AUTO_REPLY_USER_COOLDOWN: dict[tuple[str, str], float] = {}
-CHAT_SETTING_CACHE: dict[tuple[str, str], tuple[float, str | None]] = {}
-CHAT_SETTING_CACHE_TTL = 15.0
-CHAT_SETTING_CACHE_MAX_ENTRIES = 2048
 AUTO_REPLY_RULE_CACHE: dict[str, tuple[float, tuple[tuple[dict, Any], ...]]] = {}
 AUTO_REPLY_RULE_CACHE_TTL = 15.0
 AUTO_REPLY_RULE_CACHE_MAX_ENTRIES = 512
@@ -1318,8 +1144,6 @@ TTS_VOICE_OPTIONS = {
     "lucia": "es-AR-ElenaNeural",
     "carlos": "es-CO-GonzaloNeural"
 }
-USER_MESSAGE_ACTIVITY = defaultdict(deque)
-USER_SPAM_WARNED_UNTIL = {}
 DJ_MUSIC_DIR = Path(os.getenv("DJ_MUSIC_DIR", "music")).resolve()
 DJ_AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".oga", ".flac", ".m4a", ".aac", ".opus"}
 DJ_SEARCH_RESULTS: dict[str, dict] = {}
@@ -1410,6 +1234,14 @@ IA_ALLOWED_LICENSES = {
 
 # Contadores del proceso actual. Se reinician cuando Render reinicia el servicio.
 metrics = defaultdict(int)
+CHAT_SETTINGS = ChatSettingsStore(db_session=lambda: db_session(), metrics=metrics)
+CHAT_SETTING_CACHE = CHAT_SETTINGS.cache
+COMMUNITY_REPOSITORY = CommunityRepository(
+    db_session=lambda: db_session(),
+    activity_clock_bucket=lambda: get_chat_activity_clock_bucket(),
+)
+USER_MESSAGE_ACTIVITY = defaultdict(deque)
+USER_SPAM_WARNED_UNTIL = {}
 metrics["api_latency_total_ms"] = 0.0
 metrics["api_latency_last_ms"] = 0.0
 metrics["api_latency_max_ms"] = 0.0
