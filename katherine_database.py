@@ -204,3 +204,44 @@ def initialize_database(session_factory):
             day_key TEXT PRIMARY KEY,
             characters_used INTEGER NOT NULL DEFAULT 0
         )""")
+
+        # Economy ledger: append-only transactions over the existing scoped wallet.
+        db.execute("""CREATE TABLE IF NOT EXISTS economy_ledger (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT NOT NULL,
+            delta INTEGER NOT NULL,
+            balance_after INTEGER NOT NULL,
+            operation TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            reference TEXT NOT NULL DEFAULT '',
+            idempotency_key TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL
+        )""")
+        db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS uq_economy_ledger_idempotency
+            ON economy_ledger(uid,idempotency_key) WHERE idempotency_key<>''""")
+        db.execute("""CREATE INDEX IF NOT EXISTS idx_economy_ledger_user
+            ON economy_ledger(uid,id DESC)""")
+        db.execute("""CREATE TABLE IF NOT EXISTS economy_store_items (
+            item_key TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            price INTEGER NOT NULL CHECK(price>=0),
+            category TEXT NOT NULL DEFAULT 'general',
+            stock INTEGER CHECK(stock IS NULL OR stock>=0),
+            max_per_user INTEGER NOT NULL DEFAULT 99 CHECK(max_per_user>0),
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )""")
+        db.execute("""CREATE INDEX IF NOT EXISTS idx_economy_store_enabled
+            ON economy_store_items(enabled,category,name)""")
+        db.execute("""CREATE TABLE IF NOT EXISTS economy_inventory (
+            uid TEXT NOT NULL,
+            item_key TEXT NOT NULL,
+            quantity INTEGER NOT NULL CHECK(quantity>0),
+            updated_at REAL NOT NULL,
+            PRIMARY KEY(uid,item_key)
+        )""")
+        db.execute("""CREATE INDEX IF NOT EXISTS idx_economy_inventory_user
+            ON economy_inventory(uid,updated_at DESC)""")
+
