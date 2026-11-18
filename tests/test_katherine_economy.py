@@ -38,6 +38,10 @@ def economy(tmp_path):
             uid TEXT NOT NULL,item_key TEXT NOT NULL,quantity INTEGER NOT NULL,
             updated_at REAL NOT NULL,PRIMARY KEY(uid,item_key)
         );
+        CREATE TABLE economy_equipped_items(
+            uid TEXT NOT NULL,category TEXT NOT NULL,item_key TEXT NOT NULL,
+            equipped_at REAL NOT NULL,PRIMARY KEY(uid,category)
+        );
     """)
     db.executemany("INSERT INTO users(uid,nickname,points,last_seen) VALUES(?,?,?,?)", [
         ("community:room:alice", "Alice", 250, 1),
