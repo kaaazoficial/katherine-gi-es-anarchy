@@ -842,10 +842,14 @@ def claim_reward(uid: str, action: str, cooldown: int, low: int, high: int):
     return random.randint(low, high), 0
 
 
-def transfer_points(sender_uid: str, target_uid: str, amount: int) -> str:
+def transfer_points(
+    sender_uid: str, target_uid: str, amount: int, *, idempotency_key: str = ""
+) -> str:
     """Compatibility wrapper for a room-scoped, ledger-backed transfer."""
     try:
-        ECONOMY.transfer(sender_uid, target_uid, amount)
+        ECONOMY.transfer(
+            sender_uid, target_uid, amount, idempotency_key=idempotency_key
+        )
         return "ok"
     except EconomyError as exc:
         message = str(exc)
@@ -12571,7 +12575,10 @@ Uso: !enciclopedia <nombre>""",
         item_key = args[0].casefold() if args else ""
         try:
             quantity = int(args[1]) if len(args) > 1 else 1
-            purchase = ECONOMY.buy(uid, item_key, quantity)
+            purchase = ECONOMY.buy(
+                uid, item_key, quantity,
+                idempotency_key=str(message_id or ""),
+            )
             answer = (
                 f"Compra realizada: {purchase.quantity} × {purchase.item.name}. "
                 f"Total: {purchase.total_cost} puntos. "
@@ -12673,7 +12680,10 @@ Uso: !enciclopedia <nombre>""",
         elif amount > 10000:
             answer = "El límite por transferencia es de 10.000 puntos."
         else:
-            result = transfer_points(uid, target_uid, amount)
+            result = transfer_points(
+                uid, target_uid, amount,
+                idempotency_key=f"transfer:{message_id}" if message_id else "",
+            )
             if result == "ok":
                 answer = f"💸 Transferiste {amount} puntos a @{target_name}."
             elif result == "insufficient":
