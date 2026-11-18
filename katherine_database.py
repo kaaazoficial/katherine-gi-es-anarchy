@@ -245,3 +245,36 @@ def initialize_database(session_factory):
         db.execute("""CREATE INDEX IF NOT EXISTS idx_economy_inventory_user
             ON economy_inventory(uid,updated_at DESC)""")
 
+        # Polls are short-lived operational state, never a conversation archive.
+        db.execute("""CREATE TABLE IF NOT EXISTS community_polls (
+            poll_id TEXT PRIMARY KEY,
+            code TEXT NOT NULL,
+            source TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            question TEXT NOT NULL,
+            options_json TEXT NOT NULL,
+            creator_uid TEXT NOT NULL,
+            creator_name TEXT NOT NULL,
+            anonymous INTEGER NOT NULL DEFAULT 0,
+            closed INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL,
+            closes_at REAL NOT NULL,
+            expires_at REAL NOT NULL,
+            button_key TEXT NOT NULL UNIQUE
+        )""")
+        db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS uq_poll_code_room
+            ON community_polls(source,thread_id,code)""")
+        db.execute("""CREATE INDEX IF NOT EXISTS idx_community_polls_expiry
+            ON community_polls(expires_at,closed)""")
+        db.execute("""CREATE TABLE IF NOT EXISTS community_poll_votes (
+            poll_id TEXT NOT NULL,
+            voter_key TEXT NOT NULL,
+            option_index INTEGER NOT NULL,
+            created_at REAL NOT NULL,
+            PRIMARY KEY(poll_id,voter_key),
+            FOREIGN KEY(poll_id) REFERENCES community_polls(poll_id) ON DELETE CASCADE
+        )""")
+        db.execute("""CREATE INDEX IF NOT EXISTS idx_community_poll_votes_poll
+            ON community_poll_votes(poll_id,option_index)""")
+
+
