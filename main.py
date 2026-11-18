@@ -376,6 +376,8 @@ def init_db():
     POLLS.close_expired()
     POLLS.purge_expired()
     PROGRESSION.purge_expired_daily_state(keep_days=14)
+    PROGRESSION.purge_inactive_progress(retention_days=90)
+    ECONOMY.purge_expired_ledger(retention_days=90)
 
 
 def record_user_and_chat_activity(
@@ -1503,6 +1505,8 @@ def cleanup_expired_state():
         logging.exception("[PRIVACY] Falló la limpieza de retención; se reintentará.")
     try:
         PROGRESSION.purge_expired_daily_state(keep_days=14)
+        PROGRESSION.purge_inactive_progress(retention_days=90)
+        ECONOMY.purge_expired_ledger(retention_days=90)
         POLLS.close_expired(now=time.time())
         expired_polls = POLLS.purge_expired(now=time.time())
         if expired_polls["polls"]:
