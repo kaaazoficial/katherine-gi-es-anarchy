@@ -12493,6 +12493,22 @@ Uso: !enciclopedia <nombre>""",
     # -----------------------------------------------------------------------
     # PROGRESIÓN, MISIONES Y LOGROS
     # -----------------------------------------------------------------------
+    if command == "!rankingprogreso":
+        top = PROGRESSION.leaderboard(limit=10, scope_prefix=f"{scope_key}:")
+        if not top:
+            answer = "Todavía no hay viajeros en el ranking de experiencia."
+        else:
+            rows = ["RANKING DE EXPERIENCIA"]
+            for position, item in enumerate(top, 1):
+                profile = get_user(item.uid) or {}
+                rows.append(
+                    f"{position}. {profile.get('nickname') or 'Viajero'} "
+                    f"— nivel {item.level} · {item.xp} XP"
+                )
+            answer = "\n".join(rows)
+        await send_message(thread, answer, source, reply)
+        return
+
     if command == "!progreso":
         snapshot = PROGRESSION.snapshot(uid)
         achievements = ", ".join(snapshot.unlocked_achievements) or "Todavía no hay logros."
