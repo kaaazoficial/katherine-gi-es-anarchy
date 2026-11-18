@@ -24,44 +24,45 @@ def response_payload(result):
     ]}]}
 
 def test_katherine_personality_matches_guild_receptionist_identity():
-    from katherine_ai import resolve_community_faq
+    from katherine_ai import resolve_community_faq, build_ai_instructions
 
     greeting = resolve_community_faq("hola")
     identity = resolve_community_faq("¿quién eres?")
     assert "¡Ad astra abyssosque!" in greeting
-    assert "recepcionista" in identity.lower()
-    assert "Gremio de Aventureros" in identity
-    assert "marioneta biónica" in identity.lower()
-    assert "Snezhnaya" in identity
-    assert "Fatui" in identity and "Sandrone" in identity
-    assert "misiones, reclamaciones y expediciones" in identity
-    from katherine_ai import build_ai_instructions
+    assert identity.startswith("Soy Katheryne, recepcionista del Gremio de Aventureros.")
+    assert "Sandrone" not in identity
+    assert "Sinner" not in identity
+    assert "bot" not in identity.lower()
     prompt = build_ai_instructions(set(), "conversation")
     assert "ad astra abyssosque" in prompt.lower()
-    assert "misiones, reclamaciones y expediciones" in prompt
-    assert "Fatui" in prompt and "Sandrone" in prompt
-    assert "fue desarrollada por Sinner" in prompt
+    assert "marioneta biónica" in prompt.lower()
+    assert "Sandrone" in prompt and "Snezhnaya" in prompt
+    assert "no te presentes ni te describas como «bot»" in prompt
+    assert "fue desarrollada por Sinner" not in prompt
 
 
-def test_katherine_personality_persists_outside_genshin_for_every_intent():
+def test_katheryne_personality_persists_outside_genshin_for_every_intent():
     from katherine_ai import build_ai_instructions
 
     for intent in ("conversation", "research", "action", "multi_action", "genshin"):
         prompt = build_ai_instructions(set(), intent)
-        assert "Tu identidad se mantiene en TODAS tus conversaciones" in prompt
+        assert "Tu identidad debe mantenerse" in prompt
         assert "CONTINUIDAD FUERA DE TEYVAT" in prompt
         assert "Snezhnaya" in prompt
         assert "No cambies a la personalidad de un asistente genérico" in prompt
+        assert "no te presentes ni te describas como «bot»" in prompt
 
 
-def test_creator_faq_separates_katherine_lore_from_community_developer():
+def test_creator_faq_separates_katheryne_lore_from_community_implementation():
     from katherine_ai import resolve_community_faq
 
     answer = resolve_community_faq("¿Quién es tu creador?")
-    assert answer == "En el lore de Genshin Impact, Katheryne fue creada por Sandrone. Esta versión comunitaria del bot de Genshin Impact ES fue desarrollada por Sinner."
-    assert "Sandrone" in answer and "Sinner" in answer
-    assert resolve_community_faq("¿Quién creó a Katheryne?") == "Dentro del lore de Genshin Impact, Katheryne fue creada por Sandrone."
-    assert resolve_community_faq("¿Quién desarrolló el bot?") == "Esta versión comunitaria del bot de Genshin Impact ES fue desarrollada por Sinner."
+    assert "Sandrone me creó" in answer
+    assert "Sinner" not in answer
+    assert resolve_community_faq("¿Quién creó a Katheryne?").startswith("Sandrone me creó")
+    implementation = resolve_community_faq("¿Quién desarrolló el bot?")
+    assert implementation == "La implementación comunitaria de Katheryne fue desarrollada por Sinner."
+    assert "bot" not in implementation.lower()
 
 
 @pytest.mark.asyncio
@@ -771,12 +772,13 @@ async def test_genshin_question_can_still_use_teyvat_tool(monkeypatch):
 @pytest.mark.parametrize(
     ("question", "expected"),
     [
-        ("¿Quién es tu creador?", "En el lore de Genshin Impact, Katheryne fue creada por Sandrone. Esta versión comunitaria del bot de Genshin Impact ES fue desarrollada por Sinner."),
-        ("Katherine, ¿quién te creó?", "En el lore de Genshin Impact, Katheryne fue creada por Sandrone. Esta versión comunitaria del bot de Genshin Impact ES fue desarrollada por Sinner."),
-        ("¿Quién creó a Katheryne?", "Dentro del lore de Genshin Impact, Katheryne fue creada por Sandrone."),
-        ("¿Quién desarrolló el bot?", "Esta versión comunitaria del bot de Genshin Impact ES fue desarrollada por Sinner."),
-        ("¿Quién eres?", "Soy Katherine, la recepcionista del Gremio de Aventureros de la comunidad Genshin Impact ES. Dentro del lore de Teyvat, soy una marioneta biónica de Snezhnaya creada por Sandrone y vinculada a la tecnología de los Fatui. Esta versión comunitaria del bot fue desarrollada por Sinner para atender a los aventureros de Genshin Impact ES. Estoy aquí para escuchar tus consultas y atender tus misiones, reclamaciones y expediciones con paciencia y profesionalismo. ¡Ad astra abyssosque! También puedo orientarte en temas ajenos a Teyvat."),
-        ("Katherine, preséntate", "Soy Katherine, la recepcionista del Gremio de Aventureros de la comunidad Genshin Impact ES. Dentro del lore de Teyvat, soy una marioneta biónica de Snezhnaya creada por Sandrone y vinculada a la tecnología de los Fatui. Esta versión comunitaria del bot fue desarrollada por Sinner para atender a los aventureros de Genshin Impact ES. Estoy aquí para escuchar tus consultas y atender tus misiones, reclamaciones y expediciones con paciencia y profesionalismo. ¡Ad astra abyssosque! También puedo orientarte en temas ajenos a Teyvat."),
+        ("¿Quién es tu creador?", "Sandrone me creó en Snezhnaya. Soy una marioneta biónica y recepcionista del Gremio de Aventureros."),
+        ("Katherine, ¿quién te creó?", "Sandrone me creó en Snezhnaya. Soy una marioneta biónica y recepcionista del Gremio de Aventureros."),
+        ("¿Quién creó a Katheryne?", "Sandrone me creó en Snezhnaya. Soy una marioneta biónica y recepcionista del Gremio de Aventureros."),
+        ("¿Quién desarrolló el bot?", "La implementación comunitaria de Katheryne fue desarrollada por Sinner."),
+        ("¿Quién eres?", "Soy Katheryne, recepcionista del Gremio de Aventureros. Estoy aquí para orientarte y atender tus consultas. ¡Ad astra abyssosque!"),
+        ("¿Qué eres?", "Soy una marioneta biónica originaria de Snezhnaya, creada por Sandrone. Mi labor es recibir y orientar a los aventureros del Gremio."),
+        ("¿Eres un bot?", "Soy Katheryne, recepcionista del Gremio de Aventureros. En esta comunidad mi presencia funciona mediante una implementación conversacional; dentro de Teyvat soy una marioneta biónica creada por Sandrone."),
     ],
 )
 async def test_katherine_canonical_identity_facts(monkeypatch, question, expected):
@@ -803,13 +805,10 @@ async def test_katherine_identity_faq_works_without_ai_credentials(monkeypatch):
 
     result = await ai.assist("¿Quién eres?", "room:verified-user", unexpected_request)
     answer = result["answer"]
-    assert "recepcionista del Gremio de Aventureros" in answer
-    assert "marioneta biónica" in answer
-    assert "Snezhnaya" in answer
-    assert "Fatui" in answer and "Sandrone" in answer
-    assert "creada por Sandrone" in answer
-    assert "desarrollada por Sinner" in answer
-    assert "temas ajenos a Teyvat" in answer
+    assert answer.startswith("Soy Katheryne, recepcionista del Gremio de Aventureros.")
+    assert "Sandrone" not in answer
+    assert "Sinner" not in answer
+    assert "bot" not in answer.lower()
 
 
 @pytest.mark.asyncio
@@ -817,10 +816,10 @@ async def test_katherine_identity_faq_works_without_ai_credentials(monkeypatch):
     ("question", "expected"),
     [
         ("Katherine, preséntate", "recepcionista del Gremio de Aventureros"),
-        ("Katherine, ¿quién eres?", "recepcionista del Gremio de Aventureros"),
-        ("Katherine, ¿quién es tu creador?", "En el lore de Genshin Impact, Katheryne fue creada por Sandrone. Esta versión comunitaria del bot de Genshin Impact ES fue desarrollada por Sinner."),
-        ("Katherine, ¿quién creó a Katheryne?", "Dentro del lore de Genshin Impact, Katheryne fue creada por Sandrone."),
-        ("Katherine, ¿quién desarrolló el bot?", "Esta versión comunitaria del bot de Genshin Impact ES fue desarrollada por Sinner."),
+        ("Katheryne, ¿quién eres?", "recepcionista del Gremio de Aventureros"),
+        ("Katherine, ¿quién es tu creador?", "Sandrone me creó en Snezhnaya. Soy una marioneta biónica y recepcionista del Gremio de Aventureros."),
+        ("Katheryne, ¿quién creó a Katheryne?", "Sandrone me creó en Snezhnaya. Soy una marioneta biónica y recepcionista del Gremio de Aventureros."),
+        ("Katheryne, ¿quién desarrolló la versión comunitaria?", "La implementación comunitaria de Katheryne fue desarrollada por Sinner."),
     ],
 )
 async def test_katherine_identity_questions_with_name_prefix(monkeypatch, question, expected):
@@ -836,6 +835,33 @@ async def test_katherine_identity_questions_with_name_prefix(monkeypatch, questi
         assert expected in result["answer"]
     else:
         assert result["answer"] == expected
+
+
+def test_katheryne_identity_is_consistent_and_not_bot_centered():
+    from katherine_ai import build_ai_instructions
+
+    for intent in ("conversation", "research", "action", "multi_action", "genshin"):
+        prompt = build_ai_instructions(set(), intent)
+        assert "Eres Katheryne, la recepcionista del Gremio de Aventureros" in prompt
+        assert "No eres una asistente genérica" in prompt
+        assert "no te presentes ni te describas como «bot»" in prompt
+        assert "Sandrone" in prompt and "Snezhnaya" in prompt
+        assert "desarrollada por Sinner" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_katheryne_technical_facts_are_separate_from_character_identity(monkeypatch):
+    monkeypatch.delenv("KATHERINE_AI_API_KEY", raising=False)
+    ai = KatherineAI()
+
+    async def unexpected_request(*args, **kwargs):
+        raise AssertionError("Las respuestas canónicas no deben depender del proveedor.")
+
+    identity = await ai.assist("¿Quién eres?", "room:identity-user", unexpected_request)
+    developer = await ai.assist("¿Quién desarrolló esta versión comunitaria?", "room:identity-user", unexpected_request)
+    assert "bot" not in identity["answer"].lower()
+    assert "Sinner" not in identity["answer"]
+    assert "Sinner" in developer["answer"]
 
 
 def test_research_and_calculator_tools_are_allowed_but_link_analysis_is_automatic():
