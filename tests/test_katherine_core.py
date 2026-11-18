@@ -38,6 +38,7 @@ def test_database_initializes_expected_core_tables(database):
         "economy_ledger",
         "economy_store_items",
         "economy_inventory",
+        "economy_equipped_items",
         "community_polls",
         "community_poll_votes",
         "community_progress",
