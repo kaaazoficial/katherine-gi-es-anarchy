@@ -574,6 +574,17 @@ class EconomyService:
         account = self.wallet(uid)
         return account is not None and account.balance == chronological[-1].balance_after
 
+    def purge_expired_ledger(self, *, retention_days: int = 90) -> int:
+        """Delete transaction details after the configured operational retention."""
+        days = max(30, min(365, int(retention_days)))
+        cutoff = float(self.clock()) - days * 86400
+        with self.db_session() as db:
+            cursor = db.execute(
+                "DELETE FROM economy_ledger WHERE created_at<?",
+                (cutoff,),
+            )
+        return int(cursor.rowcount)
+
     def purge_user_economy(self, uid: str) -> dict[str, int]:
         """Remove a user's optional game inventory and ledger during account deletion."""
         with self.db_session() as db:
