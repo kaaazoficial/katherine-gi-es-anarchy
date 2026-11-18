@@ -776,8 +776,8 @@ def prune_antispam_tracking(now: float | None = None) -> None:
         prune_activity_history(history, cutoff=cutoff)
         if not history:
             USER_MESSAGE_ACTIVITY.pop(key, None)
-    if len(USER_MESSAGE_ACTIVITY) > MAX_ANTISPAM_TRACKED_USERS:
-        excess = len(USER_MESSAGE_ACTIVITY) - MAX_ANTISPAM_TRACKED_USERS
+    if len(USER_MESSAGE_ACTIVITY) >= MAX_ANTISPAM_TRACKED_USERS:
+        excess = len(USER_MESSAGE_ACTIVITY) - MAX_ANTISPAM_TRACKED_USERS + 1
         for key in bounded_oldest_keys(USER_MESSAGE_ACTIVITY, excess):
             USER_MESSAGE_ACTIVITY.pop(key, None)
     for key, expiry in tuple(USER_SPAM_WARNED_UNTIL.items()):
@@ -1317,7 +1317,7 @@ IA_ALLOWED_LICENSES = {
 
 # Contadores del proceso actual. Se reinician cuando Render reinicia el servicio.
 metrics = defaultdict(int)
-CHAT_SETTINGS = ChatSettingsStore(db_session=db_session, metrics=metrics)
+CHAT_SETTINGS = ChatSettingsStore(db_session=lambda: db_session(), metrics=metrics)
 CHAT_SETTING_CACHE = CHAT_SETTINGS.cache
 USER_MESSAGE_ACTIVITY = defaultdict(deque)
 USER_SPAM_WARNED_UNTIL = {}
