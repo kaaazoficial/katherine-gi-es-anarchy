@@ -12477,6 +12477,69 @@ Uso: !enciclopedia <nombre>""",
         return
 
     # -----------------------------------------------------------------------
+    # ECONOMÍA, TIENDA E INVENTARIO
+    # -----------------------------------------------------------------------
+    if command == "!tienda":
+        items = ECONOMY.list_items()
+        if not items:
+            answer = "La tienda de Katheryne está temporalmente vacía."
+        else:
+            rows = ["TIENDA DE KATHERYNE"]
+            for item in items[:25]:
+                stock = "∞" if item.stock is None else str(item.stock)
+                rows.append(
+                    f"• {item.name} [{item.key}] — {item.price} puntos · stock {stock}"
+                    + (f"\n  {item.description}" if item.description else "")
+                )
+            rows.append("\nCompra con !comprar clave [cantidad].")
+            answer = "\n".join(rows)
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!comprar":
+        item_key = args[0].casefold() if args else ""
+        try:
+            quantity = int(args[1]) if len(args) > 1 else 1
+            purchase = ECONOMY.buy(uid, item_key, quantity)
+            answer = (
+                f"Compra realizada: {purchase.quantity} × {purchase.item.name}. "
+                f"Total: {purchase.total_cost} puntos. "
+                f"Saldo restante: {purchase.remaining_balance}."
+            )
+        except (ValueError, EconomyError) as exc:
+            answer = f"No se pudo completar la compra: {str(exc) or 'cantidad inválida'}"
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!inventario":
+        inventory = ECONOMY.inventory(uid)
+        if not inventory:
+            answer = f"{nickname}, tu inventario está vacío. Visita !tienda."
+        else:
+            answer = "INVENTARIO\n" + "\n".join(
+                f"• {item.get('name') or item['item_key']} × {item['quantity']}"
+                for item in inventory[:40]
+            )
+        await send_message(thread, answer, source, reply)
+        return
+
+    if command == "!historial":
+        entries = ECONOMY.history(uid, limit=12)
+        if not entries:
+            answer = "Todavía no tienes movimientos en el historial de puntos."
+        else:
+            rows = ["HISTORIAL DE PUNTOS"]
+            for entry in entries:
+                sign = "+" if entry.delta > 0 else ""
+                rows.append(
+                    f"• {sign}{entry.delta} · {entry.operation} · "
+                    f"{entry.reason[:70]} · saldo {entry.balance_after}"
+                )
+            answer = "\n".join(rows)
+        await send_message(thread, answer, source, reply)
+        return
+
+    # -----------------------------------------------------------------------
     # PUNTOS Y RANKING
     # -----------------------------------------------------------------------
     if command in ("!puntos", "!reputacion"):
