@@ -1121,9 +1121,7 @@ send_history_bot = deque()
 send_history_chat = defaultdict(deque)
 
 cache: dict[str, tuple[float, Any]] = {}
-# Duplicate Genshin DB misses share one request per event loop. Completed tasks
-# are removed immediately and never become a persistent result or user cache.
-_GAME_REQUEST_INFLIGHT: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+# Genshin API cache and request coalescing live in GameAPIClient below.
 polls: dict[str, dict] = {}
 AUTO_REPLY_CHAT_COOLDOWN: dict[str, float] = {}
 AUTO_REPLY_USER_COOLDOWN: dict[tuple[str, str], float] = {}
