@@ -1238,7 +1238,7 @@ CHAT_SETTINGS = ChatSettingsStore(db_session=lambda: db_session(), metrics=metri
 CHAT_SETTING_CACHE = CHAT_SETTINGS.cache
 COMMUNITY_REPOSITORY = CommunityRepository(
     db_session=lambda: db_session(),
-    activity_clock_bucket=get_chat_activity_clock_bucket,
+    activity_clock_bucket=lambda: get_chat_activity_clock_bucket(),
 )
 USER_MESSAGE_ACTIVITY = defaultdict(deque)
 USER_SPAM_WARNED_UNTIL = {}
