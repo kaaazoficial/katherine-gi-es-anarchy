@@ -21,7 +21,7 @@ Katheryne utiliza una sola identidad: el bot comunitario. Configura `COMMUNITY_B
 - `tests/`: pruebas unitarias y de regresión.
 
 ## Privacidad
-Katheryne no crea memoria personal permanente ni almacena conversaciones como historial a largo plazo. El contexto de IA es temporal y en memoria; no se recopilan mensajes de sala para resúmenes ni se registran preguntas y respuestas de IA. Los registros operativos deben evitar secretos y minimizar datos personales. Las encuestas se eliminan tras su cierre y un periodo de gracia de 24 horas; los votos anónimos almacenan un hash del votante. Los contadores de misiones se purgan tras 14 días; el progreso XP es estado de juego, no memoria conversacional.
+Katheryne no crea memoria personal permanente ni almacena conversaciones como historial a largo plazo. El contexto de IA es temporal y en memoria; no se recopilan mensajes de sala para resúmenes ni se registran preguntas y respuestas de IA. Los registros operativos deben evitar secretos y minimizar datos personales. Las encuestas se eliminan tras su cierre y un periodo de gracia de 24 horas; los votos anónimos almacenan un hash del votante. Los contadores de misiones se purgan tras 14 días; el historial detallado de puntos caduca a los 90 días y el XP/logros se eliminan tras 90 días sin actividad. El saldo e inventario son estado de juego; nada de esto conserva mensajes ni conversaciones.
 
 ## Desarrollo y pruebas
 
