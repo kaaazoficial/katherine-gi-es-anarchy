@@ -288,6 +288,9 @@ def test_explicit_action_can_override_generic_assistant_fallback():
         "Katheryne, hola", "asistente hola"
     )
 
+def test_canonical_katheryne_name_routes_explicit_music_actions():
+    assert interpret_natural_request("Katheryne, pausa la música") == "dj pausa"
+
 
 
 def test_natural_language_own_message_cleanup_routes_to_admin_command():
