@@ -162,7 +162,7 @@ def test_unaddressed_chat_only_updates_bounded_activity_and_does_not_activate_ka
 
     assert calls["commands"] == []
     assert calls["users"] == []
-    assert calls["activity"] == [("room-natural", "developer:room-natural:user-1", "Viajero")]
+    assert calls["activity"] == [("room-natural", "community:room-natural:user-1", "Viajero")]
     assert calls["auto_replies"] == [("room-natural", "user-1", "Viajero", "hola a todos")]
 
 

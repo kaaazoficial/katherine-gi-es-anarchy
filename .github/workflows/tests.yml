@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - "main.py"
+      - "katherine_runtime.py"
       - "katherine_identity.py"
       - "katherine_language.py"
       - "requirements.txt"
@@ -30,6 +31,7 @@ on:
       - main
     paths:
       - "main.py"
+      - "katherine_runtime.py"
       - "katherine_identity.py"
       - "katherine_language.py"
       - "requirements.txt"
@@ -81,6 +83,9 @@ jobs:
 
       - name: Compile bot source
         run: python -m compileall -q .
+
+      - name: Report production source size
+        run: python scripts/measure_source.py
 
       - name: Report top startup import costs
         run: |

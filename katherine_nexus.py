@@ -168,11 +168,11 @@ def should_execute_deterministic_fallback(
     speculative command inferred from broad words such as "what is".
     """
     invocation = re.sub(r"\s+", " ", str(fallback_command or "")).strip()
-    if not invocation or invocation.casefold().startswith("asistente "):
+    if not invocation:
         return False
     raw = re.sub(r"\s+", " ", str(request_text or "")).strip()
     addressed = re.match(
-        r"^(?:oye[, ]+)?katherine(?:[, :]+|$)\s*(.*)$",
+        r"^(?:oye[, ]+)?(?:katheryne|katherine)(?:[, :]+|$)\s*(.*)$",
         raw,
         flags=re.IGNORECASE,
     )
@@ -181,10 +181,10 @@ def should_execute_deterministic_fallback(
     text = _normalize(raw)
     if not text:
         return False
-    # When the provider is unavailable, retain the deterministic fallback.
-    # The caller still validates the command and the original handler checks
-    # permissions, while the interpreter below filters generic Teyvat queries.
-    if provider_failed:
+    is_assistant_fallback = invocation.casefold().startswith("asistente ")
+    # A provider failure permits a real deterministic command, but not a
+    # generic assistant echo. Explicit actions may still override that echo.
+    if provider_failed and not is_assistant_fallback:
         return True
     explicit_starters = (
         "ayuda", "comandos disponibles", "que puedes hacer", "que sabes hacer",
@@ -214,7 +214,7 @@ def interpret_natural_request(value: str) -> str | None:
         return None
     # Procesar lenguaje natural únicamente cuando el usuario invoque a Katherine.
     addressed = re.match(
-        r"^(?:oye[, ]+)?katherine(?:[, :]+|$)\s*(.*)$",
+        r"^(?:oye[, ]+)?(?:katheryne|katherine)(?:[, :]+|$)\s*(.*)$",
         raw,
         flags=re.IGNORECASE,
     )

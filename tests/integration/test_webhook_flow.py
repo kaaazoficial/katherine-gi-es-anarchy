@@ -361,4 +361,19 @@ async def test_health_endpoint_is_available_without_starting_external_clients(
         response = await client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "bot": "Katherine"}
+    assert response.json() == {"ok": True, "bot": "Katheryne"}
+
+
+@pytest.mark.asyncio
+async def test_readiness_is_not_reported_before_application_startup(
+    isolated_webhook_state, asgi_client, monkeypatch
+):
+    monkeypatch.setattr(bot_main, "HTTP_CLIENT", None)
+
+    async with asgi_client as client:
+        response = await client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json()["ok"] is False
+    assert response.json()["phase"] == "new"
+    assert response.json()["bot"] == "Katheryne"

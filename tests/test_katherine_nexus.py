@@ -280,6 +280,17 @@ def test_provider_failure_can_use_existing_deterministic_fallback():
         "Katherine, hola", "asistente hola", provider_failed=True,
     )
 
+def test_explicit_action_can_override_generic_assistant_fallback():
+    assert should_execute_deterministic_fallback(
+        "Katheryne, pausa la música", "asistente pausa la música"
+    )
+    assert not should_execute_deterministic_fallback(
+        "Katheryne, hola", "asistente hola"
+    )
+
+def test_canonical_katheryne_name_routes_explicit_music_actions():
+    assert interpret_natural_request("Katheryne, pausa la música") == "dj pausa"
+
 
 
 def test_natural_language_own_message_cleanup_routes_to_admin_command():
