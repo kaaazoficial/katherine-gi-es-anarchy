@@ -33,6 +33,7 @@ from html.parser import HTMLParser
 from urllib.parse import parse_qs, urljoin, quote, urlparse, urlsplit, urlunsplit
 from katherine_boot import IMPORT_STARTED_AT
 from katherine_runtime import RuntimeLifecycle, RuntimePhase, TaskSupervisor
+from katherine_game_client import GameAPIClient
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
@@ -1120,9 +1121,7 @@ send_history_bot = deque()
 send_history_chat = defaultdict(deque)
 
 cache: dict[str, tuple[float, Any]] = {}
-# Duplicate Genshin DB misses share one request per event loop. Completed tasks
-# are removed immediately and never become a persistent result or user cache.
-_GAME_REQUEST_INFLIGHT: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+# Genshin API cache and request coalescing live in GameAPIClient below.
 polls: dict[str, dict] = {}
 AUTO_REPLY_CHAT_COOLDOWN: dict[str, float] = {}
 AUTO_REPLY_USER_COOLDOWN: dict[tuple[str, str], float] = {}
@@ -1597,6 +1596,7 @@ def cleanup_expired_state():
         if not messages:
             BOT_SENT_MESSAGES.pop(key, None)
     AI_CORE.cleanup(now=now)
+    GAME_CLIENT.cleanup()
 
     # Expire process-local catalogs, downloaded audio and transient identifiers.
     for store in (DJ_ARCHIVE_CACHE, DJ_SOURCE_CACHE):
@@ -1821,7 +1821,7 @@ async def build_status_message(source: str, nickname: str, thread_id: str | None
         "",
         "💾 DATOS",
         f"• SQLite: {db_line}",
-        f"• Caché Genshin: {len(cache)} entradas",
+        f"• Caché Genshin: {len(GAME_CLIENT.cache)} entradas",
         f"• DJ: {metrics['dj_tracks_started']} pistas iniciadas · {metrics['dj_fallback_tracks_started']} alternativas automáticas",
         f"• DJ: {metrics['dj_fallback_tracks_skipped']} pistas inválidas omitidas · {metrics['dj_playback_retries']} reintentos",
         f"• TTS: {metrics['tts_priority_enqueued']} prioritarios · {metrics['tts_regular_enqueued']} normales · {metrics['tts_duplicates_skipped']} duplicados omitidos",
@@ -2059,6 +2059,18 @@ async def external_request(method: str, url: str, **kwargs):
     if last_error:
         raise last_error
     raise httpx.RequestError("Solicitud externa no completada", request=None)
+
+
+# Genshin requests have a dedicated, bounded cache and single-flight registry.
+# They remain process-local and are never persisted as user or conversation data.
+GAME_CLIENT = GameAPIClient(
+    external_request,
+    base_url=GAME_API,
+    metrics=metrics,
+    cache_ttl_seconds=21600,
+    cache_max_entries=400,
+    max_inflight_keys=256,
+)
 
 
 def is_not_in_chat_response(status_code: int | None, data: Any) -> bool:
@@ -6885,90 +6897,9 @@ async def start_dj_room(
 # GENSHIN DATABASE API# ---------------------------------------------------------------------------
 # GENSHIN DATABASE API
 # ---------------------------------------------------------------------------
-async def _await_shared_game_request(key: str, request_factory):
-    """Coalesce concurrent identical Genshin API misses without caching tasks."""
-    loop = asyncio.get_running_loop()
-    loop_tasks = _GAME_REQUEST_INFLIGHT.get(loop)
-    if loop_tasks is None:
-        loop_tasks = {}
-        _GAME_REQUEST_INFLIGHT[loop] = loop_tasks
-
-    task = loop_tasks.get(key)
-    if task is None or task.done():
-        task = loop.create_task(request_factory())
-        loop_tasks[key] = task
-
-        def discard_completed(done_task):
-            if loop_tasks.get(key) is done_task:
-                loop_tasks.pop(key, None)
-            if not loop_tasks:
-                _GAME_REQUEST_INFLIGHT.pop(loop, None)
-
-        task.add_done_callback(discard_completed)
-        metrics["game_api_unique_requests"] += 1
-    else:
-        metrics["game_api_singleflight_waits"] += 1
-
-    # One cancelled webhook must not cancel the shared request for other chats.
-    return await asyncio.shield(task)
-
-
 async def game_data(folder: str, query: str, extra_params: dict | None = None):
-    clean_query = strip_game_scope_qualifier(query)
-    clean_query = clean_query or str(query or "").strip()
-    options_key = json.dumps(extra_params or {}, sort_keys=True, ensure_ascii=False)
-    key = f"{folder}:{clean_query.casefold()}:{options_key}"
-
-    if key in cache and cache[key][0] > time.time():
-        metrics["game_api_cache_hits"] += 1
-        return cache[key][1]
-    metrics["game_api_cache_misses"] += 1
-
-    async def fetch_game_data():
-        params = {
-            "query": clean_query,
-            "dumpResult": "true",
-            "matchNames": "true",
-            "matchAltNames": "true",
-            "matchAliases": "true",
-            "queryLanguages": "english,spanish",
-            "resultLanguage": "spanish"
-        }
-        if extra_params:
-            params.update(extra_params)
-
-        try:
-            response = await external_request(
-                "GET", f"{GAME_API}/{folder}", params=params, timeout=18
-            )
-            response.raise_for_status()
-            payload = response.json()
-            data = unwrap_genshin_db_response(payload)
-
-            # dumpResult envelopes may describe a failed match rather than contain
-            # an entity. Never cache or expose those diagnostics as encyclopedia data.
-            if data is None or data == {} or data == []:
-                return None
-
-            cache[key] = (time.time() + 21600, data)
-
-            if len(cache) > 400:
-                cleanup_expired_state()
-                while len(cache) > 400:
-                    cache.pop(next(iter(cache)))
-
-            return data
-
-        except Exception as exc:
-            logging.warning(
-                "Genshin API %s/%s: %s",
-                folder,
-                clean_query,
-                exc
-            )
-            return None
-
-    return await _await_shared_game_request(key, fetch_game_data)
+    """Compatibility entry point backed by the dedicated Genshin API client."""
+    return await GAME_CLIENT.data(folder, query, extra_params)
 
 
 def normalize_game_entity_name(value: Any) -> str:
@@ -7188,45 +7119,8 @@ def describe_game(data: Any, fallback: str, folder: str | None = None) -> str:
 
 
 async def game_stats(folder: str, query: str):
-    clean_query = str(query or "").strip()
-    key = f"stats:{folder}:{clean_query.casefold()}"
-
-    if key in cache and cache[key][0] > time.time():
-        metrics["game_api_cache_hits"] += 1
-        return cache[key][1]
-    metrics["game_api_cache_misses"] += 1
-
-    async def fetch_game_stats():
-        params = {
-            "folder": folder,
-            "query": clean_query,
-            "queryLanguages": "english,spanish"
-        }
-
-        try:
-            response = await external_request(
-                "GET", f"{GAME_API}/stats", params=params, timeout=18
-            )
-            response.raise_for_status()
-            data = response.json()
-
-            if isinstance(data, dict):
-                if "result" in data and isinstance(data["result"], dict):
-                    data = data["result"]
-                cache[key] = (time.time() + 21600, data)
-                return data
-
-        except Exception as exc:
-            logging.warning(
-                "No se pudieron consultar estadísticas de %s (%s)",
-                clean_query,
-                folder,
-                type(exc).__name__,
-            )
-
-        return None
-
-    return await _await_shared_game_request(key, fetch_game_stats)
+    """Compatibility entry point backed by the dedicated Genshin API client."""
+    return await GAME_CLIENT.stats(folder, query)
 
 
 async def character_stats(query: str):
