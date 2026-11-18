@@ -781,6 +781,7 @@ async def test_genshin_question_can_still_use_teyvat_tool(monkeypatch):
         ("¿Eres un bot?", "Soy Katheryne, recepcionista del Gremio de Aventureros. En esta comunidad mi presencia funciona mediante una implementación conversacional; dentro de Teyvat soy una marioneta biónica creada por Sandrone."),
     ],
 )
+@pytest.mark.asyncio
 async def test_katherine_canonical_identity_facts(monkeypatch, question, expected):
     monkeypatch.setenv("KATHERINE_AI_API_KEY", "test-key")
     ai = KatherineAI()
