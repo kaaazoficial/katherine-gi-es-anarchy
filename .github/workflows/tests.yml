@@ -38,6 +38,8 @@ on:
       - main
     paths:
       - "main.py"
+      - "katherine_database.py"
+      - "katherine_economy.py"
       - "katherine_runtime.py"
       - "katherine_cache.py"
       - "katherine_game_client.py"
