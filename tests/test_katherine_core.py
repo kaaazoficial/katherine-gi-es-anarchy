@@ -35,6 +35,9 @@ def test_database_initializes_expected_core_tables(database):
         "chat_activity_daily",
         "admin_audit_log",
         "auto_reply_rules",
+        "economy_ledger",
+        "economy_store_items",
+        "economy_inventory",
     }.issubset(names)
 
 
