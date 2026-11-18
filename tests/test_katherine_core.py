@@ -41,6 +41,33 @@ def test_database_initializes_expected_core_tables(database):
     }.issubset(names)
 
 
+def test_legacy_point_awards_are_recorded_in_economy_ledger(database):
+    database.record_user("community:room:ledger-user", "Ledger User")
+    database.add_points("community:room:ledger-user", 35)
+
+    wallet = database.ECONOMY.wallet("community:room:ledger-user")
+    history = database.ECONOMY.history("community:room:ledger-user")
+
+    assert wallet is not None
+    assert wallet.balance == 35
+    assert len(history) == 1
+    assert history[0].delta == 35
+    assert history[0].operation == "credit"
+
+
+def test_default_store_seed_does_not_restore_consumed_stock(database):
+    item = database.ECONOMY.item("expedition_ticket")
+    assert item is not None and item.stock is not None
+    with database.db_session() as db:
+        db.execute(
+            "UPDATE economy_store_items SET stock=7 WHERE item_key='expedition_ticket'"
+        )
+
+    database.init_db()
+
+    assert database.ECONOMY.item("expedition_ticket").stock == 7
+
+
 def test_user_upsert_updates_nickname_and_counts_messages(database):
     database.record_user("user-1", "Viajero", count_message=True)
     database.record_user("user-1", "Viajero actualizado", count_message=True)
