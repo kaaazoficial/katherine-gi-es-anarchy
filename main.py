@@ -14766,8 +14766,12 @@ async def select_dj_search_result(
 
 
 def is_button_source_allowed(action: dict, source: str) -> bool:
-    """Accept callbacks belonging to the sole community bot identity."""
-    return action.get("source") == source
+    """Accept only DJ selection callbacks belonging to the requested bot identity."""
+    return (
+        isinstance(action, dict)
+        and action.get("type") == "dj_select"
+        and action.get("source") == source
+    )
 
 
 async def handle_interaction(event: dict, source: str):
