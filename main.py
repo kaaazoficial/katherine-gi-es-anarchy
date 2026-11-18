@@ -37,6 +37,7 @@ from katherine_game_client import GameAPIClient
 from katherine_settings import ChatSettingsStore
 from katherine_community_repository import CommunityRepository
 from katherine_economy import EconomyService, EconomyError, seed_default_store
+from katherine_polls import PollRepository, PollError, PollClosed
 from katherine_moderation import (
     AntiSpamSettings, bounded_expiry_keys, bounded_oldest_keys,
     derive_message_signals, evaluate_antispam, is_platform_bot_author,
@@ -371,6 +372,8 @@ def db_session():
 def init_db():
     initialize_database(db_session)
     seed_default_store(ECONOMY)
+    POLLS.close_expired()
+    POLLS.purge_expired()
 
 
 def record_user_and_chat_activity(
@@ -952,7 +955,6 @@ send_history_chat = defaultdict(deque)
 
 cache: dict[str, tuple[float, Any]] = {}
 # Genshin API cache and request coalescing live in GameAPIClient below.
-polls: dict[str, dict] = {}
 AUTO_REPLY_CHAT_COOLDOWN: dict[str, float] = {}
 AUTO_REPLY_USER_COOLDOWN: dict[tuple[str, str], float] = {}
 AUTO_REPLY_RULE_CACHE: dict[str, tuple[float, tuple[tuple[dict, Any], ...]]] = {}
@@ -1057,7 +1059,6 @@ def external_host_resources(
     return state, semaphore
 
 
-poll_button_map: dict[str, str] = {}
 BUTTON_ACTIONS: dict[str, dict] = {}
 COMMUNITY_EVENTS: dict[str, dict] = {}
 DJ_ROOMS: dict[str, dict] = {}
@@ -1246,6 +1247,7 @@ ECONOMY = EconomyService(
     max_transfer=10_000,
     max_purchase_quantity=99,
 )
+POLLS = PollRepository(db_session=lambda: db_session())
 USER_MESSAGE_ACTIVITY = defaultdict(deque)
 USER_SPAM_WARNED_UNTIL = {}
 metrics["api_latency_total_ms"] = 0.0
@@ -1489,10 +1491,13 @@ def cleanup_expired_state():
             logging.info("[PRIVACY] Retención aplicada: %s registros caducados/anónimos", expired_total)
     except (sqlite3.Error, OSError, ValueError):
         logging.exception("[PRIVACY] Falló la limpieza de retención; se reintentará.")
-    active_poll_ids = set(polls)
-    for button_key, poll_id in list(poll_button_map.items()):
-        if poll_id not in active_poll_ids:
-            poll_button_map.pop(button_key, None)
+    try:
+        POLLS.close_expired(now=time.time())
+        expired_polls = POLLS.purge_expired(now=time.time())
+        if expired_polls["polls"]:
+            logging.info("[PRIVACY] Encuestas caducadas eliminadas: %s", expired_polls["polls"])
+    except (sqlite3.Error, OSError, ValueError):
+        logging.exception("[PRIVACY] No se pudo limpiar el estado de encuestas.")
     monotonic_now = time.monotonic()
     for store in (CHAT_SETTING_CACHE, AUTO_REPLY_RULE_CACHE):
         for key, item in list(store.items()):
@@ -12620,15 +12625,7 @@ Uso: !enciclopedia <nombre>""",
                 await send_message(thread, "Uso: !encuesta resultados ID o !encuesta cerrar ID.", source, reply)
                 return
             code = args[1]
-            selected = next(
-                (
-                    item for item in polls.values()
-                    if item.get("code") == code
-                    and item.get("source") == source
-                    and item.get("thread") == thread
-                ),
-                None
-            )
+            selected = POLLS.get_by_code(code, source=source, thread_id=thread)
             if not selected:
                 await send_message(thread, "No encontré esa encuesta en esta sala; pudo haber caducado o Katherine reinició.", source, reply)
                 return
@@ -12636,7 +12633,14 @@ Uso: !enciclopedia <nombre>""",
                 if selected.get("creator_uid") != raw_uid and not is_privileged_uid(admin_uid):
                     await send_message(thread, "Solo quien creó la encuesta o un administrador puede cerrarla.", source, reply)
                     return
-                selected["closed"] = True
+                try:
+                    selected = POLLS.close(
+                        selected["id"], raw_uid, source=source, thread_id=thread,
+                        is_admin=is_privileged_uid(admin_uid),
+                    )
+                except PollError as exc:
+                    await send_message(thread, str(exc), source, reply)
+                    return
                 await send_message(thread, "Encuesta cerrada.\n\n" + format_poll_results(selected), source, reply)
             else:
                 await send_message(thread, format_poll_results(selected), source, reply)
@@ -12673,37 +12677,33 @@ Uso: !enciclopedia <nombre>""",
             await send_message(thread, "La duración debe estar entre 1 minuto y 7 días.", source, reply)
             return
 
-        created_at = time.time()
-        closes_at = created_at + duration_seconds
         poll_nonce = str(time.time_ns())[-15:]
         poll_id = f"{source}:{thread}:{poll_nonce}"
         poll_code = str(secrets.randbelow(900000) + 100000)
-        while any(item.get("code") == poll_code for item in polls.values()):
+        while POLLS.get_by_code(poll_code, source=source, thread_id=thread):
             poll_code = str(secrets.randbelow(900000) + 100000)
-        polls[poll_id] = {
-            "code": poll_code,
-            "question": question,
-            "options": options,
-            "votes": {},
-            "source": source,
-            "thread": thread,
-            "creator_uid": raw_uid,
-            "creator_name": nickname,
-            "anonymous": anonymous,
-            "closed": False,
-            "created_at": created_at,
-            "closes_at": closes_at,
-            "expires": closes_at + 86400
-        }
-        if len(polls) > 500:
-            oldest_id = min(polls, key=lambda key: polls[key].get("created_at", 0))
-            polls.pop(oldest_id, None)
+        try:
+            selected = POLLS.create(
+                poll_id=poll_id,
+                code=poll_code,
+                source=source,
+                thread_id=thread,
+                question=question,
+                options=options,
+                creator_uid=raw_uid,
+                creator_name=nickname,
+                anonymous=anonymous,
+                duration_seconds=duration_seconds,
+                button_key=poll_nonce,
+            )
+        except PollError as exc:
+            await send_message(thread, f"No se pudo crear la encuesta: {exc}", source, reply)
+            return
 
         buttons = [
             {"id": f"p{poll_nonce}_{index}", "label": option}
             for index, option in enumerate(options)
         ]
-        poll_button_map[poll_nonce] = poll_id
         minutes = max(1, int(duration_seconds // 60))
         mode = "anónima" if anonymous else "pública"
         await send_message(
@@ -14583,16 +14583,16 @@ async def handle_interaction(event: dict, source: str):
     # Las encuestas permiten cambiar el voto hasta el cierre.
     match = re.fullmatch(r"p(\d+)_(\d+)", button_id)
     if match:
-        poll = polls.get(poll_button_map.get(match.group(1), ""))
+        poll = POLLS.get_by_button_key(
+            match.group(1), source=source, thread_id=thread_id
+        )
         if not poll:
             return
-        if (
-            poll.get("source") != source
-            or str(event.get("threadId") or "") != poll.get("thread")
-        ):
-            return
         if poll.get("closed") or float(poll.get("closes_at", 0)) <= time.time():
-            poll["closed"] = True
+            POLLS.close_expired()
+            poll = POLLS.get_by_button_key(
+                match.group(1), source=source, thread_id=thread_id
+            ) or poll
             await remove_pressed_buttons(event, source, remove=True)
             await send_message(
                 thread_id,
@@ -14602,13 +14602,25 @@ async def handle_interaction(event: dict, source: str):
             return
 
         index = int(match.group(2))
-        if index >= len(poll["options"]):
+        try:
+            poll = POLLS.vote(
+                poll["id"], raw_user_uid, index, source=source, thread_id=thread_id
+            )
+        except PollClosed:
+            POLLS.close_expired()
+            poll = POLLS.get_by_button_key(
+                match.group(1), source=source, thread_id=thread_id
+            ) or poll
+            await remove_pressed_buttons(event, source, remove=True)
+            await send_message(
+                thread_id,
+                f"La encuesta {poll.get('code')} ya está cerrada.\n\n" + format_poll_results(poll),
+                source,
+            )
             return
-        voter_key = (
-            hashlib.sha256(f"{poll.get('code')}:{raw_user_uid}".encode("utf-8")).hexdigest()
-            if poll.get("anonymous") else raw_user_uid
-        )
-        poll["votes"][voter_key] = index
+        except PollError as exc:
+            await send_message(thread_id, str(exc), source)
+            return
         await send_message(thread_id, format_poll_results(poll), source)
         return
 
