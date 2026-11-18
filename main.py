@@ -35,6 +35,7 @@ from katherine_boot import IMPORT_STARTED_AT
 from katherine_runtime import RuntimeLifecycle, RuntimePhase, TaskSupervisor
 from katherine_game_client import GameAPIClient
 from katherine_moderation import AntiSpamService
+from katherine_settings import ChatSettingsStore
 from katherine_moderation import AntiSpamService
 
 import httpx
@@ -489,98 +490,18 @@ def find_user_by_nickname(nickname: str, scope_key: str | None = None):
 
 
 def get_chat_setting(thread_id: str, key: str, default: str = "") -> str:
-    cache_key = (str(thread_id), str(key))
-    now = time.monotonic()
-    cached = CHAT_SETTING_CACHE.get(cache_key)
-    if cached is not None and cached[0] > now:
-        metrics["chat_setting_cache_hits"] += 1
-        return str(cached[1]) if cached[1] is not None else str(default)
-
-    metrics["chat_setting_cache_misses"] += 1
-    with db_session() as db:
-        row = db.execute(
-            "SELECT setting_value FROM chat_settings WHERE thread_id=? AND setting_key=?",
-            cache_key
-        ).fetchone()
-    stored_value = str(row["setting_value"]) if row else None
-    if cache_key not in CHAT_SETTING_CACHE and len(CHAT_SETTING_CACHE) >= CHAT_SETTING_CACHE_MAX_ENTRIES:
-        CHAT_SETTING_CACHE.pop(next(iter(CHAT_SETTING_CACHE)), None)
-    CHAT_SETTING_CACHE[cache_key] = (now + CHAT_SETTING_CACHE_TTL, stored_value)
-    return stored_value if stored_value is not None else str(default)
+    """Compatibility wrapper backed by the room settings repository."""
+    return CHAT_SETTINGS.get(thread_id, key, default)
 
 
 def get_chat_settings(thread_id: str, defaults: dict[str, str]) -> dict[str, str]:
-    """Read a group of room settings with one SQLite session for cache misses."""
-    room_id = str(thread_id)
-    normalized_defaults = {
-        str(key): str(default) for key, default in defaults.items()
-    }
-    if not normalized_defaults:
-        return {}
-
-    now = time.monotonic()
-    values: dict[str, str] = {}
-    missing: list[str] = []
-    for key, default in normalized_defaults.items():
-        cache_key = (room_id, key)
-        cached = CHAT_SETTING_CACHE.get(cache_key)
-        if cached is not None and cached[0] > now:
-            metrics["chat_setting_cache_hits"] += 1
-            values[key] = str(cached[1]) if cached[1] is not None else default
-        else:
-            metrics["chat_setting_cache_misses"] += 1
-            missing.append(key)
-
-    if not missing:
-        return values
-
-    stored_values: dict[str, str] = {}
-    # Respect SQLite's conservative bind-variable limit while keeping ordinary
-    # room-configuration reads to a single indexed query.
-    for offset in range(0, len(missing), 500):
-        chunk = missing[offset:offset + 500]
-        placeholders = ",".join("?" for _ in chunk)
-        with db_session() as db:
-            rows = db.execute(
-                "SELECT setting_key,setting_value FROM chat_settings "
-                f"WHERE thread_id=? AND setting_key IN ({placeholders})",
-                (room_id, *chunk),
-            ).fetchall()
-        stored_values.update({
-            str(row["setting_key"]): str(row["setting_value"])
-            for row in rows
-        })
-
-    for key in missing:
-        cache_key = (room_id, key)
-        stored_value = stored_values.get(key)
-        if (
-            cache_key not in CHAT_SETTING_CACHE
-            and len(CHAT_SETTING_CACHE) >= CHAT_SETTING_CACHE_MAX_ENTRIES
-        ):
-            CHAT_SETTING_CACHE.pop(next(iter(CHAT_SETTING_CACHE)), None)
-        CHAT_SETTING_CACHE[cache_key] = (now + CHAT_SETTING_CACHE_TTL, stored_value)
-        values[key] = (
-            stored_value if stored_value is not None else normalized_defaults[key]
-        )
-    return values
+    """Read multiple room settings through the dedicated repository."""
+    return CHAT_SETTINGS.get_many(thread_id, defaults)
 
 
 def set_chat_setting(thread_id: str, key: str, value: str):
-    cache_key = (str(thread_id), str(key))
-    stored_value = str(value)
-    with db_session() as db:
-        db.execute(
-            """INSERT INTO chat_settings(thread_id,setting_key,setting_value,updated_at)
-               VALUES(?,?,?,?)
-               ON CONFLICT(thread_id,setting_key) DO UPDATE SET
-               setting_value=excluded.setting_value, updated_at=excluded.updated_at""",
-            (cache_key[0], cache_key[1], stored_value, time.time())
-        )
-    CHAT_SETTING_CACHE[cache_key] = (
-        time.monotonic() + CHAT_SETTING_CACHE_TTL,
-        stored_value,
-    )
+    """Compatibility wrapper for room setting updates."""
+    return CHAT_SETTINGS.set(thread_id, key, value)
 
 
 def is_admin_uid(uid: str) -> bool:
@@ -1050,9 +971,6 @@ cache: dict[str, tuple[float, Any]] = {}
 polls: dict[str, dict] = {}
 AUTO_REPLY_CHAT_COOLDOWN: dict[str, float] = {}
 AUTO_REPLY_USER_COOLDOWN: dict[tuple[str, str], float] = {}
-CHAT_SETTING_CACHE: dict[tuple[str, str], tuple[float, str | None]] = {}
-CHAT_SETTING_CACHE_TTL = 15.0
-CHAT_SETTING_CACHE_MAX_ENTRIES = 2048
 AUTO_REPLY_RULE_CACHE: dict[str, tuple[float, tuple[tuple[dict, Any], ...]]] = {}
 AUTO_REPLY_RULE_CACHE_TTL = 15.0
 AUTO_REPLY_RULE_CACHE_MAX_ENTRIES = 512
@@ -1344,6 +1262,8 @@ ANTI_SPAM = AntiSpamService(
 )
 USER_MESSAGE_ACTIVITY = ANTI_SPAM.activity
 USER_SPAM_WARNED_UNTIL = ANTI_SPAM.warned_until
+CHAT_SETTINGS = ChatSettingsStore(db_session=db_session, metrics=metrics)
+CHAT_SETTING_CACHE = CHAT_SETTINGS.cache
 ANTI_SPAM = AntiSpamService(
     get_configuration=anti_spam_configuration,
     is_admin=is_admin_uid,
