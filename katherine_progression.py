@@ -282,14 +282,19 @@ class ProgressionService:
             self._unlock_achievements(db, str(uid), xp, level_for_xp(xp))
         return self.snapshot(uid)
 
-    def leaderboard(self, *, limit: int = 10) -> list[ProgressSnapshot]:
+    def leaderboard(
+        self, *, limit: int = 10, scope_prefix: str = ""
+    ) -> list[ProgressSnapshot]:
         count = max(1, min(50, int(limit)))
+        sql = "SELECT uid,xp FROM community_progress"
+        params: list[Any] = []
+        if scope_prefix:
+            sql += " WHERE substr(uid,1,?)=?"
+            params.extend([len(scope_prefix), str(scope_prefix)])
+        sql += " ORDER BY xp DESC,updated_at ASC LIMIT ?"
+        params.append(count)
         with self.db_session() as db:
-            rows = db.execute(
-                """SELECT uid,xp FROM community_progress
-                   ORDER BY xp DESC,updated_at ASC LIMIT ?""",
-                (count,),
-            ).fetchall()
+            rows = db.execute(sql, tuple(params)).fetchall()
         results = []
         for row in rows:
             xp = int(row["xp"])
