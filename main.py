@@ -15521,7 +15521,7 @@ async def webhook(request: Request, source: str | None):
         )
     # El dispatcher conserva su namespace interno; el proceso y las credenciales
     # ya están aislados por despliegue y no pueden seleccionar al otro bot.
-    verified_source = "community"
+    verified_source = DEPLOYMENT_ROLE
 
     active_webhooks = sum(1 for task in webhook_tasks if not task.done())
     if active_webhooks >= MAX_WEBHOOK_BACKGROUND_TASKS:
@@ -15739,7 +15739,7 @@ async def startup():
                 me["data"]
             )
 
-    identity_sources = ["community"] if ACTIVE_BOT_TOKEN else []
+    identity_sources = [DEPLOYMENT_ROLE] if ACTIVE_BOT_TOKEN else []
     if identity_sources:
         phase_started_at = time.perf_counter()
         await asyncio.gather(*(load_bot_identity(source) for source in identity_sources))
