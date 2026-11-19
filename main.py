@@ -347,7 +347,7 @@ app = FastAPI(
 # ---------------------------------------------------------------------------
 DATA_DIR = SETTINGS.data_dir
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-DB_PATH = DATA_DIR / "katherine.sqlite3"
+DB_PATH = DATA_DIR / f"katheryne_{DEPLOYMENT_ROLE}.sqlite3"
 
 
 def db_connect():
@@ -1322,7 +1322,9 @@ TTS_VOICE_OPTIONS = {
 }
 USER_MESSAGE_ACTIVITY = defaultdict(deque)
 USER_SPAM_WARNED_UNTIL = {}
-DJ_MUSIC_DIR = Path(os.getenv("DJ_MUSIC_DIR", "music")).resolve()
+DJ_MUSIC_DIR = Path(
+    os.getenv("DJ_MUSIC_DIR", f"music/{DEPLOYMENT_ROLE}")
+).resolve()
 DJ_AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".oga", ".flac", ".m4a", ".aac", ".opus"}
 DJ_SEARCH_RESULTS: dict[str, dict] = {}
 DJ_SEARCH_RESULTS_MAX_ENTRIES = 256
@@ -1813,7 +1815,7 @@ async def build_status_message(source: str, nickname: str, thread_id: str | None
         f"• Python: {sys.version.split()[0]} | PID: {os.getpid()}",
         f"• Cliente HTTP: {'activo' if HTTP_CLIENT is not None and not HTTP_CLIENT.is_closed else 'inactivo'}",
         f"• Directorio de datos: {'escribible' if DATA_DIR.exists() and os.access(DATA_DIR, os.W_OK) else 'no disponible'}",
-        f"• Identidad comunitaria: {'Configurada' if COMMUNITY_TOKEN else 'No configurada'}",
+        f"• Identidad del servicio ({DEPLOYMENT_ROLE}): {'Configurada' if ACTIVE_BOT_TOKEN else 'No configurada'}",
         f"• Chats vinculados al token: {len(thread_ids)}",
         "Los contadores corresponden a este proceso desde su último reinicio."
     ]
@@ -5143,8 +5145,8 @@ async def ensure_voice_room(thread_id: str):
     thread_id = str(thread_id or "").strip()
     if not thread_id:
         return False, "No pude identificar la sala de esta conversación."
-    if not COMMUNITY_TOKEN:
-        return False, "Falta COMMUNITY_BOT_TOKEN en las variables de Render."
+    if not ACTIVE_BOT_TOKEN:
+        return False, f"Falta el token del bot {DEPLOYMENT_ROLE} en las variables de Render."
 
     lock = VOICE_CONNECT_LOCKS.setdefault(thread_id, asyncio.Lock())
     async with lock:
@@ -14157,10 +14159,10 @@ Uso: !enciclopedia <nombre>""",
 
     if command in ("!dj", "!reproducir"):
         dj_source = source
-        if not COMMUNITY_TOKEN:
+        if not ACTIVE_BOT_TOKEN:
             await send_message(
                 thread,
-                "El DJ necesita COMMUNITY_BOT_TOKEN configurado en las variables de Render.",
+                f"El DJ necesita el token del bot {DEPLOYMENT_ROLE} configurado en Render.",
                 dj_source,
                 reply
             )
@@ -15594,6 +15596,7 @@ async def developer_webhook(request: Request):
 async def health():
     return {
         "bot": "Katheryne",
+        "role": DEPLOYMENT_ROLE,
         "status": "online",
         "uptime": int(time.time() - STARTED)
     }
@@ -15603,7 +15606,8 @@ async def health():
 async def health_check():
     return {
         "ok": True,
-        "bot": "Katheryne"
+        "bot": "Katheryne",
+        "role": DEPLOYMENT_ROLE
     }
 
 
