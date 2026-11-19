@@ -7,8 +7,8 @@ import pytest
 import main as bot_main
 
 
-def test_all_api_source_labels_resolve_to_the_community_token(monkeypatch):
-    monkeypatch.setattr(bot_main, "COMMUNITY_TOKEN", "community-token-for-test")
+def test_all_api_source_labels_resolve_to_the_active_deployment_token(monkeypatch):
+    monkeypatch.setattr(bot_main, "ACTIVE_BOT_TOKEN", "community-token-for-test")
     assert bot_main.token_for("community") == "community-token-for-test"
     assert bot_main.token_for("developer") == "community-token-for-test"
 
