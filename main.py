@@ -1751,7 +1751,7 @@ async def build_status_message(source: str, nickname: str, thread_id: str | None
     )
 
     lines = [
-        "╔════ KATHERINE · ESTADO ════╗",
+        "╔════ KATHERYNE · ESTADO ════╗",
         f"👋 Solicitud de: {nickname}",
         f"🤖 Proceso: {'🟢 Operativo' if api_ok else '🟡 Activo, API no disponible'}",
         f"📡 Anarchy API: {api_line}",
@@ -2296,7 +2296,7 @@ def sanitize_chat_text(content: Any, allow_safe_links: bool = False) -> str:
             label, target = match.group(1), match.group(2).strip().strip("<>")
             if not is_safe_public_url(target):
                 return label
-            marker = f"KATHERINE_SAFE_LINK_{len(preserved_links)}_TOKEN"
+            marker = f"KATHERYNE_SAFE_LINK_{len(preserved_links)}_TOKEN"
             preserved_links[marker] = f"[{label}]({target})"
             return marker
         text = re.sub(
@@ -2773,7 +2773,7 @@ async def send_nexus_center(
     )
     await send_message(
         thread_id,
-        "KATHERINE · CENTRO DE CONTROL\n"
+        "KATHERYNE · CENTRO DE CONTROL\n"
         "Accesos directos a las funciones principales. "
         "Los controles ejecutan los comandos existentes con sus permisos habituales.",
         source, reply_id, buttons
@@ -2784,7 +2784,7 @@ async def community_event_message(thread_id: str, event: dict) -> str:
     participants = event.get("participants") or {}
     remaining = max(0, int(float(event.get("expires_at", 0)) - time.time()))
     return (
-        "EVENTO DE COMUNIDAD · KATHERINE\n"
+        "EVENTO DE COMUNIDAD · KATHERYNE\n"
         f"{event.get('title', 'Actividad')}\n\n"
         f"Participantes: {len(participants)}/{int(event.get('capacity', 40))}\n"
         f"Vigencia restante: {format_duration(remaining)}\n"
@@ -3021,7 +3021,7 @@ MENU_SECTIONS = {
     },
     "system": {
         "icon": "⚙",
-        "title": "SISTEMA KATHERINE",
+        "title": "SISTEMA KATHERYNE",
         "description": "Diagnóstico y utilidades del bot.",
         "commands": [
             ("Estado", "estado"),
@@ -3053,7 +3053,7 @@ async def send_interactive_menu(
         )
         await send_message(
             thread_id,
-            "╭── ✦ KATHERINE · MENÚ\n│ Elige una sección para ver sus accesos.\n╰─ ◈ Las acciones conservan sus permisos habituales.",
+            "╭── ✦ KATHERYNE · MENÚ\n│ Elige una sección para ver sus accesos.\n╰─ ◈ Las acciones conservan sus permisos habituales.",
             source,
             reply_id,
             buttons
@@ -3078,7 +3078,7 @@ async def send_interactive_menu(
         ttl=1800
     )
     content = (
-        f"╭── {section.get('icon', '✦')} KATHERINE / {section['title']}\n"
+        f"╭── {section.get('icon', '✦')} KATHERYNE / {section['title']}\n"
         f"│ {section['description']}\n"
         "├─ ◈ ACCESOS\n"
         + "\n".join(f"│ • {label}: {PREFIX}{command}" for label, command in section["commands"])
@@ -10670,7 +10670,7 @@ async def send_admin_panel(
         )
         await send_message(
             thread_id,
-            "KATHERINE · PANEL DE ADMINISTRACIÓN\nSelecciona el módulo que quieres consultar:",
+            "KATHERYNE · PANEL DE ADMINISTRACIÓN\nSelecciona el módulo que quieres consultar:",
             source, reply_id, buttons
         )
         return
@@ -11487,7 +11487,7 @@ async def _handle_command_impl(event: dict, source: str):
     if command == "!autotest":
         results = await asyncio.to_thread(run_katherine_self_tests)
         lines = [
-            "AUTOTEST — KATHERINE",
+            "AUTOTEST — KATHERYNE",
             f"Pruebas ejecutadas: {results['checks']}",
             f"Correctas: {results['passed']}",
             f"Fallidas: {results['failed']}"
@@ -12629,7 +12629,7 @@ Uso: !enciclopedia <nombre>""",
         )
         await send_message(
             thread,
-            "TRIVIA KATHERINE\n\n" + q[0] + "\n\nSelecciona tu respuesta:",
+            "TRIVIA KATHERYNE\n\n" + q[0] + "\n\nSelecciona tu respuesta:",
             source,
             reply,
             buttons
@@ -12747,7 +12747,7 @@ Uso: !enciclopedia <nombre>""",
     if command in ("!ranking", "!top"):
         top = get_top_users("points", 10, scope_key)
 
-        answer = "RANKING KATHERINE\n\n" + (
+        answer = "RANKING KATHERYNE\n\n" + (
             "\n".join(
                 f"{i}. {u} — {p} puntos"
                 for i, (u, p) in enumerate(top, 1)
@@ -13148,7 +13148,7 @@ Uso: !enciclopedia <nombre>""",
         active_webhooks = sum(1 for task in webhook_tasks if not task.done())
         commit = os.getenv("RENDER_GIT_COMMIT", "").strip()
         system_lines = [
-            "✦ KATHERINE · SISTEMA DEL CREADOR ✦",
+            "✦ KATHERYNE · SISTEMA DEL CREADOR ✦",
             f"Proceso: {'operativo' if result.get('ok') else 'activo, API no disponible'}",
             f"Anarchy API: {'conectada' if result.get('ok') else 'sin conexión'} · "
             f"{api_latency_ms:.0f} ms · HTTP {result.get('status', '?')}",
@@ -13186,7 +13186,7 @@ Uso: !enciclopedia <nombre>""",
         active_background = sum(1 for task in background_tasks if not task.done())
         active_webhooks = sum(1 for task in webhook_tasks if not task.done())
         performance_lines = [
-            "✦ KATHERINE · RENDIMIENTO ✦",
+            "✦ KATHERYNE · RENDIMIENTO ✦",
             f"CPU del proceso: {cpu_line}",
             f"RAM del proceso: {ram_line}",
             f"RAM del contenedor: {get_container_memory_usage()}",
@@ -13209,7 +13209,7 @@ Uso: !enciclopedia <nombre>""",
         option = query.casefold().strip()
         if option in {"", "ayuda", "menu", "menú"}:
             lab_lines = [
-                "✦ KATHERINE · LABORATORIO PRIVADO ✦",
+                "✦ KATHERYNE · LABORATORIO PRIVADO ✦",
                 "Herramientas de comprobación seguras; no modifican la configuración de producción.",
                 "",
                 "!laboratorio pruebas — Ejecuta pruebas internas deterministas sin llamadas a IA.",
@@ -13303,7 +13303,7 @@ Uso: !enciclopedia <nombre>""",
             if any(provider in item for provider in ("Gemini", "Groq"))
         ]
         diagnostic = [
-            "KATHERINE · DIAGNÓSTICO",
+            "KATHERYNE · DIAGNÓSTICO",
             f"SQLite: {storage_state} · {db_size} bytes",
             f"Almacenamiento persistente: {'sí' if persistent else 'no (filesystem efímero)'}",
             f"Ruta de datos: {DATA_DIR}",
@@ -13339,7 +13339,7 @@ Uso: !enciclopedia <nombre>""",
             and float(item.get("circuit_open_until", 0) or 0) > time.time()
         )
         answer = "\n".join([
-            "KATHERINE · MÉTRICAS DEL PROCESO",
+            "KATHERYNE · MÉTRICAS DEL PROCESO",
             f"Uptime: {format_duration(time.monotonic() - STARTED_MONOTONIC)}",
             f"Mensajes: {metrics['text_messages_received']} · comandos: {metrics['commands_received']}",
             f"Respuestas enviadas: {metrics['messages_sent']}",
@@ -13474,7 +13474,7 @@ Uso: !enciclopedia <nombre>""",
             results.append((target, bool(result.get("ok")), result.get("status")))
         succeeded = [target for target, ok, _ in results if ok]
         failed = [(target, code) for target, ok, code in results if not ok]
-        lines = ["PERFIL DE KATHERINE"]
+        lines = ["PERFIL DE KATHERYNE"]
         if succeeded:
             lines.append("Actualizado: " + ", ".join(succeeded))
         if failed:
@@ -13542,7 +13542,7 @@ Uso: !enciclopedia <nombre>""",
                 icon_url = bot_data.get("icon") if isinstance(bot_data, dict) else None
             results.append((target, bool(icon_url), uploaded.get("status"), None))
 
-        lines = ["AVATAR DE KATHERINE"]
+        lines = ["AVATAR DE KATHERYNE"]
         for target, ok, status, detail in results:
             if ok:
                 lines.append(f"✓ {target}: actualizado y confirmado.")
@@ -14311,7 +14311,7 @@ Uso: !enciclopedia <nombre>""",
             )
             await send_message(
                 thread,
-                "FUENTES MUSICALES DE KATHERINE\n"
+                "FUENTES MUSICALES DE KATHERYNE\n"
                 f"• Internet Archive: {archive_status}.\n"
                 f"• Wikimedia Commons: {commons_status}; puede pausarse si el CDN bloquea la descarga.\n"
                 f"• Jamendo: {jamendo_status}.\n"
@@ -14331,7 +14331,7 @@ Uso: !enciclopedia <nombre>""",
             tracks = list_dj_tracks()
             await send_message(
                 thread,
-                "KATHERINE DJ\n"
+                "KATHERYNE DJ\n"
                 + ("Archivos locales:\n" + "\n".join(f"• {name}" for name in tracks)
                    if tracks else "No hay audios locales.")
                 + "\n\nPara buscar música pública: !dj buscar <tema>\n"
