@@ -1271,7 +1271,7 @@ class KatherineAI:
         groq = self._groq_provider_config()
         last = self._last_provider_summary or self._last_provider_context.get()
         lines = [
-            "KATHERINE AI · ESTADO",
+            "KATHERYNE · ESTADO",
             f"Principal: {primary['name']} · {primary['model']}.",
             "PROVEEDORES:",
             self._provider_status_line(primary),
