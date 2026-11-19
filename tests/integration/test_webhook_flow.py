@@ -119,7 +119,7 @@ async def test_signed_community_webhook_is_accepted_and_dispatched(
 
     assert response.status_code == 200
     assert response.json() == {"ok": True}
-    assert received == [(event, "developer")]
+    assert received == [(event, "community")]
     assert bot_main.metrics["webhook_events"] == 1
 
 
