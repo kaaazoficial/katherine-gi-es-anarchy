@@ -96,3 +96,12 @@ def test_warm_replies_recognize_more_natural_compliments(message, expected):
     call = extract_katherine_call(message)
     assert call is not None
     assert detect_affectionate_expression(call) == expected
+
+
+@pytest.mark.parametrize(("message", "expected"), [
+    ("Katheryne, ¿puedes ayudarme?", "¿puedes ayudarme?"),
+    ("@Katheryne revisa mi pregunta", "revisa mi pregunta"),
+    ("Oye, Katheryne: explícame esto", "explícame esto"),
+])
+def test_recognizes_canonical_katheryne_vocative(message, expected):
+    assert extract_katherine_call(message) == expected

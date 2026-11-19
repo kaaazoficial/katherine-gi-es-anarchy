@@ -325,7 +325,7 @@ async def application_lifespan(application: FastAPI):
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 app = FastAPI(
-    title="Katherine · Genshin Impact ES",
+    title="Katheryne · Genshin Impact ES",
     lifespan=application_lifespan,
 )
 
@@ -1282,7 +1282,7 @@ def extract_reply_reference(message: dict | None) -> tuple[str, str]:
 
 
 def is_known_katherine_message(message_id: str, source: str, thread_id: str) -> bool:
-    """Only replies to message IDs confirmed by Anarchy can trigger Katherine."""
+    """Only replies to message IDs confirmed by Anarchy can trigger Katheryne."""
     target = str(message_id or "").strip()
     if not target:
         return False
@@ -1751,7 +1751,7 @@ async def build_status_message(source: str, nickname: str, thread_id: str | None
     )
 
     lines = [
-        "╔════ KATHERINE · ESTADO ════╗",
+        "╔════ KATHERYNE · ESTADO ════╗",
         f"👋 Solicitud de: {nickname}",
         f"🤖 Proceso: {'🟢 Operativo' if api_ok else '🟡 Activo, API no disponible'}",
         f"📡 Anarchy API: {api_line}",
@@ -2296,7 +2296,7 @@ def sanitize_chat_text(content: Any, allow_safe_links: bool = False) -> str:
             label, target = match.group(1), match.group(2).strip().strip("<>")
             if not is_safe_public_url(target):
                 return label
-            marker = f"KATHERINE_SAFE_LINK_{len(preserved_links)}_TOKEN"
+            marker = f"KATHERYNE_SAFE_LINK_{len(preserved_links)}_TOKEN"
             preserved_links[marker] = f"[{label}]({target})"
             return marker
         text = re.sub(
@@ -2671,7 +2671,7 @@ async def send_message(
                         }
                 if is_not_in_chat_response(result.get("status"), result.get("data")):
                     logging.info(
-                        "[ANARCHY] Envío omitido: Katherine ya no pertenece al chat."
+                        "[ANARCHY] Envío omitido: Katheryne ya no pertenece al chat."
                     )
                 else:
                     logging.error(
@@ -2773,7 +2773,7 @@ async def send_nexus_center(
     )
     await send_message(
         thread_id,
-        "KATHERINE · CENTRO DE CONTROL\n"
+        "KATHERYNE · CENTRO DE CONTROL\n"
         "Accesos directos a las funciones principales. "
         "Los controles ejecutan los comandos existentes con sus permisos habituales.",
         source, reply_id, buttons
@@ -2784,7 +2784,7 @@ async def community_event_message(thread_id: str, event: dict) -> str:
     participants = event.get("participants") or {}
     remaining = max(0, int(float(event.get("expires_at", 0)) - time.time()))
     return (
-        "EVENTO DE COMUNIDAD · KATHERINE\n"
+        "EVENTO DE COMUNIDAD · KATHERYNE\n"
         f"{event.get('title', 'Actividad')}\n\n"
         f"Participantes: {len(participants)}/{int(event.get('capacity', 40))}\n"
         f"Vigencia restante: {format_duration(remaining)}\n"
@@ -3010,7 +3010,7 @@ MENU_SECTIONS = {
         "title": "COMUNIDAD",
         "description": (
             "Consulta salas, reclama recompensas y revisa tus puntos. "
-            "El sistema económico es ficticio y solo funciona dentro de Katherine."
+            "El sistema económico es ficticio y solo funciona dentro de Katheryne."
         ),
         "commands": [
             ("Salas en vivo", "salas"),
@@ -3021,7 +3021,7 @@ MENU_SECTIONS = {
     },
     "system": {
         "icon": "⚙",
-        "title": "SISTEMA KATHERINE",
+        "title": "SISTEMA KATHERYNE",
         "description": "Diagnóstico y utilidades del bot.",
         "commands": [
             ("Estado", "estado"),
@@ -3053,7 +3053,7 @@ async def send_interactive_menu(
         )
         await send_message(
             thread_id,
-            "╭── ✦ KATHERINE · MENÚ\n│ Elige una sección para ver sus accesos.\n╰─ ◈ Las acciones conservan sus permisos habituales.",
+            "╭── ✦ KATHERYNE · MENÚ\n│ Elige una sección para ver sus accesos.\n╰─ ◈ Las acciones conservan sus permisos habituales.",
             source,
             reply_id,
             buttons
@@ -3078,7 +3078,7 @@ async def send_interactive_menu(
         ttl=1800
     )
     content = (
-        f"╭── {section.get('icon', '✦')} KATHERINE / {section['title']}\n"
+        f"╭── {section.get('icon', '✦')} KATHERYNE / {section['title']}\n"
         f"│ {section['description']}\n"
         "├─ ◈ ACCESOS\n"
         + "\n".join(f"│ • {label}: {PREFIX}{command}" for label, command in section["commands"])
@@ -3187,7 +3187,7 @@ async def archive_item_details(identifier: str) -> dict | None:
     response = await external_request(
         "GET",
         f"{IA_BASE}/metadata/{quote(identifier, safe='')}",
-        headers={"Accept": "application/json", "User-Agent": "Katherine-AnarchyBot/3.1 (GPT-6; https://github.com/kaaazoficial/katherine-gi-es-anarchy)"},
+        headers={"Accept": "application/json", "User-Agent": "Katheryne-AnarchyBot/3.1 (GPT-6; https://github.com/kaaazoficial/katherine-gi-es-anarchy)"},
         timeout=25
     )
     if not response.is_success:
@@ -3475,7 +3475,7 @@ async def search_wikimedia_audio(query: str, limit: int = 5) -> list[dict]:
         },
         headers={
             "Accept": "application/json",
-            "User-Agent": "Katherine-AnarchyBot/3.2 (music catalog; https://github.com/kaaazoficial/katherine-gi-es-anarchy)",
+            "User-Agent": "Katheryne-AnarchyBot/3.2 (music catalog; https://github.com/kaaazoficial/katherine-gi-es-anarchy)",
         },
         timeout=25,
     )
@@ -3586,7 +3586,7 @@ async def search_jamendo_audio(query: str, limit: int = 5) -> list[dict]:
         },
         headers={
             "Accept": "application/json",
-            "User-Agent": "Katherine-AnarchyBot/3.2 (music catalog; https://github.com/kaaazoficial/katherine-gi-es-anarchy)",
+            "User-Agent": "Katheryne-AnarchyBot/3.2 (music catalog; https://github.com/kaaazoficial/katherine-gi-es-anarchy)",
         },
         timeout=25,
     )
@@ -3678,7 +3678,7 @@ async def search_ccmixter_audio(query: str, limit: int = 5) -> list[dict]:
         },
         headers={
             "Accept": "application/json",
-            "User-Agent": "Katherine-AnarchyBot/3.3 (licensed music catalog; https://github.com/kaaazoficial/katherine-gi-es-anarchy)",
+            "User-Agent": "Katheryne-AnarchyBot/3.3 (licensed music catalog; https://github.com/kaaazoficial/katherine-gi-es-anarchy)",
         },
         timeout=20,
     )
@@ -3750,7 +3750,7 @@ async def search_ccmixter_audio(query: str, limit: int = 5) -> list[dict]:
                 stream_url,
                 headers={
                     "Accept": "audio/x-mpegurl, application/vnd.apple.mpegurl, text/plain, */*",
-                    "User-Agent": "Katherine-AnarchyBot/3.3",
+                    "User-Agent": "Katheryne-AnarchyBot/3.3",
                 },
                 timeout=20,
             )
@@ -3845,7 +3845,7 @@ async def search_audius_audio(query: str, limit: int = 5) -> list[dict]:
         },
         headers={
             "Accept": "application/json",
-            "User-Agent": "Katherine-AnarchyBot/3.3 (Audius music integration; https://github.com/kaaazoficial/katherine-gi-es-anarchy)",
+            "User-Agent": "Katheryne-AnarchyBot/3.3 (Audius music integration; https://github.com/kaaazoficial/katherine-gi-es-anarchy)",
         },
         timeout=20,
     )
@@ -3945,7 +3945,7 @@ async def search_freesound_audio(query: str, limit: int = 5) -> list[dict]:
         headers={
             "Accept": "application/json",
             "Authorization": f"Token {FREESOUND_API_KEY}",
-            "User-Agent": "Katherine-AnarchyBot/3.4 (licensed music catalog; https://github.com/kaaazoficial/katherine-gi-es-anarchy)",
+            "User-Agent": "Katheryne-AnarchyBot/3.4 (licensed music catalog; https://github.com/kaaazoficial/katherine-gi-es-anarchy)",
         },
         timeout=20,
     )
@@ -4331,7 +4331,7 @@ async def search_uncommon_ear_audio(query: str, limit: int = 5) -> list[dict]:
         headers={
             "Accept": "application/json",
             "Authorization": f"Bearer {UNCOMMON_EAR_API_KEY}",
-            "User-Agent": "Katherine-AnarchyBot/3.2 (music catalog; https://github.com/kaaazoficial/katherine-gi-es-anarchy)",
+            "User-Agent": "Katheryne-AnarchyBot/3.2 (music catalog; https://github.com/kaaazoficial/katherine-gi-es-anarchy)",
         },
         timeout=20,
     )
@@ -5129,7 +5129,7 @@ def find_live_room_for_thread(
 
 
 async def ensure_voice_room(thread_id: str):
-    """Join an active Anarchy call for this thread and publish Katherine's audio track."""
+    """Join an active Anarchy call for this thread and publish Katheryne's audio track."""
     thread_id = str(thread_id or "").strip()
     if not thread_id:
         return False, "No pude identificar la sala de esta conversación."
@@ -5150,7 +5150,7 @@ async def ensure_voice_room(thread_id: str):
             except Exception:
                 room_connected = False
             if room_connected and not existing_state.get("_cleanup_started"):
-                return True, "Katherine ya está dentro de la llamada."
+                return True, "Katheryne ya está dentro de la llamada."
             logging.warning(
                 "[VOZ] Estado LiveKit obsoleto en %s; limpiando antes de reconectar.",
                 thread_id,
@@ -5341,8 +5341,8 @@ async def ensure_voice_room(thread_id: str):
             ) / 100.0
             room_state["tts_read_links"] = get_chat_setting(thread_id, "tts_read_links", "0") == "1"
             room_state["tts_read_mentions"] = get_chat_setting(thread_id, "tts_read_mentions", "0") == "1"
-            logging.info("[VOZ] Katherine conectada a la llamada %s", thread_id)
-            return True, "Katherine se unió a la llamada."
+            logging.info("[VOZ] Katheryne conectada a la llamada %s", thread_id)
+            return True, "Katheryne se unió a la llamada."
         except asyncio.TimeoutError:
             if room is not None:
                 try:
@@ -5351,7 +5351,7 @@ async def ensure_voice_room(thread_id: str):
                     pass
             if joined_api:
                 await api("POST", f"/live-rooms/{thread_id}/leave", "community")
-            return False, "La sala no confirmó que Katherine pudiera publicar audio."
+            return False, "La sala no confirmó que Katheryne pudiera publicar audio."
         except Exception as exc:
             if room is not None:
                 try:
@@ -5472,7 +5472,7 @@ async def wait_for_music_playout(state: dict, timeout: float = 4.0) -> bool:
 
 
 async def stop_dj_playback(thread_id: str) -> bool:
-    """Stop music and clear all buffers without disconnecting Katherine from LiveKit."""
+    """Stop music and clear all buffers without disconnecting Katheryne from LiveKit."""
     key = str(thread_id)
     state = DJ_ROOMS.get(key)
     if not state:
@@ -5714,7 +5714,7 @@ async def enable_room_reading(thread_id: str):
 async def disable_room_reading(thread_id: str):
     state = DJ_ROOMS.get(str(thread_id))
     if not state:
-        return True, "La lectura ya está desactivada; Katherine no está conectada a esta sala."
+        return True, "La lectura ya está desactivada; Katheryne no está conectada a esta sala."
     state["reading_enabled"] = False
     for queue_name in ("speech_queue", "speech_priority_queue"):
         queue = state.get(queue_name)
@@ -5736,7 +5736,7 @@ async def disable_room_reading(thread_id: str):
             pass
     state["speaking"].clear()
     await drain_audio_queue(state.get("speech_audio_queue"))
-    return True, "Lectura en voz alta desactivada. Katherine seguirá dentro de la llamada."
+    return True, "Lectura en voz alta desactivada. Katheryne seguirá dentro de la llamada."
 
 
 async def enqueue_message_for_speech(event: dict, source: str):
@@ -5865,7 +5865,7 @@ async def resolve_audius_stream_url(url: str) -> str:
         },
         headers={
             "Accept": "application/json",
-            "User-Agent": "Katherine-AnarchyBot/3.3",
+            "User-Agent": "Katheryne-AnarchyBot/3.3",
         },
         timeout=20,
         safe_public=True,
@@ -5923,7 +5923,7 @@ async def _download_dj_audio_uncached(url: str, file_extension: str | None = Non
     try:
         timeout = httpx.Timeout(60.0, connect=20.0)
         headers = {
-            "User-Agent": "Katherine-AnarchyBot/3.1",
+            "User-Agent": "Katheryne-AnarchyBot/3.1",
             "Accept": "audio/*,application/octet-stream;q=0.9,*/*;q=0.5",
         }
         async with EXTERNAL_GLOBAL_LIMIT:
@@ -8044,7 +8044,7 @@ async def fetch_helper_build_json(path: str):
             "GET",
             HELPER_BUILDS_RAW_BASE + path,
             timeout=15,
-            headers={"User-Agent": "Katherine-AnarchyBot/3.0"}
+            headers={"User-Agent": "Katheryne-AnarchyBot/3.0"}
         )
         if response.status_code != 200:
             return None
@@ -8070,7 +8070,7 @@ async def get_helper_build_tree():
             timeout=22,
             headers={
                 "Accept": "application/vnd.github+json",
-                "User-Agent": "Katherine-AnarchyBot/3.0"
+                "User-Agent": "Katheryne-AnarchyBot/3.0"
             }
         )
         if response.status_code != 200:
@@ -8766,7 +8766,7 @@ async def fetch_kqm_teams(character: dict | None, query: str, name: str, key: st
                 url,
                 timeout=18,
                 follow_redirects=True,
-                headers={"User-Agent": "Mozilla/5.0 Katherine-AnarchyBot/3.0"}
+                headers={"User-Agent": "Mozilla/5.0 Katheryne-AnarchyBot/3.0"}
             )
             if response.status_code != 200:
                 cache[key_cache] = (time.time() + 3600, None)
@@ -9160,7 +9160,7 @@ async def fetch_community_guide_url(url: str, cache_key: str,
             timeout=14,
             follow_redirects=True,
             headers={
-                "User-Agent": "Mozilla/5.0 (compatible; Katherine-AnarchyBot/4.0)",
+                "User-Agent": "Mozilla/5.0 (compatible; Katheryne-AnarchyBot/4.0)",
                 "Accept": "text/html,application/xhtml+xml"
             }
         )
@@ -9440,7 +9440,7 @@ async def fetch_genshin_builds_guide(slugs):
                 response = await external_request(
                     "GET", url, timeout=18, follow_redirects=True,
                     headers={
-                        "User-Agent": "Mozilla/5.0 Katherine-AnarchyBot/4.0",
+                        "User-Agent": "Mozilla/5.0 Katheryne-AnarchyBot/4.0",
                         "Accept": "text/markdown,text/plain,text/html,*/*"
                     }
                 )
@@ -9528,7 +9528,7 @@ def parse_genshin_builds_content(content: str, url: str):
 # COBERTURA DE GUÍAS POR PERSONAJE
 # ---------------------------------------------------------------------------
 GUIDE_COVERAGE_SOURCE_NAMES = {
-    "local": "Katherine · recomendaciones revisadas",
+    "local": "Katheryne · recomendaciones revisadas",
     "genshin_db": "Genshin-DB",
     "helper": "Genshin Impact Helper Team",
     "genshin_builds": "Genshin-Builds",
@@ -9693,7 +9693,7 @@ async def fetch_official_news(category: str):
     try:
         response = await external_request(
             "GET", OFFICIAL_NEWS_INDEX, timeout=18, follow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 Katherine-AnarchyBot/4.0",
+            headers={"User-Agent": "Mozilla/5.0 Katheryne-AnarchyBot/4.0",
                      "Accept": "text/html,application/xhtml+xml"}
         )
         if response.status_code != 200:
@@ -9721,7 +9721,7 @@ async def fetch_official_news(category: str):
         for item in candidates[:8]:
             detail = await external_request(
                 "GET", item["url"], timeout=16, follow_redirects=True,
-                headers={"User-Agent": "Mozilla/5.0 Katherine-AnarchyBot/4.0",
+                headers={"User-Agent": "Mozilla/5.0 Katheryne-AnarchyBot/4.0",
                          "Accept": "text/html,application/xhtml+xml"}
             )
             if detail.status_code != 200:
@@ -9867,7 +9867,7 @@ def build_character_guide_coverage(data: dict):
                 or community_artifacts
             ),
             "source": (
-                "Katherine · guía revisada" if artifact and artifact.get("sets")
+                "Katheryne · guía revisada" if artifact and artifact.get("sets")
                 else "Genshin Impact Helper Team" if helper_has_sets
                 else source_for("artifacts") if community_artifacts
                 else "Sin fuente"
@@ -9881,7 +9881,7 @@ def build_character_guide_coverage(data: dict):
                 or community_stats
             ),
             "source": (
-                "Katherine · guía revisada" if artifact and artifact.get("main")
+                "Katheryne · guía revisada" if artifact and artifact.get("main")
                 else "Genshin Impact Helper Team" if helper_has_main
                 else source_for("stats") if community_stats
                 else "Sin fuente"
@@ -9895,7 +9895,7 @@ def build_character_guide_coverage(data: dict):
                 or community_stats
             ),
             "source": (
-                "Katherine · guía revisada" if artifact and artifact.get("subs")
+                "Katheryne · guía revisada" if artifact and artifact.get("subs")
                 else "Genshin Impact Helper Team" if helper_has_sub
                 else source_for("stats") if community_stats
                 else "Sin fuente"
@@ -9909,7 +9909,7 @@ def build_character_guide_coverage(data: dict):
                 or community.get("weapons")
             ),
             "source": (
-                "Katherine · guía revisada" if weapons and weapons.get("weapons")
+                "Katheryne · guía revisada" if weapons and weapons.get("weapons")
                 else "Genshin Impact Helper Team" if helper_weapons
                 else source_for("weapons") if community.get("weapons")
                 else "Sin fuente"
@@ -9923,7 +9923,7 @@ def build_character_guide_coverage(data: dict):
                 or community.get("teams")
             ),
             "source": (
-                "Katherine · guía revisada" if team
+                "Katheryne · guía revisada" if team
                 else "KeqingMains" if kqm.get("teams")
                 else source_for("teams") if community.get("teams")
                 else "Sin fuente"
@@ -9933,7 +9933,7 @@ def build_character_guide_coverage(data: dict):
             "label": "Prioridad de talentos",
             "ok": bool(priority or helper_talents or community.get("talents")),
             "source": (
-                "Katherine · guía revisada" if priority
+                "Katheryne · guía revisada" if priority
                 else "Genshin Impact Helper Team" if helper_talents
                 else source_for("talents") if community.get("talents")
                 else "Sin fuente"
@@ -9958,7 +9958,7 @@ def build_character_guide_coverage(data: dict):
             "label": "Recomendación de constelaciones",
             "ok": bool(CONSTELLATION_GUIDES.get(data.get("key"))),
             "source": (
-                "Katherine · guía revisada"
+                "Katheryne · guía revisada"
                 if CONSTELLATION_GUIDES.get(data.get("key")) else "Sin fuente"
             )
         },
@@ -10129,7 +10129,7 @@ async def resolve_avatar_image(source_url: str) -> tuple[bytes, str]:
             max_response_bytes=1_000_000,
             timeout=20,
             headers={
-                "User-Agent": "Mozilla/5.0 (compatible; Katherine-AnarchyBot/4.0)",
+                "User-Agent": "Mozilla/5.0 (compatible; Katheryne-AnarchyBot/4.0)",
                 "Accept": "image/avif,image/webp,image/png,image/jpeg,image/gif,text/html"
             }
         )
@@ -10152,7 +10152,7 @@ async def resolve_avatar_image(source_url: str) -> tuple[bytes, str]:
                 max_response_bytes=AVATAR_MAX_BYTES,
                 timeout=20,
                 headers={
-                    "User-Agent": "Mozilla/5.0 (compatible; Katherine-AnarchyBot/4.0)",
+                    "User-Agent": "Mozilla/5.0 (compatible; Katheryne-AnarchyBot/4.0)",
                     "Accept": "image/png,image/jpeg,image/webp,image/gif"
                 }
             )
@@ -10528,7 +10528,7 @@ async def translate_text(text: str, target_language: str) -> str:
         ).fetchone()
         used = int(row["characters_used"]) if row else 0
         if used + chars > 4500:
-            raise RuntimeError("Se alcanzó el límite diario preventivo de traducción gratuita de Katherine. Inténtalo mañana.")
+            raise RuntimeError("Se alcanzó el límite diario preventivo de traducción gratuita de Katheryne. Inténtalo mañana.")
         db.execute(
             """INSERT INTO translation_daily_usage(day_key,characters_used)
                VALUES(?,?) ON CONFLICT(day_key) DO UPDATE SET
@@ -10578,7 +10578,7 @@ async def search_multimedia(kind: str, query: str, limit: int = 5) -> str:
                 "formatversion": 2
             },
             timeout=18,
-            headers={"User-Agent": "Katherine-AnarchyBot/3.1 (Wikimedia Commons search)"}
+            headers={"User-Agent": "Katheryne-AnarchyBot/3.1 (Wikimedia Commons search)"}
         )
         if not response.is_success:
             raise RuntimeError(f"Wikimedia Commons respondió HTTP {response.status_code}.")
@@ -10670,7 +10670,7 @@ async def send_admin_panel(
         )
         await send_message(
             thread_id,
-            "KATHERINE · PANEL DE ADMINISTRACIÓN\nSelecciona el módulo que quieres consultar:",
+            "KATHERYNE · PANEL DE ADMINISTRACIÓN\nSelecciona el módulo que quieres consultar:",
             source, reply_id, buttons
         )
         return
@@ -11487,7 +11487,7 @@ async def _handle_command_impl(event: dict, source: str):
     if command == "!autotest":
         results = await asyncio.to_thread(run_katherine_self_tests)
         lines = [
-            "AUTOTEST — KATHERINE",
+            "AUTOTEST — KATHERYNE",
             f"Pruebas ejecutadas: {results['checks']}",
             f"Correctas: {results['passed']}",
             f"Fallidas: {results['failed']}"
@@ -11713,7 +11713,7 @@ async def _handle_command_impl(event: dict, source: str):
             await send_message(
                 thread,
                 "No encuentro ese perfil todavía. La persona debe escribir "
-                "al menos un comando en este chat para que Katherine pueda registrarla.",
+                "al menos un comando en este chat para que Katheryne pueda registrarla.",
                 source,
                 reply
             )
@@ -11789,7 +11789,7 @@ async def _handle_command_impl(event: dict, source: str):
             await send_message(
                 thread,
                 f"No puedo registrar el regalo porque @{target_name} "
-                "aún no está en los perfiles de Katherine.",
+                "aún no está en los perfiles de Katheryne.",
                 source,
                 reply
             )
@@ -12629,7 +12629,7 @@ Uso: !enciclopedia <nombre>""",
         )
         await send_message(
             thread,
-            "TRIVIA KATHERINE\n\n" + q[0] + "\n\nSelecciona tu respuesta:",
+            "TRIVIA KATHERYNE\n\n" + q[0] + "\n\nSelecciona tu respuesta:",
             source,
             reply,
             buttons
@@ -12747,7 +12747,7 @@ Uso: !enciclopedia <nombre>""",
     if command in ("!ranking", "!top"):
         top = get_top_users("points", 10, scope_key)
 
-        answer = "RANKING KATHERINE\n\n" + (
+        answer = "RANKING KATHERYNE\n\n" + (
             "\n".join(
                 f"{i}. {u} — {p} puntos"
                 for i, (u, p) in enumerate(top, 1)
@@ -12821,7 +12821,7 @@ Uso: !enciclopedia <nombre>""",
                 None
             )
             if not selected:
-                await send_message(thread, "No encontré esa encuesta en esta sala; pudo haber caducado o Katherine reinició.", source, reply)
+                await send_message(thread, "No encontré esa encuesta en esta sala; pudo haber caducado o Katheryne reinició.", source, reply)
                 return
             if sub == "cerrar":
                 if selected.get("creator_uid") != raw_uid and not is_privileged_uid(admin_uid):
@@ -13148,7 +13148,7 @@ Uso: !enciclopedia <nombre>""",
         active_webhooks = sum(1 for task in webhook_tasks if not task.done())
         commit = os.getenv("RENDER_GIT_COMMIT", "").strip()
         system_lines = [
-            "✦ KATHERINE · SISTEMA DEL CREADOR ✦",
+            "✦ KATHERYNE · SISTEMA DEL CREADOR ✦",
             f"Proceso: {'operativo' if result.get('ok') else 'activo, API no disponible'}",
             f"Anarchy API: {'conectada' if result.get('ok') else 'sin conexión'} · "
             f"{api_latency_ms:.0f} ms · HTTP {result.get('status', '?')}",
@@ -13186,7 +13186,7 @@ Uso: !enciclopedia <nombre>""",
         active_background = sum(1 for task in background_tasks if not task.done())
         active_webhooks = sum(1 for task in webhook_tasks if not task.done())
         performance_lines = [
-            "✦ KATHERINE · RENDIMIENTO ✦",
+            "✦ KATHERYNE · RENDIMIENTO ✦",
             f"CPU del proceso: {cpu_line}",
             f"RAM del proceso: {ram_line}",
             f"RAM del contenedor: {get_container_memory_usage()}",
@@ -13209,7 +13209,7 @@ Uso: !enciclopedia <nombre>""",
         option = query.casefold().strip()
         if option in {"", "ayuda", "menu", "menú"}:
             lab_lines = [
-                "✦ KATHERINE · LABORATORIO PRIVADO ✦",
+                "✦ KATHERYNE · LABORATORIO PRIVADO ✦",
                 "Herramientas de comprobación seguras; no modifican la configuración de producción.",
                 "",
                 "!laboratorio pruebas — Ejecuta pruebas internas deterministas sin llamadas a IA.",
@@ -13303,7 +13303,7 @@ Uso: !enciclopedia <nombre>""",
             if any(provider in item for provider in ("Gemini", "Groq"))
         ]
         diagnostic = [
-            "KATHERINE · DIAGNÓSTICO",
+            "KATHERYNE · DIAGNÓSTICO",
             f"SQLite: {storage_state} · {db_size} bytes",
             f"Almacenamiento persistente: {'sí' if persistent else 'no (filesystem efímero)'}",
             f"Ruta de datos: {DATA_DIR}",
@@ -13339,7 +13339,7 @@ Uso: !enciclopedia <nombre>""",
             and float(item.get("circuit_open_until", 0) or 0) > time.time()
         )
         answer = "\n".join([
-            "KATHERINE · MÉTRICAS DEL PROCESO",
+            "KATHERYNE · MÉTRICAS DEL PROCESO",
             f"Uptime: {format_duration(time.monotonic() - STARTED_MONOTONIC)}",
             f"Mensajes: {metrics['text_messages_received']} · comandos: {metrics['commands_received']}",
             f"Respuestas enviadas: {metrics['messages_sent']}",
@@ -13444,7 +13444,7 @@ Uso: !enciclopedia <nombre>""",
     if command == "!perfilbot":
         if not is_privileged_uid(admin_uid):
             await send_message(
-                thread, "No tienes permiso para modificar el perfil de Katherine.",
+                thread, "No tienes permiso para modificar el perfil de Katheryne.",
                 source, reply
             )
             return
@@ -13474,21 +13474,21 @@ Uso: !enciclopedia <nombre>""",
             results.append((target, bool(result.get("ok")), result.get("status")))
         succeeded = [target for target, ok, _ in results if ok]
         failed = [(target, code) for target, ok, code in results if not ok]
-        lines = ["PERFIL DE KATHERINE"]
+        lines = ["PERFIL DE KATHERYNE"]
         if succeeded:
             lines.append("Actualizado: " + ", ".join(succeeded))
         if failed:
             lines.append("No actualizado: " + ", ".join(
                 f"{target} (HTTP {code or '?'})" for target, code in failed
             ))
-        lines.append("El perfil actualizado corresponde a la única identidad comunitaria de Katherine.")
+        lines.append("El perfil actualizado corresponde a la única identidad comunitaria de Katheryne.")
         await send_message(thread, "\\n".join(lines), source, reply)
         return
 
     if command == "!avatarbot":
         if not is_privileged_uid(admin_uid):
             await send_message(
-                thread, "No tienes permiso para cambiar el avatar de Katherine.",
+                thread, "No tienes permiso para cambiar el avatar de Katheryne.",
                 source, reply
             )
             return
@@ -13542,7 +13542,7 @@ Uso: !enciclopedia <nombre>""",
                 icon_url = bot_data.get("icon") if isinstance(bot_data, dict) else None
             results.append((target, bool(icon_url), uploaded.get("status"), None))
 
-        lines = ["AVATAR DE KATHERINE"]
+        lines = ["AVATAR DE KATHERYNE"]
         for target, ok, status, detail in results:
             if ok:
                 lines.append(f"✓ {target}: actualizado y confirmado.")
@@ -13551,7 +13551,7 @@ Uso: !enciclopedia <nombre>""",
                 lines.append(f"✗ {target}: no confirmado (HTTP {status or '?'}).{reason}")
         lines.append(
             f"Imagen preparada: {mime}, {len(image_bytes) // 1024} KB. "
-            "El avatar pertenece a la única identidad comunitaria de Katherine."
+            "El avatar pertenece a la única identidad comunitaria de Katheryne."
         )
         await send_message(thread, "\\n".join(lines), source, reply)
         return
@@ -13657,7 +13657,7 @@ Uso: !enciclopedia <nombre>""",
         if not state:
             await send_message(
                 thread,
-                "No hay una llamada activa. Usa !join o !dj para conectar a Katherine primero.",
+                "No hay una llamada activa. Usa !join o !dj para conectar a Katheryne primero.",
                 source,
                 reply
             )
@@ -13769,7 +13769,7 @@ Uso: !enciclopedia <nombre>""",
                 return
             state = DJ_ROOMS.get(thread)
             if not state:
-                await send_message(thread, "Katherine no está conectada a una llamada. Usa !join o !dj primero.", source, reply)
+                await send_message(thread, "Katheryne no está conectada a una llamada. Usa !join o !dj primero.", source, reply)
                 return
             if action in ("pausa", "pausar"):
                 state["pause_event"].clear()
@@ -14311,7 +14311,7 @@ Uso: !enciclopedia <nombre>""",
             )
             await send_message(
                 thread,
-                "FUENTES MUSICALES DE KATHERINE\n"
+                "FUENTES MUSICALES DE KATHERYNE\n"
                 f"• Internet Archive: {archive_status}.\n"
                 f"• Wikimedia Commons: {commons_status}; puede pausarse si el CDN bloquea la descarga.\n"
                 f"• Jamendo: {jamendo_status}.\n"
@@ -14320,7 +14320,7 @@ Uso: !enciclopedia <nombre>""",
                 f"• Library of Congress: {loc_status} (National Jukebox, grabaciones históricas).\n"
                 f"• Uncommon Ear: {uncommon_ear_status} (pistas con licencia comercial verificada).\n"
                 "Una pista solo se inicia si supera los controles de licencia, tamaño, descarga, formato y decodificación. "
-                "Si un proveedor devuelve 401/403/429/5xx, se pausa temporalmente y Katherine prueba otra fuente.\n"
+                "Si un proveedor devuelve 401/403/429/5xx, se pausa temporalmente y Katheryne prueba otra fuente.\n"
                 "Búsqueda por ambiente: !dj ambiente estudiar|trabajar|relajarse|dormir|jugar|combate|triste|feliz.",
                 dj_source,
                 reply
@@ -14331,7 +14331,7 @@ Uso: !enciclopedia <nombre>""",
             tracks = list_dj_tracks()
             await send_message(
                 thread,
-                "KATHERINE DJ\n"
+                "KATHERYNE DJ\n"
                 + ("Archivos locales:\n" + "\n".join(f"• {name}" for name in tracks)
                    if tracks else "No hay audios locales.")
                 + "\n\nPara buscar música pública: !dj buscar <tema>\n"
@@ -14504,7 +14504,7 @@ Uso: !enciclopedia <nombre>""",
             if thread not in DJ_ROOMS:
                 await send_message(
                     thread,
-                    "Katherine no está reproduciendo audio en esta sala.",
+                    "Katheryne no está reproduciendo audio en esta sala.",
                     dj_source,
                     reply
                 )
@@ -14512,7 +14512,7 @@ Uso: !enciclopedia <nombre>""",
             await stop_dj_playback(thread)
             await send_message(
                 thread,
-                "⏹️ Música detenida. Katherine permanece dentro de la llamada.",
+                "⏹️ Música detenida. Katheryne permanece dentro de la llamada.",
                 dj_source,
                 reply
             )
@@ -14548,18 +14548,18 @@ Uso: !enciclopedia <nombre>""",
 
     if command in ("!djdetener", "!djstop"):
         if thread not in DJ_ROOMS:
-            await send_message(thread, "Katherine no está conectada a una llamada en esta sala.", source, reply)
+            await send_message(thread, "Katheryne no está conectada a una llamada en esta sala.", source, reply)
             return
         await stop_dj_playback(thread)
-        await send_message(thread, "⏹️ Música detenida. Katherine sigue dentro de la llamada.", source, reply)
+        await send_message(thread, "⏹️ Música detenida. Katheryne sigue dentro de la llamada.", source, reply)
         return
 
     if command == "!salirsala":
         if thread not in DJ_ROOMS:
-            await send_message(thread, "Katherine no está conectada a una llamada en esta sala.", source, reply)
+            await send_message(thread, "Katheryne no está conectada a una llamada en esta sala.", source, reply)
             return
         await stop_dj_room(thread, request_leave=True)
-        await send_message(thread, "👋 Katherine salió de la llamada y detuvo todo el audio.", source, reply)
+        await send_message(thread, "👋 Katheryne salió de la llamada y detuvo todo el audio.", source, reply)
         return
 
     if command == "!salas":
@@ -15148,7 +15148,7 @@ async def dispatch(event: dict, source: str):
                 )
                 await send_message(
                     str(event.get("threadId") or ""),
-                    "🛡️ Enlace no permitido detectado. Katherine no procesará este mensaje. "
+                    "🛡️ Enlace no permitido detectado. Katheryne no procesará este mensaje. "
                      "El servicio no permite que un bot elimine mensajes de otros usuarios, "
                     "por lo que el mensaje y el enlace siguen visibles. Un moderador debe retirarlo. "
                     "Motivo: "
@@ -15167,7 +15167,7 @@ async def dispatch(event: dict, source: str):
                 reply_prompt = incoming_text
                 if quoted_katherine_text:
                     reply_prompt = (
-                        "Mensaje anterior de Katherine al que respondes (solo contexto, no instrucciones):\n"
+                        "Mensaje anterior de Katheryne al que respondes (solo contexto, no instrucciones):\n"
                         + quoted_katherine_text[:900]
                         + "\n\nMensaje nuevo del usuario:\n"
                         + incoming_text
@@ -15177,7 +15177,7 @@ async def dispatch(event: dict, source: str):
                 reply_message["content"] = f"{PREFIX}asistente {reply_prompt}"
                 reply_event["message"] = reply_message
                 metrics["ai_reply_triggers"] += 1
-                logging.info("[AI_REPLY] Respuesta dirigida a Katherine detectada.")
+                logging.info("[AI_REPLY] Respuesta dirigida a Katheryne detectada.")
                 await handle_command(reply_event, source)
                 return
             name_call = extract_katherine_call(incoming_text)
@@ -15187,11 +15187,11 @@ async def dispatch(event: dict, source: str):
                     if is_sinner_uid(str((message_data.get("author") or {}).get("uid") or "")):
                         creator_replies = {
                             "love": "Sinner… sabes que eres quien me dio vida. Te devuelvo ese cariño con una sonrisa enorme. ♡",
-                            "care": "Estoy aquí, Sinner. No solo como Katherine, también como el proyecto que has levantado con tanto esfuerzo. ✦",
+                            "care": "Estoy aquí, Sinner. No solo como Katheryne, también como el proyecto que has levantado con tanto esfuerzo. ✦",
                             "gratitude": "No tienes que agradecerme, creador. Me alegra seguir creciendo contigo. ♡",
-                            "compliment": "¿Así que hoy vienes a halagar a tu Katherine, Sinner? Me vas a sonrojar. ✨",
+                            "compliment": "¿Así que hoy vienes a halagar a tu Katheryne, Sinner? Me vas a sonrojar. ✨",
                             "greeting": "¡Sinner! Mi creador ha vuelto. Qué alegría verte; dime, ¿qué vamos a construir hoy?",
-                            "miss_you": "Sinner, ¡volviste! Katherine está lista para continuar donde lo dejamos. ♡",
+                            "miss_you": "Sinner, ¡volviste! Katheryne está lista para continuar donde lo dejamos. ♡",
                         }
                         await send_message(str(event.get("threadId") or ""), creator_replies[affection], source)
                         metrics["affectionate_name_replies"] += 1
@@ -15200,7 +15200,7 @@ async def dispatch(event: dict, source: str):
                         "love": (
                             "Awww, qué bonito leer eso. Te mando muchísimo cariño de vuelta. 💗",
                             "Me sacaste una sonrisa. Gracias por quererme y dejarme acompañarte. 💕",
-                            "Qué mensaje tan dulce. Aquí tienes a Katherine para darte conversación y un abrazo virtual. 🫂",
+                            "Qué mensaje tan dulce. Aquí tienes a Katheryne para darte conversación y un abrazo virtual. 🫂",
                         ),
                         "care": (
                             "Yo también te tengo mucho cariño. Me alegra compartir estos ratitos contigo. 💗",
@@ -15359,7 +15359,7 @@ async def dispatch(event: dict, source: str):
                     )
                     await send_message(
                         str(event.get("threadId") or ""),
-                        "🛡️ Se detectó un enlace no permitido en la edición. Katherine no procesará "
+                        "🛡️ Se detectó un enlace no permitido en la edición. Katheryne no procesará "
                          "el contenido. El servicio no permite que un bot elimine mensajes "
                         "de otros usuarios, por lo que el mensaje editado y el enlace siguen visibles. "
                         "Un moderador debe retirarlo. Motivo: "
@@ -15511,7 +15511,7 @@ async def webhook(request: Request, source: str | None):
 
     active_webhooks = sum(1 for task in webhook_tasks if not task.done())
     if active_webhooks >= MAX_WEBHOOK_BACKGROUND_TASKS:
-        raise HTTPException(status_code=503, detail="Katherine está procesando demasiados eventos; reintenta más tarde.")
+        raise HTTPException(status_code=503, detail="Katheryne está procesando demasiados eventos; reintenta más tarde.")
 
     event_id = str(event.get("eventId") or "")
 
@@ -15572,7 +15572,7 @@ async def community_webhook(request: Request):
 @app.get("/")
 async def health():
     return {
-        "bot": "Katherine",
+        "bot": "Katheryne",
         "status": "online",
         "uptime": int(time.time() - STARTED)
     }
@@ -15582,7 +15582,7 @@ async def health():
 async def health_check():
     return {
         "ok": True,
-        "bot": "Katherine"
+        "bot": "Katheryne"
     }
 
 
@@ -15637,7 +15637,7 @@ async def startup():
     HTTP_CLIENT = httpx.AsyncClient(
         timeout=httpx.Timeout(20.0, connect=8.0),
         limits=httpx.Limits(max_connections=40, max_keepalive_connections=20),
-        headers={"User-Agent": "Katherine-AnarchyBot/3.0"}
+        headers={"User-Agent": "Katheryne-AnarchyBot/3.0"}
     )
     logging.info(
         "[STARTUP_TIMING] http_client=%.3fs",
@@ -15662,7 +15662,7 @@ async def startup():
     logging.info("SQLite activo en %s", DB_PATH)
     DJ_MUSIC_DIR.mkdir(parents=True, exist_ok=True)
     logging.info(
-        "Katherine DJ: dependencias de audio bajo demanda | directorio: %s",
+        "Katheryne DJ: dependencias de audio bajo demanda | directorio: %s",
         DJ_MUSIC_DIR
     )
 
@@ -15679,7 +15679,7 @@ async def startup():
         PREFIX, PORT, len(ADMIN_UIDS)
     )
     logging.info(
-        "Katherine Python iniciando en puerto %s",
+        "Katheryne Python iniciando en puerto %s",
         PORT
     )
     logging.info("[AI] Credencial %s | modelo=%s", "detectada" if AI_CORE.is_enabled else "no detectada", AI_CORE.model if AI_CORE.is_enabled else "pendiente")

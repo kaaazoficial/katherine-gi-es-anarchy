@@ -165,7 +165,7 @@ def _format_section(title: str, entries: list[tuple[bool, str]]) -> list[str]:
 def _intro_lines(prefix: str) -> list[str]:
     accepted_prefixes = " / ".join(dict.fromkeys((prefix, "!", "-")))
     return [
-        "[CB] ✦ KATHERINE · GUÍA DE COMANDOS ✦",
+        "[CB] ✦ KATHERYNE · GUÍA DE COMANDOS ✦",
         f"[C] Prefijos aceptados: {accepted_prefixes}",
         f"[C] Usa {prefix}menu para consultar la guía completa por secciones.",
         "[C] Catálogo de comandos · Accesos y funciones.",
@@ -266,7 +266,7 @@ def filter_commands_help_text(help_text: str, topic: str | None = None) -> str:
     if category_index is None:
         prefix = _help_prefix(help_text)
         return (
-            "[CB] ✦ KATHERINE · GUÍA DE COMANDOS ✦\n"
+            "[CB] ✦ KATHERYNE · GUÍA DE COMANDOS ✦\n"
             f"[C] Categoría no reconocida. Disponibles: ia, genshin, social, juegos, musica, multimedia, admin.\n"
             f"[C] Ejemplo: {prefix}ayuda genshin."
         )

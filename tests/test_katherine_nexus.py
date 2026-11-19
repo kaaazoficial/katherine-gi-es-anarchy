@@ -294,3 +294,22 @@ def test_every_social_action_is_reachable_with_katherine():
         assert interpret_natural_request(f"Katherine {command} @usuario") == (
             f"{command} @usuario"
         )
+
+
+@pytest.mark.parametrize(("utterance", "expected"), [
+    ("Katheryne, abre el menú interactivo", "menu"),
+    ("Katheryne ayuda", "ayuda"),
+    ("@Katheryne, pausa la música", "dj pausa"),
+    ("Oye Katheryne, investiga novedades de Python", "investigar novedades de python"),
+    ("Oye, @Katheryne: consulta mis puntos", "puntos"),
+    ("Katherine, abre el menú interactivo", "menu"),
+    ("@Katherine, pausa la música", "dj pausa"),
+])
+def test_canonical_katheryne_name_and_legacy_alias_route_commands(utterance, expected):
+    assert interpret_natural_request(utterance) == expected
+
+
+def test_every_catalog_command_is_reachable_with_canonical_katheryne_name():
+    for command in AI_COMMAND_CATALOG:
+        routed = interpret_natural_request(f"Katheryne {command}")
+        assert routed == command, (command, routed)
