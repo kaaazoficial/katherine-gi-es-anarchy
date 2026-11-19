@@ -23,7 +23,9 @@ COMMUNITY_SECRET = "integration-community-secret"
 @pytest.fixture
 def isolated_webhook_state(monkeypatch):
     """Reset process-local webhook state and install non-production secrets."""
-    monkeypatch.setattr(bot_main, "COMMUNITY_SECRET", COMMUNITY_SECRET)
+    monkeypatch.setattr(bot_main, "DEPLOYMENT_ROLE", "community")
+    monkeypatch.setattr(bot_main, "ACTIVE_WEBHOOK_SECRET", COMMUNITY_SECRET)
+    monkeypatch.setattr(bot_main, "ACTIVE_BOT_TOKEN", "integration-community-token")
     monkeypatch.setattr(bot_main, "BOT_IDENTITIES", {})
 
     bot_main.seen_events.clear()
@@ -337,8 +339,8 @@ async def test_webhook_dispatches_signed_command_through_real_dispatch_pipeline(
 async def test_webhook_returns_503_when_no_secret_is_configured(
     isolated_webhook_state, asgi_client, monkeypatch
 ):
-    monkeypatch.setattr(bot_main, "COMMUNITY_SECRET", "")
-    monkeypatch.setattr(bot_main, "COMMUNITY_TOKEN", "")
+    monkeypatch.setattr(bot_main, "ACTIVE_WEBHOOK_SECRET", "")
+    monkeypatch.setattr(bot_main, "ACTIVE_BOT_TOKEN", "")
     event = {
         "eventId": "integration-no-secret-001",
         "type": "thread.added",
@@ -350,7 +352,7 @@ async def test_webhook_returns_503_when_no_secret_is_configured(
         await drain_webhook_tasks()
 
     assert response.status_code == 503
-    assert response.json()["detail"] == "El secreto del webhook comunitario no está configurado."
+    assert response.json()["detail"] == "El secreto del webhook del rol community no está configurado."
 
 
 @pytest.mark.asyncio
@@ -361,4 +363,74 @@ async def test_health_endpoint_is_available_without_starting_external_clients(
         response = await client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "bot": "Katherine"}
+    assert response.json() == {"ok": True, "bot": "Katheryne", "role": "community"}
+
+
+@pytest.mark.asyncio
+async def test_developer_webhook_isolated_from_community_route(
+    isolated_webhook_state, asgi_client, monkeypatch
+):
+    developer_secret = "integration-developer-secret"
+    received = []
+
+    monkeypatch.setattr(bot_main, "DEPLOYMENT_ROLE", "developer")
+    monkeypatch.setattr(bot_main, "ACTIVE_WEBHOOK_SECRET", developer_secret)
+    monkeypatch.setattr(bot_main, "ACTIVE_BOT_TOKEN", "integration-developer-token")
+
+    async def capture_dispatch(event, source):
+        received.append((event, source))
+
+    monkeypatch.setattr(bot_main, "safe_dispatch", capture_dispatch)
+    event = {
+        "eventId": "integration-developer-isolation-001",
+        "type": "thread.added",
+        "threadId": "developer-room",
+    }
+
+    async with asgi_client as client:
+        rejected_community_path = await post_signed(
+            client, "/community", event, developer_secret
+        )
+        rejected_community_secret = await post_signed(
+            client, "/developer", event, COMMUNITY_SECRET
+        )
+        accepted_developer = await post_signed(
+            client, "/developer", event, developer_secret
+        )
+        await drain_webhook_tasks()
+
+    assert rejected_community_path.status_code == 404
+    assert rejected_community_secret.status_code == 401
+    assert accepted_developer.status_code == 200
+    # The dispatcher namespace is process-local; credentials remain role-isolated.
+    assert received == [(event, "community")]
+
+
+@pytest.mark.asyncio
+async def test_developer_root_webhook_uses_developer_secret(
+    isolated_webhook_state, asgi_client, monkeypatch
+):
+    developer_secret = "integration-developer-root-secret"
+    received = []
+
+    monkeypatch.setattr(bot_main, "DEPLOYMENT_ROLE", "developer")
+    monkeypatch.setattr(bot_main, "ACTIVE_WEBHOOK_SECRET", developer_secret)
+
+    async def capture_dispatch(event, source):
+        received.append((event, source))
+
+    monkeypatch.setattr(bot_main, "safe_dispatch", capture_dispatch)
+    event = {
+        "eventId": "integration-developer-root-001",
+        "type": "thread.added",
+        "threadId": "developer-root-room",
+    }
+
+    async with asgi_client as client:
+        rejected = await post_signed(client, "/", event, COMMUNITY_SECRET)
+        accepted = await post_signed(client, "/", event, developer_secret)
+        await drain_webhook_tasks()
+
+    assert rejected.status_code == 401
+    assert accepted.status_code == 200
+    assert received == [(event, "community")]
