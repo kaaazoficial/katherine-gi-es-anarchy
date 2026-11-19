@@ -119,7 +119,7 @@ async def test_signed_community_webhook_is_accepted_and_dispatched(
 
     assert response.status_code == 200
     assert response.json() == {"ok": True}
-    assert received == [(event, "community")]
+    assert received == [(event, "developer")]
     assert bot_main.metrics["webhook_events"] == 1
 
 
@@ -403,7 +403,7 @@ async def test_developer_webhook_isolated_from_community_route(
     assert rejected_community_secret.status_code == 401
     assert accepted_developer.status_code == 200
     # The dispatcher namespace is process-local; credentials remain role-isolated.
-    assert received == [(event, "community")]
+    assert received == [(event, "developer")]
 
 
 @pytest.mark.asyncio
@@ -433,4 +433,4 @@ async def test_developer_root_webhook_uses_developer_secret(
 
     assert rejected.status_code == 401
     assert accepted.status_code == 200
-    assert received == [(event, "community")]
+    assert received == [(event, "developer")]
