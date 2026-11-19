@@ -30,7 +30,7 @@ async def test_ensure_voice_room_explains_when_chat_has_no_active_call(monkeypat
             {"threadId": "885", "title": "Otra sala"},
         ]}}
 
-    monkeypatch.setattr(bot_main, "COMMUNITY_TOKEN", "test-community-token")
+    monkeypatch.setattr(bot_main, "ACTIVE_BOT_TOKEN", "test-community-token")
     monkeypatch.setattr(bot_main, "api", fake_api)
     monkeypatch.setattr(
         bot_main,
@@ -55,7 +55,7 @@ async def test_ensure_voice_room_reports_community_bot_access_error(monkeypatch)
             "data": {"anarchy:error": "bot_not_in_community"},
         }
 
-    monkeypatch.setattr(bot_main, "COMMUNITY_TOKEN", "test-community-token")
+    monkeypatch.setattr(bot_main, "ACTIVE_BOT_TOKEN", "test-community-token")
     monkeypatch.setattr(bot_main, "api", fake_api)
 
     ok, message = await bot_main.ensure_voice_room("1393")

@@ -250,16 +250,26 @@ AI_TOOL_SILENT: ContextVar[bool] = ContextVar(
     "katherine_ai_tool_silent", default=False
 )
 # ---------------------------------------------------------------------------
-# IDENTIDAD ÚNICA
-# Katheryne opera exclusivamente con el bot comunitario.
+# IDENTIDAD AISLADA POR SERVICIO
+# Cada despliegue ejecuta una sola identidad y recibe sus propias credenciales.
+# Los nombres internos "community" se conservan como clave de compatibilidad
+# del dispatcher; nunca seleccionan ni comparten credenciales entre servicios.
 # ---------------------------------------------------------------------------
 API = "https://api.anarchyapps.org/bot-api/v1"
 GAME_API = "https://genshin-db-api.vercel.app/api/v5"
 PORT = SETTINGS.port
-# Render requires the web server to listen on every container interface.
 UVICORN_BIND_HOST = os.getenv("UVICORN_BIND_HOST", "0.0.0.0").strip() or "0.0.0.0"
-COMMUNITY_TOKEN = os.getenv("COMMUNITY_BOT_TOKEN", "").strip()
-COMMUNITY_SECRET = os.getenv("COMMUNITY_WEBHOOK_SECRET", "").strip()
+DEPLOYMENT_ROLE = os.getenv("KATHERYNE_DEPLOYMENT", "community").strip().casefold()
+if DEPLOYMENT_ROLE not in {"community", "developer"}:
+    raise RuntimeError("KATHERYNE_DEPLOYMENT debe ser 'community' o 'developer'.")
+
+if DEPLOYMENT_ROLE == "developer":
+    ACTIVE_BOT_TOKEN = os.getenv("DEVELOPER_BOT_TOKEN", "").strip()
+    ACTIVE_WEBHOOK_SECRET = os.getenv("DEVELOPER_WEBHOOK_SECRET", "").strip()
+else:
+    ACTIVE_BOT_TOKEN = os.getenv("COMMUNITY_BOT_TOKEN", "").strip()
+    ACTIVE_WEBHOOK_SECRET = os.getenv("COMMUNITY_WEBHOOK_SECRET", "").strip()
+
 METRICS_TOKEN = os.getenv("PROMETHEUS_METRICS_TOKEN", "").strip()
 PREFIX = SETTINGS.command_prefix
 COMMAND_PREFIXES = tuple(sorted({PREFIX, "!", "-"}, key=len, reverse=True))
@@ -308,10 +318,10 @@ LAST_COMMAND_AT = None
 LAST_COMMAND_NAME = None
 LAST_COMMAND_USER = None
 
-if not COMMUNITY_TOKEN:
-    logging.warning("Falta COMMUNITY_BOT_TOKEN.")
-if not COMMUNITY_SECRET:
-    logging.warning("Falta COMMUNITY_WEBHOOK_SECRET. El webhook comunitario rechazara eventos.")
+if not ACTIVE_BOT_TOKEN:
+    logging.warning("Falta la credencial del bot para el rol %s.", DEPLOYMENT_ROLE)
+if not ACTIVE_WEBHOOK_SECRET:
+    logging.warning("Falta el secreto de webhook para el rol %s.", DEPLOYMENT_ROLE)
 
 @asynccontextmanager
 async def application_lifespan(application: FastAPI):
@@ -337,7 +347,7 @@ app = FastAPI(
 # ---------------------------------------------------------------------------
 DATA_DIR = SETTINGS.data_dir
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-DB_PATH = DATA_DIR / "katherine.sqlite3"
+DB_PATH = DATA_DIR / f"katheryne_{DEPLOYMENT_ROLE}.sqlite3"
 
 
 def db_connect():
@@ -1312,7 +1322,9 @@ TTS_VOICE_OPTIONS = {
 }
 USER_MESSAGE_ACTIVITY = defaultdict(deque)
 USER_SPAM_WARNED_UNTIL = {}
-DJ_MUSIC_DIR = Path(os.getenv("DJ_MUSIC_DIR", "music")).resolve()
+DJ_MUSIC_DIR = Path(
+    os.getenv("DJ_MUSIC_DIR", f"music/{DEPLOYMENT_ROLE}")
+).resolve()
 DJ_AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".oga", ".flac", ".m4a", ".aac", ".opus"}
 DJ_SEARCH_RESULTS: dict[str, dict] = {}
 DJ_SEARCH_RESULTS_MAX_ENTRIES = 256
@@ -1491,8 +1503,8 @@ CURIOSITIES = [
 # FUNCIONES GENERALES
 # ---------------------------------------------------------------------------
 def token_for(source: str = "community") -> str:
-    """Return the sole credential; legacy source labels never select another bot."""
-    return COMMUNITY_TOKEN
+    """Return only this process' credential; source labels cannot cross identities."""
+    return ACTIVE_BOT_TOKEN
 
 
 def format_duration(seconds: float) -> str:
@@ -1803,7 +1815,7 @@ async def build_status_message(source: str, nickname: str, thread_id: str | None
         f"• Python: {sys.version.split()[0]} | PID: {os.getpid()}",
         f"• Cliente HTTP: {'activo' if HTTP_CLIENT is not None and not HTTP_CLIENT.is_closed else 'inactivo'}",
         f"• Directorio de datos: {'escribible' if DATA_DIR.exists() and os.access(DATA_DIR, os.W_OK) else 'no disponible'}",
-        f"• Identidad comunitaria: {'Configurada' if COMMUNITY_TOKEN else 'No configurada'}",
+        f"• Identidad del servicio ({DEPLOYMENT_ROLE}): {'Configurada' if ACTIVE_BOT_TOKEN else 'No configurada'}",
         f"• Chats vinculados al token: {len(thread_ids)}",
         "Los contadores corresponden a este proceso desde su último reinicio."
     ]
@@ -5133,8 +5145,8 @@ async def ensure_voice_room(thread_id: str):
     thread_id = str(thread_id or "").strip()
     if not thread_id:
         return False, "No pude identificar la sala de esta conversación."
-    if not COMMUNITY_TOKEN:
-        return False, "Falta COMMUNITY_BOT_TOKEN en las variables de Render."
+    if not ACTIVE_BOT_TOKEN:
+        return False, f"Falta el token del bot {DEPLOYMENT_ROLE} en las variables de Render."
 
     lock = VOICE_CONNECT_LOCKS.setdefault(thread_id, asyncio.Lock())
     async with lock:
@@ -14147,10 +14159,10 @@ Uso: !enciclopedia <nombre>""",
 
     if command in ("!dj", "!reproducir"):
         dj_source = source
-        if not COMMUNITY_TOKEN:
+        if not ACTIVE_BOT_TOKEN:
             await send_message(
                 thread,
-                "El DJ necesita COMMUNITY_BOT_TOKEN configurado en las variables de Render.",
+                f"El DJ necesita el token del bot {DEPLOYMENT_ROLE} configurado en Render.",
                 dj_source,
                 reply
             )
@@ -15494,20 +15506,22 @@ async def webhook(request: Request, source: str | None):
     event = None
     verified_source = source
 
-    # Una única identidad y un único secreto: el webhook comunitario.
-    if not COMMUNITY_SECRET:
-        logging.warning("[WEBHOOK] Secreto comunitario no configurado en %s.", request.url.path)
+    # Cada instancia valida exclusivamente el secreto de su propio bot.
+    if not ACTIVE_WEBHOOK_SECRET:
+        logging.warning("[WEBHOOK] Secreto no configurado para rol %s.", DEPLOYMENT_ROLE)
         raise HTTPException(
             status_code=503,
-            detail="El secreto del webhook comunitario no está configurado."
+            detail=f"El secreto del webhook del rol {DEPLOYMENT_ROLE} no está configurado."
         )
-    event = verify_webhook(raw, request.headers, COMMUNITY_SECRET)
+    event = verify_webhook(raw, request.headers, ACTIVE_WEBHOOK_SECRET)
     if event is None:
         raise HTTPException(
             status_code=401,
-            detail="Firma inválida para el webhook comunitario."
+            detail=f"Firma inválida para el bot {DEPLOYMENT_ROLE}."
         )
-    verified_source = "community"
+    # El dispatcher conserva su namespace interno; el proceso y las credenciales
+    # ya están aislados por despliegue y no pueden seleccionar al otro bot.
+    verified_source = DEPLOYMENT_ROLE
 
     active_webhooks = sum(1 for task in webhook_tasks if not task.done())
     if active_webhooks >= MAX_WEBHOOK_BACKGROUND_TASKS:
@@ -15556,23 +15570,33 @@ async def webhook(request: Request, source: str | None):
 # ---------------------------------------------------------------------------
 @app.post("/")
 async def main_webhook(request: Request):
-    return await webhook(request, "community")
+    return await webhook(request, DEPLOYMENT_ROLE)
 
 
 @app.post("/webhook")
 async def main_webhook_alias(request: Request):
-    return await webhook(request, "community")
+    return await webhook(request, DEPLOYMENT_ROLE)
 
 
 @app.post("/community")
 async def community_webhook(request: Request):
+    if DEPLOYMENT_ROLE != "community":
+        raise HTTPException(status_code=404, detail="Ruta no disponible.")
     return await webhook(request, "community")
+
+
+@app.post("/developer")
+async def developer_webhook(request: Request):
+    if DEPLOYMENT_ROLE != "developer":
+        raise HTTPException(status_code=404, detail="Ruta no disponible.")
+    return await webhook(request, "developer")
 
 
 @app.get("/")
 async def health():
     return {
         "bot": "Katheryne",
+        "role": DEPLOYMENT_ROLE,
         "status": "online",
         "uptime": int(time.time() - STARTED)
     }
@@ -15582,7 +15606,8 @@ async def health():
 async def health_check():
     return {
         "ok": True,
-        "bot": "Katheryne"
+        "bot": "Katheryne",
+        "role": DEPLOYMENT_ROLE
     }
 
 
@@ -15684,8 +15709,8 @@ async def startup():
     )
     logging.info("[AI] Credencial %s | modelo=%s", "detectada" if AI_CORE.is_enabled else "no detectada", AI_CORE.model if AI_CORE.is_enabled else "pendiente")
     logging.info(
-        "[WEBHOOK] Secreto comunitario configurado=%s",
-        bool(COMMUNITY_SECRET)
+        "[IDENTITY] rol=%s | token_configurado=%s | webhook_secret_configurado=%s",
+        DEPLOYMENT_ROLE, bool(ACTIVE_BOT_TOKEN), bool(ACTIVE_WEBHOOK_SECRET)
     )
 
     async def load_bot_identity(source: str) -> None:
@@ -15714,7 +15739,7 @@ async def startup():
                 me["data"]
             )
 
-    identity_sources = ["community"] if COMMUNITY_TOKEN else []
+    identity_sources = [DEPLOYMENT_ROLE] if ACTIVE_BOT_TOKEN else []
     if identity_sources:
         phase_started_at = time.perf_counter()
         await asyncio.gather(*(load_bot_identity(source) for source in identity_sources))

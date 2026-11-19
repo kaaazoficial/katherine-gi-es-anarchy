@@ -491,7 +491,7 @@ def test_dj_probe_command_is_admin_only_and_does_not_search_for_public_users(mon
         searched.append((args, kwargs))
         return [{"url": "https://archive.org/download/item/song.mp3"}]
 
-    monkeypatch.setattr(katherine, "COMMUNITY_TOKEN", "test-community-token")
+    monkeypatch.setattr(katherine, "ACTIVE_BOT_TOKEN", "test-community-token")
     monkeypatch.setattr(katherine, "is_admin_uid", lambda uid: uid == "admin-uid")
     monkeypatch.setattr(katherine, "record_user_and_chat_activity", lambda *args, **kwargs: None)
     monkeypatch.setattr(katherine, "send_message", fake_send)
@@ -535,7 +535,7 @@ def test_admin_dj_probe_runs_real_catalog_and_playback_flow(monkeypatch):
         playback.append((thread_id, tracks, selected_index))
         return True, "Reproducción iniciada", tracks[0], 0
 
-    monkeypatch.setattr(katherine, "COMMUNITY_TOKEN", "test-community-token")
+    monkeypatch.setattr(katherine, "ACTIVE_BOT_TOKEN", "test-community-token")
     monkeypatch.setattr(katherine, "is_admin_uid", lambda uid: uid == "admin-uid")
     monkeypatch.setattr(katherine, "record_user_and_chat_activity", lambda *args, **kwargs: None)
     monkeypatch.setattr(katherine, "send_message", fake_send)
