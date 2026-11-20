@@ -8,7 +8,7 @@ pytest-asyncio>=1.5.0,<2.0.0
 
 # PCM processing for tests that exercise the mixer without connecting to LiveKit.
 # NumPy 2.5.x requires Python >=3.12; pip resolves the newest compatible release per runtime.
-numpy>=1.26.0,<3.0.0
+numpy>=2.4.6,<3.0.0
 
 # HTTP mocking, property-based tests, coverage and bounded test execution.
 pytest-cov>=7.1.0,<8.0.0
