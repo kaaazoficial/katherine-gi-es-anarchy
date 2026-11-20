@@ -1,21 +1,23 @@
 # Dependencies needed to import Katherine and run isolated tests.
 # Optional audio/media dependencies are intentionally omitted: the bot
 # already treats them as optional imports, and tests do not connect to voice.
-fastapi>=0.115.0
-httpx>=0.27.0
-pytest>=8.0.0
-pytest-asyncio>=0.23
+fastapi>=0.165.0,<1.0.0
+httpx>=0.28.1,<1.0.0
+pytest>=9.2.0,<10.0.0
+pytest-asyncio>=1.5.0,<2.0.0
 
-# Procesamiento PCM puro para probar el mezclador sin conectar a LiveKit.
-numpy>=1.26.0
+# PCM processing for tests that exercise the mixer without connecting to LiveKit.
+# NumPy 2.5.x requires Python >=3.12; pip resolves the newest compatible release per runtime.
+numpy>=1.26.0,<3.0.0
 
 # HTTP mocking, property-based tests, coverage and bounded test execution.
 pytest-cov>=7.1.0,<8.0.0
 respx>=0.23.1,<1.0.0
 hypothesis>=6.170.15,<7.0.0
 pytest-timeout>=2.4.0,<3.0.0
+
 # Imported production modules that are required by the isolated app tests.
-pydantic-settings>=2.16.2,<3.0.0
+pydantic-settings>=2.16.3,<3.0.0
 prometheus-client>=0.26.0,<1.0.0
 rapidfuzz>=3.14.6,<4.0.0
 pyspellchecker>=0.9.1,<1.0.0
